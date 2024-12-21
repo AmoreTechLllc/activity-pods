@@ -48,7 +48,10 @@
     "@types/url-join": "^4.0.1",
     "react-scripts": "^5.0.1",
     "typescript": "^5.2.2",
-    "yalc": "1.0.0-pre.53"
+    "yalc": "1.0.0-pre.53",
+    "eslint-plugin-prettier": "^5.2.1",
+    "prettier": "^3.4.2",
+    "eslint": "^9.17.0"
   },
   "browserslist": [
     ">0.2%",
