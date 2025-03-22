@@ -17,8 +17,7 @@ module.exports = {
       ignore_contact_request: 'Ignorer la demande',
       login: 'Se connecter',
       open_app: "Ouvrir l'appli",
-      install_app: "Installer l'appli",
-      uninstall_app: "Désinstaller l'appli",
+      delete_app: "Supprimer l'appli",
       reject: 'Refuser',
       reject_contact_request: 'Rejeter la demande',
       remove_contact: 'Retirer de mes contacts',
@@ -26,9 +25,12 @@ module.exports = {
       send_message: 'Envoyer un message',
       send_request: 'Envoyer demande',
       signup: "S'inscrire",
+      sign_in: 'Connexion',
       reset_password: 'Mot de passe oublié ?',
+      revoke_access: "Révoquer l'accès",
       set_new_password: 'Definir un nouveau mot de passe',
       undo_ignore_contact: 'Ne plus ignorer',
+      upgrade: 'Mettre à jour',
       select: 'Sélectionner',
       connect: "Accepter l'invitation",
       continue: 'Continuer',
@@ -37,7 +39,10 @@ module.exports = {
       set_default_app: 'Définir appli par défaut',
       view_private_profile: 'Voir votre profil privé',
       view_public_profile: 'Voir votre profil public',
-      create_group: 'Créer un groupe'
+      create_group: 'Créer un groupe',
+      skip_to_main: 'Passer au contenu principal',
+      view_contact_profile: 'Voir le profil de %{name}',
+      edit_profile: 'Modifier votre profil'
     },
     tag: {
       members: 'Contacts',
@@ -86,6 +91,9 @@ module.exports = {
       export_pod:
         'Vous pouvez télécharger toutes les données de votre espace de donnée. Cette action peut prendre un certain temps.'
     },
+    dialog: {
+      app_permissions: "Permissions de l'application"
+    },
     setting: {
       profiles: 'Mes profils',
       profile: '%{smart_count} profil |||| %{smart_count} profils',
@@ -124,8 +132,7 @@ module.exports = {
       share_contact: 'Mon lien de contact'
     },
     block: {
-      contact_requests: 'Nouvelles demandes de contact',
-      g1_account: 'Compte G1'
+      contact_requests: 'Nouvelles demandes de contact'
     },
     input: {
       about_you: 'Quelques mots sur vous',
@@ -145,16 +152,14 @@ module.exports = {
     helper: {
       add_contact:
         "Pour faire une demande de mise en relation, vous devez connaître l'identifiant de la personne (au format @bob@serveur.com).",
+      user_id: "Entrez l'identifiant de la personne que vous souhaitez contacter",
+      about_you: 'Présentez-vous brièvement pour que la personne puisse vous identifier',
       message_profile_show_right:
         'Envoyer un message à %{username} lui donnera le droit de voir votre profil, pour lui permettre de vous répondre.',
       profile_visibility: "Votre profil n'est visible que des personnes que vous avez accepté dans votre réseau",
       share_contact:
         'Pour vous connecter avec une personne que vous connaissez, vous pouvez lui envoyer le lien ci-dessous.',
       location_comment: 'Indications supplémentaires pour aider à trouver ce lieu',
-      g1_tipjar_field:
-        'Pour envoyer de la monnaie libre à cet utilisateur, copiez sa clé publique ci-dessous et utilisez-la dans le logiciel Cesium.',
-      g1_tipjar_input:
-        'La clé publique de votre compte Ğ1. Permet aux autres membres du réseau de facilement vous envoyer de la monnaie libre.',
       login: 'Je me connecte à mon espace personnel',
       signup: 'Je crée mon espace personnel',
       reset_password:
@@ -162,7 +167,7 @@ module.exports = {
       set_new_password: 'Veuillez entrer votre adresse mail et un nouveau mot de passe ci-dessous',
       create_profile:
         'Maintenant que votre compte est créé, veuillez créer votre profil. Celui-ci ne sera visible par défaut que des personnes que vous acceptez dans votre réseau.',
-      authorize_install: "Pour être installée, l'application requiert les autorisations suivantes",
+      authorize_register: "Pour être utilisée, l'application requiert les autorisations suivantes",
       authorize_upgrade:
         "L'application a été mise à jour et requiert maintenant les nouvelles autorisations ci-dessous",
       invite_text_logged_out:
@@ -180,7 +185,11 @@ module.exports = {
       public_profile_view: 'Vous visualisez votre profil public, visible de tout le monde.',
       private_profile_view: 'Vous visualisez votre profil privé, visible seulement de vos contacts.',
       create_group:
-        'Veuillez sélectionner dans la liste ci-dessous le fournisseur que vous souhaitez utiliser pour créer votre groupe'
+        'Veuillez sélectionner dans la liste ci-dessous le fournisseur que vous souhaitez utiliser pour créer votre groupe',
+      cannot_show_permissions_of_offline_app:
+        "L'application étant hors ligne, nous ne pouvons pas vous montrer les autorisations que vous lui avez accordées de manière lisible. Vous pouvez toujours révoquer toutes les autorisations en cliquant sur le bouton ci-dessous.",
+      cannot_add_addresses:
+        "Vous ne pouvez pas ajouter d'adresses car votre hébergeur n'a pas configuré d'access token pour MapBox"
     },
     message: {
       copied_to_clipboard: 'Copié !',
@@ -188,16 +197,17 @@ module.exports = {
       you_participated_to_same_event: 'Vous avez participé à la même rencontre',
       verified_app: 'Application vérifiée',
       verified: 'Vérifiée',
-      no_app_registration: 'Aucune application installée',
+      offline: 'Hors ligne',
+      upgrade_required: 'Mise à jour requise',
+      no_app_registration: 'Aucune application enregistrée',
       connection_successful: 'Vous êtes maintenant connecté !',
       pod_creation_progress: 'Compte en cours de création...',
-      app_installation_progress: 'Installation en cours...',
-      app_upgrade_progress: 'Mise à jour en cours...',
-      app_upgrade_cancel: "Désinstaller l'application ?",
+      app_upgrade_cancel: "Supprimer l'application ?",
       app_upgrade_cancel_description:
-        "Cette application ne peut pas fonctionner si vous ne lui donnez pas les autorisations qu'elle demande. Est-ce que vous souhaitez désinstaller l'application ?",
+        "Cette application ne peut pas fonctionner si vous ne lui donnez pas les autorisations qu'elle demande. Est-ce que vous souhaitez supprimer l'application ?",
       default_app_changed: "L'application par défaut a été changée",
-      backend_offline: 'Le serveur est en panne. Merci de revenir plus tard.'
+      backend_offline: 'Le serveur est en panne. Merci de revenir plus tard.',
+      cannot_display_resource: 'Pour des raisons de sécurité, cette ressource ne peut être affichée ici'
     },
     notification: {
       contact_request_accepted: 'Demande de contact acceptée',
@@ -222,8 +232,11 @@ module.exports = {
       get_settings_error: "Une erreur s'est produite",
       update_settings_error: "Une erreur s'est produite",
       verified_applications_load_failed: 'Impossible de charger la liste des applications vérifiées',
-      app_uninstallation_in_progress: "Désinstallation de l'application en cours...",
-      app_uninstalled: 'Application désinstallée',
+      app_registration_progress: 'Enregistrement en cours...',
+      app_upgrade_progress: 'Mise à jour en cours...',
+      app_removal_in_progress: 'Suppression en cours...',
+      app_upgraded: 'Application mise à jour',
+      app_removed: 'Application supprimée',
       home_address_updated: 'Adresse du domicile mise à jour',
       home_address_deleted: 'Adresse du domicile enlevée',
       send_request_error: "Erreur lors de l'envoi de la demande : %{error}",
@@ -280,6 +293,34 @@ module.exports = {
         title: 'Je choisis avec qui je partage mes données',
         text: 'A tout moment, je sais qui voit mes données. Je peux révoquer les droits.'
       }
+    },
+    titles: {
+      home: 'Bienvenue - %{appName}',
+      login: 'Connexion - %{appName}',
+      signup: 'Inscription - %{appName}',
+      applications: 'Mes applications - %{appName}',
+      settings: 'Paramètres - %{appName}',
+      network: 'Mon réseau - %{appName}',
+      create_group: 'Créer un groupe - %{appName}',
+      group_settings: 'Paramètres du groupe %{groupName} - %{appName}'
+    },
+    placeholder: {
+      user_id: '@utilisateur@serveur.com',
+      about_you: 'Bonjour, je souhaiterais vous ajouter à mon réseau...'
+    },
+    accessibility: {
+      profile_picture_of: 'Photo de profil de %{name}',
+      your_profile_picture: 'Votre photo de profil',
+      copy_invitation_link_button: "Copier le lien d'invitation",
+      skip_link_description:
+        "Ce lien apparaît lorsqu'il reçoit le focus et permet d'accéder directement au contenu principal de la page en sautant la navigation",
+      network_link_description: 'Accéder à la page de votre réseau de contacts',
+      apps_link_description: 'Accéder à la page de gestion de vos applications',
+      data_link_description: 'Accéder à la page de gestion de vos données personnelles',
+      settings_link_description: 'Accéder à la page des paramètres de votre compte',
+      contact_list_profile_picture:
+        "Cette photo apparaît dans la liste de vos contacts et permet d'identifier visuellement %{name}",
+      contact_list_profile_link: 'Cliquez pour accéder au profil détaillé de %{name} et voir toutes ses informations'
     }
   }
 };

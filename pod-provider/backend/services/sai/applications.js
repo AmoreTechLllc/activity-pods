@@ -6,18 +6,36 @@ module.exports = {
   mixins: [ControlledContainerMixin],
   settings: {
     acceptedTypes: ['interop:Application'],
-    description: {
-      labelMap: {
-        en: 'Applications'
-      },
-      labelPredicate: 'interop:applicationName',
-      internal: true
-    }
+    typeIndex: 'private'
   },
   actions: {
     async get(ctx) {
       const { appUri } = ctx.params;
       return await ctx.call('ldp.remote.get', { resourceUri: appUri });
+    },
+    /**
+     * Return the required access needs and special rights of the given application
+     */
+    async getRequirements(ctx) {
+      const { appUri } = ctx.params;
+
+      // Force to get through network, so that we have the latest Access Need Group
+      const app = await ctx.call('ldp.remote.getNetwork', { resourceUri: appUri });
+
+      let accessNeeds = [],
+        specialRights = [];
+      for (const accessNeedGroupUri of arrayOf(app['interop:hasAccessNeedGroup'])) {
+        const accessNeedGroup = await ctx.call('ldp.resource.get', {
+          resourceUri: accessNeedGroupUri,
+          accept: MIME_TYPES.JSON
+        });
+        if (accessNeedGroup['interop:accessNecessity'] === 'interop:AccessRequired') {
+          accessNeeds.push(...arrayOf(accessNeedGroup['interop:hasAccessNeed']));
+          specialRights.push(...arrayOf(accessNeedGroup['apods:hasSpecialRights']));
+        }
+      }
+
+      return { accessNeeds, specialRights };
     },
     async getClassDescription(ctx) {
       const { type, appUri, podOwner } = ctx.params;

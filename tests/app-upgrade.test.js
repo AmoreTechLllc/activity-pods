@@ -1,9 +1,10 @@
+const urlJoin = require('url-join');
 const waitForExpect = require('wait-for-expect');
 const { MIME_TYPES } = require('@semapps/mime-types');
-const { ACTIVITY_TYPES } = require('@semapps/activitypub');
 const { connectPodProvider, clearAllData, installApp, initializeAppServer } = require('./initialize');
 const ExampleAppService = require('./apps/example.app');
 const ExampleAppV2Service = require('./apps/example-v2.app');
+const CONFIG = require('./config');
 
 jest.setTimeout(80000);
 
@@ -101,7 +102,7 @@ describe('Test app upgrade', () => {
 
     expect(accessNeed).toMatchObject({
       type: 'interop:AccessNeed',
-      'apods:registeredClass': 'as:Event',
+      'interop:registeredShapeTree': urlJoin(CONFIG.SHAPE_REPOSITORY_URL, 'shapetrees/as/Event'),
       'interop:accessNecessity': 'interop:AccessRequired'
     });
 
@@ -109,70 +110,13 @@ describe('Test app upgrade', () => {
     expect(accessNeed['interop:accessMode']).toEqual(['acl:Read', 'acl:Write']);
   });
 
-  test('User upgrade but does not accept all required access needs', async () => {
-    await expect(
-      alice.call('activitypub.outbox.post', {
-        collectionUri: alice.outbox,
-        type: 'apods:Upgrade',
-        object: APP_URI,
-        'apods:acceptedAccessNeeds': [],
-        'apods:acceptedSpecialRights': requiredAccessNeedGroup['apods:hasSpecialRights']
-      })
-    ).resolves.not.toThrow();
-
-    await waitForExpect(async () => {
-      const inbox = await alice.call('activitypub.collection.get', {
-        resourceUri: alice.inbox,
-        page: 1
-      });
-
-      expect(inbox?.orderedItems[0]).toMatchObject({
-        type: ACTIVITY_TYPES.REJECT,
-        actor: APP_URI,
-        summary: 'One or more required access needs have not been granted'
-      });
-    });
-  });
-
   test('User upgrade and accept all required access needs', async () => {
     await expect(
-      alice.call('activitypub.outbox.post', {
-        collectionUri: alice.outbox,
-        type: 'apods:Upgrade',
-        object: APP_URI,
-        'apods:acceptedAccessNeeds': requiredAccessNeedGroup['interop:hasAccessNeed'],
-        'apods:acceptedSpecialRights': requiredAccessNeedGroup['apods:hasSpecialRights']
+      alice.call('auth-agent.upgradeApp', {
+        appUri: APP_URI,
+        acceptedAccessNeeds: requiredAccessNeedGroup['interop:hasAccessNeed'],
+        acceptedSpecialRights: requiredAccessNeedGroup['apods:hasSpecialRights']
       })
     ).resolves.not.toThrow();
-
-    await waitForExpect(async () => {
-      const inbox = await alice.call('activitypub.collection.get', {
-        resourceUri: alice.inbox,
-        page: 1
-      });
-
-      expect(inbox?.orderedItems[0]).toMatchObject({
-        type: ACTIVITY_TYPES.ACCEPT,
-        actor: APP_URI
-      });
-    });
-  });
-
-  test('Types are correctly updated in the TypeIndex', async () => {
-    const typeIndex = await alice.call('type-indexes.get', {
-      resourceUri: alice['solid:publicTypeIndex'],
-      accept: MIME_TYPES.JSON
-    });
-
-    // The prefLabel and openEndpoint must have changed
-    expect(typeIndex['solid:hasTypeRegistration']).toContainEqual(
-      expect.objectContaining({
-        'solid:forClass': 'as:Event',
-        'apods:defaultApp': APP_URI,
-        'apods:availableApps': APP_URI,
-        'skos:prefLabel': 'Meetings',
-        'apods:openEndpoint': 'https://example.app/redirect'
-      })
-    );
   });
 });

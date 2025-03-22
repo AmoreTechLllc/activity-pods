@@ -1,12 +1,12 @@
 const urlJoin = require('url-join');
 const { Errors: E } = require('moleculer-web');
 const { arrayOf, hasType, getWebIdFromUri, getParentContainerUri } = require('@semapps/ldp');
-const { ACTIVITY_TYPES, ACTOR_TYPES } = require('@semapps/activitypub');
+const { FULL_ACTIVITY_TYPES, FULL_ACTOR_TYPES } = require('@semapps/activitypub');
 const { MIME_TYPES } = require('@semapps/mime-types');
 
 const DEFAULT_ALLOWED_TYPES = [
-  ...Object.values(ACTOR_TYPES),
-  ...Object.values(ACTIVITY_TYPES),
+  ...Object.values(FULL_ACTOR_TYPES),
+  ...Object.values(FULL_ACTIVITY_TYPES),
   'Collection',
   'OrderedCollection',
   'CollectionPage',
@@ -20,12 +20,18 @@ const DEFAULT_ALLOWED_TYPES = [
 
 // TODO use cache to improve performances
 const getAllowedTypes = async (ctx, appUri, podOwner, accessMode) => {
-  const dataGrants = await ctx.call('data-grants.getForApp', { appUri, podOwner });
+  const dataAuthorizations = await ctx.call('data-authorizations.getForApp', { appUri, podOwner });
 
   let types = [...DEFAULT_ALLOWED_TYPES];
-  for (const dataGrant of dataGrants) {
-    if (arrayOf(dataGrant['interop:accessMode']).includes(accessMode)) {
-      types.push(...arrayOf(dataGrant['apods:registeredClass']));
+  for (const dataAuthorization of dataAuthorizations) {
+    if (arrayOf(dataAuthorization['interop:accessMode']).includes(accessMode)) {
+      const shapeUri = await ctx.call('shape-trees.getShapeUri', {
+        resourceUri: dataAuthorization['interop:registeredShapeTree']
+      });
+      // Binary resources don't have a shape
+      if (shapeUri) {
+        types.push(...(await ctx.call('shacl.getTypes', { resourceUri: shapeUri })));
+      }
     }
   }
 
@@ -131,7 +137,7 @@ const AppControlMiddleware = ({ baseUrl }) => ({
             context: result['@context']
           });
 
-          if (!resourceTypes.some(t => allowedTypes.includes(t))) {
+          if (resourceTypes.length > 0 && !resourceTypes.some(t => allowedTypes.includes(t))) {
             throw new E.ForbiddenError(
               `Some of the resources' types being fetched (${resourceTypes.join(', ')}) are not authorized`
             );
@@ -157,7 +163,7 @@ const AppControlMiddleware = ({ baseUrl }) => ({
           throw new E.ForbiddenError(`Only registered applications may post to the user outbox`);
         }
 
-        const specialRights = await ctx.call('access-grants.getSpecialRights', { appUri, podOwner });
+        const specialRights = await ctx.call('access-authorizations.getSpecialRights', { appUri, podOwner });
         if (!specialRights.includes('apods:PostOutbox')) {
           throw new E.ForbiddenError(`The application has no permission to post to the outbox (apods:PostOutbox)`);
         }
@@ -217,7 +223,7 @@ const AppControlMiddleware = ({ baseUrl }) => ({
           throw new E.ForbiddenError(`Only registered applications may handle ACL groups`);
         }
 
-        const specialRights = await ctx.call('access-grants.getSpecialRights', { appUri, podOwner });
+        const specialRights = await ctx.call('access-authorizations.getSpecialRights', { appUri, podOwner });
         if (!specialRights.includes('apods:CreateWacGroup')) {
           throw new E.ForbiddenError(`The application has no permission to handle ACL groups (apods:CreateWacGroup)`);
         }
@@ -238,7 +244,7 @@ const AppControlMiddleware = ({ baseUrl }) => ({
         if (await ctx.call('app-registrations.isRegistered', { appUri: ctx.meta.webId, podOwner })) {
           const appUri = ctx.meta.webId;
 
-          const specialRights = await ctx.call('access-grants.getSpecialRights', { appUri, podOwner });
+          const specialRights = await ctx.call('access-authorizations.getSpecialRights', { appUri, podOwner });
           if (!specialRights.includes('apods:CreateWacGroup')) {
             throw new E.ForbiddenError(`The application has no permission to handle ACL groups (apods:CreateWacGroup)`);
           }
@@ -265,10 +271,14 @@ const AppControlMiddleware = ({ baseUrl }) => ({
         }
 
         // If the webId is a registered application, check it has the special right
-        if (await ctx.call('app-registrations.isRegistered', { appUri: ctx.meta.webId, podOwner })) {
+        if (
+          ctx.meta.webId !== 'anon' &&
+          ctx.meta.webId !== 'system' &&
+          (await ctx.call('app-registrations.isRegistered', { appUri: ctx.meta.webId, podOwner }))
+        ) {
           const appUri = ctx.meta.webId;
 
-          const specialRights = await ctx.call('access-grants.getSpecialRights', { appUri, podOwner });
+          const specialRights = await ctx.call('access-authorizations.getSpecialRights', { appUri, podOwner });
           if (!specialRights.includes('apods:QuerySparqlEndpoint')) {
             throw new E.ForbiddenError(
               `The application has no permission to query the SPARQL endpoint (apods:QuerySparqlEndpoint)`
@@ -276,6 +286,7 @@ const AppControlMiddleware = ({ baseUrl }) => ({
           }
 
           // Temporarily disable WAC permissions check on public SPARQL endpoint to see how it impacts performances
+          // (In the WebaclMiddleware, for all triplestore actions, we set the webId to "system" if the webId is the Pod owner)
           ctx.meta.webId = podOwner;
         }
 
@@ -297,12 +308,12 @@ const AppControlMiddleware = ({ baseUrl }) => ({
 
           // If the app is trying to get the outbox or inbox, use webId system to improve performances
           if (collectionUri === urlJoin(podOwner, 'outbox')) {
-            const specialRights = await ctx.call('access-grants.getSpecialRights', { appUri, podOwner });
+            const specialRights = await ctx.call('access-authorizations.getSpecialRights', { appUri, podOwner });
             if (specialRights.includes('apods:ReadOutbox')) {
               ctx.params.webId = 'system';
             }
           } else if (collectionUri === urlJoin(podOwner, 'inbox')) {
-            const specialRights = await ctx.call('access-grants.getSpecialRights', { appUri, podOwner });
+            const specialRights = await ctx.call('access-authorizations.getSpecialRights', { appUri, podOwner });
             if (specialRights.includes('apods:ReadInbox')) {
               ctx.params.webId = 'system';
             }

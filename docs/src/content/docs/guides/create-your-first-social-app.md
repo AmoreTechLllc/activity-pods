@@ -29,23 +29,6 @@ rm -rf .git
 git init
 ```
 
-## Setup environment variables
-
-A single environment variable is required: the MapBox access token to autocomplete the location field on the Pod provider frontend.
-
-Fortunately MapBox has a generous free tier with 100,000 requests per month, so you should not need to pay anything. But you still need to get the token. [See this page](https://docs.mapbox.com/help/getting-started/access-tokens/) for more information.
-
-Once you have your access token, copy the `.env` file at the root directory into a `.env.local` file and set it there.
-
-```bash
-cp .env .env.local
-nano .env.local
-```
-
-:::note
-We would like to find an alternative to MapBox so that the Pod provider can be launched without any environment variable. If you have some tips, let us know!
-:::
-
 ## Run the Pod provider
 
 In order to locally run the boilerplate, you need a local Pod provider, because a remote Pod provider will not be able to interact with a local application backend.
@@ -57,6 +40,10 @@ make start
 ```
 
 This will also launch Jena Fuseki (the triplestore used to store semantic data) and Redis, which are needed by the Pod provider and will also be used by the application.
+
+:::warning
+If you are on Windows, please note that you might have to enable host networking on your docker engine to get the pod provider backend expose its port.
+:::
 
 :::note
 An alternative to creating a local Pod provider is to use a tunnel for your boilerplate app like [Ngrok](https://ngrok.com/), [zrok](https://zrok.io/) or [loophole](https://loophole.cloud/docs/guides/expose) so that your application backend is accessible from the web. Feel free to improve this guide if you chose this solution!

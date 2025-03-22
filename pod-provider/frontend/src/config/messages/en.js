@@ -17,8 +17,7 @@ module.exports = {
       ignore_contact_request: 'Ignore contact request',
       login: 'Login with an account',
       open_app: 'Open application',
-      install_app: 'Install application',
-      uninstall_app: 'Uninstall application',
+      delete_app: 'Delete application',
       open: 'Open',
       reject: 'Reject',
       reject_contact_request: 'Reject contact request',
@@ -27,9 +26,12 @@ module.exports = {
       send_message: 'Send message',
       send_request: 'Send request',
       signup: 'Signup',
+      sign_in: 'Log in',
       reset_password: 'Reset password',
+      revoke_access: 'Revoke access',
       set_new_password: 'Set new password',
       undo_ignore_contact: 'No longer ignore',
+      upgrade: 'Upgrade',
       select: 'Select',
       connect: 'Connect',
       continue: 'Continue',
@@ -38,7 +40,10 @@ module.exports = {
       set_default_app: 'Set default app',
       view_private_profile: 'View your private profile',
       view_public_profile: 'View your public profile',
-      create_group: 'Create group'
+      create_group: 'Create group',
+      skip_to_main: 'Skip to main content',
+      view_contact_profile: "View %{name}'s profile",
+      edit_profile: 'Edit your profile'
     },
     tag: {
       members: 'Members',
@@ -80,6 +85,9 @@ module.exports = {
       invite_success: 'Success!',
       delete_pod: 'Delete account',
       export_pod: 'Export all data'
+    },
+    dialog: {
+      app_permissions: 'Application permissions'
     },
     description: {
       delete_pod:
@@ -125,8 +133,7 @@ module.exports = {
       share_contact: 'My contact link'
     },
     block: {
-      contact_requests: 'New contact requests',
-      g1_account: 'G1 account'
+      contact_requests: 'New contact requests'
     },
     input: {
       about_you: 'A few words about you',
@@ -145,21 +152,20 @@ module.exports = {
     },
     helper: {
       add_contact: 'To add an user to your network, you need to know his ID (format: @bob@server.com).',
+      user_id: 'Enter the ID of the person you want to contact',
+      about_you: 'Introduce yourself briefly so the person can identify you',
       message_profile_show_right:
         'Sending a message to %{username} will give him/her the right to see your profile, in order to be able to respond.',
       profile_visibility: 'Your profile is visible only by users you have accepted in your network',
       share_contact: 'To connect with someone you know, you can send them the link below.',
       location_comment: 'Additional information to help find this place',
-      g1_tipjar_field:
-        'To send G1 money to this user, copy his public key below and use it inside the Cesium software.',
-      g1_tipjar_input: 'The public key of your Ğ1 account. This will allow other members to easily send you money.',
       login: 'Sign in to your personal space',
       signup: 'Create your personal space',
       reset_password: 'Enter your email address below and we will send you a link to reset your password',
       set_new_password: 'Please enter your email address and a new password below',
       create_profile:
         'Now that your account is created, please create your profile. By default, your profile will only be visible to the people you accept into your network.',
-      authorize_install: 'To be installed, the app requires the following authorizations',
+      authorize_register: 'To be registered, the app requires the following authorizations',
       authorize_upgrade: 'The app has been updated and now requires the following additional authorizations',
       invite_text_logged_out:
         "A personal data space is in some way similar to an email account; It's decentralized, so you can choose where your personal data is stored. Instead of creating a new account for every new app, you can login to compatible apps using your data space account. Apps then store your data in your data space.",
@@ -175,7 +181,10 @@ module.exports = {
       username_cannot_be_modified: 'The user ID cannot be modified',
       public_profile_view: 'You are viewing your public profile, visible by everyone',
       private_profile_view: 'You are viewing your private profile, visible only by your contacts',
-      create_group: 'Please select on the list below the provider that you wish to use to create your group'
+      create_group: 'Please select on the list below the provider that you wish to use to create your group',
+      cannot_show_permissions_of_offline_app:
+        'The application is offline so we cannot show you the permissions you granted it in a human-readable way. You may still revoke all permissions by clicking on the button below.',
+      cannot_add_addresses: 'You cannot add addresses because your provider did not configure a MapBox access token'
     },
     message: {
       copied_to_clipboard: 'Copied !',
@@ -183,16 +192,17 @@ module.exports = {
       you_participated_to_same_event: 'You participated to the same event',
       verified_app: 'Verified application',
       verified: 'Verified',
-      no_app_registration: 'You have no installed application',
+      offline: 'Offline',
+      upgrade_required: 'Upgrade required',
+      no_app_registration: 'You have no registered application',
       connection_successful: 'You are now connected!',
       pod_creation_progress: 'Your Pod is being created...',
-      app_installation_progress: 'App installation in progress...',
-      app_upgrade_progress: 'App upgrade in progress...',
-      app_upgrade_cancel: 'Uninstall the application ?',
+      app_upgrade_cancel: 'Delete the application ?',
       app_upgrade_cancel_description:
-        "The application cannot work if you don't give it the authorizations it requires. Do you want to uninstall this application ?",
+        "The application cannot work if you don't give it the authorizations it requires. Do you want to remove this application ?",
       default_app_changed: 'The default app has been successfully changed',
-      backend_offline: 'The backend is offline. Please come back later.'
+      backend_offline: 'The backend is offline. Please come back later.',
+      cannot_display_resource: 'For security reasons, this resource cannot be displayed here'
     },
     notification: {
       contact_request_accepted: 'Contact request accepted',
@@ -217,8 +227,11 @@ module.exports = {
       get_settings_error: 'An error occurred',
       update_settings_error: 'An error occurred',
       verified_applications_load_failed: 'Unable to load the list of verified applications',
-      app_uninstallation_in_progress: 'Application uninstallation in progress...',
-      app_uninstalled: 'Application uninstalled',
+      app_registration_progress: 'App registration in progress...',
+      app_upgrade_progress: 'App upgrade in progress...',
+      app_removal_in_progress: 'Application removal in progress...',
+      app_upgraded: 'Application upgraded',
+      app_removed: 'Application removed',
       home_address_updated: 'Home address updated',
       home_address_deleted: 'Home address deleted',
       send_request_error: 'Error while sending the request: %{error}',
@@ -275,6 +288,33 @@ module.exports = {
         title: 'I choose who I share my data with',
         text: 'At any time, I know who sees my data. I can revoke the rights.'
       }
+    },
+    titles: {
+      home: 'Welcome - %{appName}',
+      login: 'Login - %{appName}',
+      signup: 'Sign up - %{appName}',
+      applications: 'My applications - %{appName}',
+      settings: 'Settings - %{appName}',
+      network: 'My network - %{appName}',
+      create_group: 'Create group - %{appName}',
+      group_settings: 'Group settings of %{groupName} - %{appName}'
+    },
+    placeholder: {
+      user_id: '@user@server.com',
+      about_you: 'Hello, I would like to add you to my network...'
+    },
+    accessibility: {
+      profile_picture_of: "%{name}'s profile picture",
+      your_profile_picture: 'Your profile picture',
+      copy_invitation_link_button: 'Copy your invitation link',
+      skip_link_description:
+        'This link appears when focused and allows you to skip directly to the main content of the page, bypassing navigation',
+      network_link_description: 'Access your network contacts page',
+      apps_link_description: 'Access your applications management page',
+      data_link_description: 'Access your personal data management page',
+      settings_link_description: 'Access your account settings page',
+      contact_list_profile_picture: 'This picture appears in your contacts list and helps visually identify %{name}',
+      contact_list_profile_link: "Click to access %{name}'s detailed profile and view all their information"
     }
   }
 };
