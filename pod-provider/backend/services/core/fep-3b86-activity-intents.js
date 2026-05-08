@@ -38,6 +38,10 @@ const INTENT_DEFINITIONS = [
 
 const WORKFLOW_PARAMS = ['on-success', 'on-cancel'];
 const CLOSE_TOKEN = '(close)';
+// Per-parameter byte cap. URLs above ~8KB are routinely rejected by reverse
+// proxies; capping individual values at 4KB keeps the resulting redirect URL
+// well within that bound and prevents memory amplification on the GET path.
+const MAX_PARAM_LENGTH = 4096;
 const SAFE_PARAM_KEYS = new Set([
   ...INTENT_DEFINITIONS.flatMap(d => d.params),
   ...WORKFLOW_PARAMS,
@@ -194,6 +198,7 @@ module.exports = {
       ]);
       for (const [key, value] of Object.entries(raw)) {
         if (typeof value !== 'string') continue;
+        if (value.length > MAX_PARAM_LENGTH) continue;
         if (!SAFE_PARAM_KEYS.has(key)) continue;
         if (!allowed.has(key)) continue;
         out[key] = value;
@@ -255,7 +260,12 @@ function isAbsoluteHttpUrl(value) {
   if (typeof value !== 'string' || value.length === 0) return false;
   try {
     const parsed = new URL(value);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    // Reject userinfo (e.g. https://user:pass@evil.example) — these are a
+    // well-known phishing vector when reflected to a UI that displays the
+    // hostname (FEP-3B86 §6.2 calls out URL handling on workflow params).
+    if (parsed.username !== '' || parsed.password !== '') return false;
+    return true;
   } catch (e) {
     return false;
   }
@@ -263,3 +273,4 @@ function isAbsoluteHttpUrl(value) {
 
 module.exports.INTENT_DEFINITIONS = INTENT_DEFINITIONS;
 module.exports.REL_NS = REL_NS;
+module.exports.MAX_PARAM_LENGTH = MAX_PARAM_LENGTH;

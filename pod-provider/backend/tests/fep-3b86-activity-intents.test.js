@@ -200,9 +200,42 @@ describe('fep-3b86-activity-intents', () => {
     });
   });
 
+  describe('hardening', () => {
+    it('rejects http(s) URLs that include userinfo (phishing guard)', () => {
+      const svc = createInstance();
+      // Both username and password forms must be rejected.
+      const r1 = svc.validateParams({ object: 'https://user@evil.example/' }, { type: 'Follow', params: ['object'] });
+      expect(r1.ok).toBe(false);
+      const r2 = svc.validateParams({ object: 'https://user:pass@evil.example/' }, { type: 'Follow', params: ['object'] });
+      expect(r2.ok).toBe(false);
+    });
+
+    it('drops parameters whose value exceeds MAX_PARAM_LENGTH', () => {
+      const svc = createInstance();
+      const big = 'a'.repeat(serviceDefinition.MAX_PARAM_LENGTH + 1);
+      const intent = serviceDefinition.INTENT_DEFINITIONS.find(d => d.type === 'Create');
+      const out = svc.sanitizeParams({ content: big, name: 'ok' }, intent);
+      expect(out.content).toBeUndefined();
+      expect(out.name).toBe('ok');
+    });
+
+    it('keeps parameters whose value is exactly MAX_PARAM_LENGTH', () => {
+      const svc = createInstance();
+      const exact = 'a'.repeat(serviceDefinition.MAX_PARAM_LENGTH);
+      const intent = serviceDefinition.INTENT_DEFINITIONS.find(d => d.type === 'Create');
+      const out = svc.sanitizeParams({ content: exact }, intent);
+      expect(out.content).toBe(exact);
+    });
+  });
+
   describe('exports', () => {
     it('exports REL_NS for cross-module use', () => {
       expect(serviceDefinition.REL_NS).toBe('https://w3id.org/fep/3b86/');
+    });
+
+    it('exports MAX_PARAM_LENGTH', () => {
+      expect(typeof serviceDefinition.MAX_PARAM_LENGTH).toBe('number');
+      expect(serviceDefinition.MAX_PARAM_LENGTH).toBeGreaterThan(0);
     });
   });
 });
