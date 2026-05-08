@@ -33,6 +33,7 @@ type FilterAction = 'hide' | 'warn' | 'filter';
 type FilterMatchType = 'word' | 'phrase';
 type FilterDuration = 'indefinite' | '12h' | '1d' | '1w' | '1m';
 type SubjectProtocol = 'ap' | 'atproto';
+type ServerPolicySeverity = 'silence' | 'suspend';
 
 type KeywordFilter = LdpResource & {
   pattern: string;
@@ -117,6 +118,12 @@ type MutedAccount = LdpResource & {
 type BlockedAccount = LdpResource & {
   subjectCanonicalId: string;
   subjectProtocol: string;
+};
+
+type ServerPolicy = LdpResource & {
+  serverDomain: string;
+  severity: ServerPolicySeverity;
+  note?: string;
 };
 
 type FollowedHashtag = {
@@ -212,6 +219,22 @@ const PROTOCOL_OPTIONS: Array<{ value: SubjectProtocol; label: string }> = [
   { value: 'ap', label: 'ActivityPub' },
   { value: 'atproto', label: 'ATProto/Bluesky' }
 ];
+
+const SERVER_POLICY_OPTIONS: Array<{ value: ServerPolicySeverity; label: string }> = [
+  { value: 'silence', label: 'Limit server' },
+  { value: 'suspend', label: 'Block server' }
+];
+
+function normalizeServerDomain(input: string) {
+  const trimmed = input.trim().toLowerCase();
+  if (!trimmed) return '';
+  try {
+    const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
+    return url.hostname.toLowerCase();
+  } catch {
+    return trimmed;
+  }
+}
 
 function deriveHashtag(term: string) {
   const cleaned = term.trim().replace(/^#+/, '').replace(/\s+/g, '');
@@ -412,6 +435,7 @@ const ModerationPage = () => {
   const filters = useSection<KeywordFilter>('filters');
   const mutes = useSection<MutedAccount>('mutes');
   const blocks = useSection<BlockedAccount>('blocks');
+  const serverPolicies = useSection<ServerPolicy>('server-policies');
   const preferences = useSection<Preference>('preferences');
 
   const [monthlySummary, setMonthlySummary] = useState<MonthlyModerationSummary | null>(null);
@@ -429,6 +453,9 @@ const ModerationPage = () => {
   const [muteProtocol, setMuteProtocol] = useState<SubjectProtocol>('ap');
   const [blockSubject, setBlockSubject] = useState('');
   const [blockProtocol, setBlockProtocol] = useState<SubjectProtocol>('ap');
+  const [serverDomain, setServerDomain] = useState('');
+  const [serverSeverity, setServerSeverity] = useState<ServerPolicySeverity>('silence');
+  const [serverPolicyNote, setServerPolicyNote] = useState('');
   const [atprotoIdentifier, setAtprotoIdentifier] = useState('');
   const [atprotoPassword, setAtprotoPassword] = useState('');
   const [atprotoPdsUrl, setAtprotoPdsUrl] = useState('');
@@ -640,6 +667,19 @@ const ModerationPage = () => {
     if (blockSubject.trim().length === 0) return;
     await blocks.add({ subjectCanonicalId: blockSubject.trim(), subjectProtocol: blockProtocol });
     setBlockSubject('');
+  };
+
+  const handleAddServerPolicy = async () => {
+    const normalizedDomain = normalizeServerDomain(serverDomain);
+    if (!normalizedDomain) return;
+    await serverPolicies.add({
+      serverDomain: normalizedDomain,
+      severity: serverSeverity,
+      note: serverPolicyNote.trim() || undefined
+    });
+    setServerDomain('');
+    setServerSeverity('silence');
+    setServerPolicyNote('');
   };
 
   const handleFollowHashtag = async () => {
@@ -1785,6 +1825,83 @@ const ModerationPage = () => {
           </Button>
           <Button variant="contained" onClick={handleSendMonthlySummaryNow} disabled={monthlySummarySending}>
             Send now
+          </Button>
+        </Stack>
+      </SectionShell>
+
+      <SectionShell
+        title="Pod User: Server Rules"
+        count={serverPolicies.items.length}
+        loading={serverPolicies.loading}
+        error={serverPolicies.error}
+      >
+        <Typography variant="body2" color="text.secondary" mb={1}>
+          User-owned server rules only affect this Pod owner&apos;s views. Provider-level server blocks and limits still
+          take precedence for federation safety.
+        </Typography>
+        {serverPolicies.loading === false && serverPolicies.items.length === 0 && (
+          <Typography variant="body2" color="text.secondary" mb={1}>
+            No server rules yet.
+          </Typography>
+        )}
+        <List dense disablePadding>
+          {serverPolicies.items.map(item => (
+            <ListItem key={itemUri(item)} divider>
+              <ListItemText
+                primary={item.serverDomain}
+                secondary={`${item.severity === 'suspend' ? 'blocked' : 'limited'}${item.note ? ` | ${item.note}` : ''}`}
+                primaryTypographyProps={{ fontFamily: 'monospace' }}
+              />
+              <ListItemSecondaryAction>
+                <IconButton
+                  edge="end"
+                  size="small"
+                  onClick={() => serverPolicies.remove(itemUri(item))}
+                  aria-label="delete server rule"
+                >
+                  <DeleteIcon fontSize="small" />
+                </IconButton>
+              </ListItemSecondaryAction>
+            </ListItem>
+          ))}
+        </List>
+        <Stack direction={{ xs: 'column', md: 'row' }} spacing={1} mt={2} alignItems={{ xs: 'stretch', md: 'center' }}>
+          <TextField
+            size="small"
+            label="Server domain"
+            value={serverDomain}
+            onChange={e => setServerDomain(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleAddServerPolicy()}
+            placeholder="remote.example"
+            sx={{ flex: 1 }}
+          />
+          <Select
+            size="small"
+            value={serverSeverity}
+            onChange={e => setServerSeverity(e.target.value as ServerPolicySeverity)}
+            sx={{ minWidth: 150 }}
+          >
+            {SERVER_POLICY_OPTIONS.map(option => (
+              <MenuItem key={option.value} value={option.value}>
+                {option.label}
+              </MenuItem>
+            ))}
+          </Select>
+          <TextField
+            size="small"
+            label="Note"
+            value={serverPolicyNote}
+            onChange={e => setServerPolicyNote(e.target.value)}
+            inputProps={{ maxLength: 500 }}
+            sx={{ flex: 1 }}
+          />
+          <Button
+            variant="outlined"
+            startIcon={<AddIcon />}
+            disabled={serverDomain.trim().length === 0 || serverPolicies.saving}
+            onClick={handleAddServerPolicy}
+          >
+            Add
           </Button>
         </Stack>
       </SectionShell>

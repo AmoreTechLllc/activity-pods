@@ -1,4 +1,5 @@
 export type ModerationAction = 'label' | 'warn' | 'filter' | 'block' | 'suspend';
+export type DomainBlockSeverity = 'noop' | 'silence' | 'suspend';
 
 export type ProviderInboxEventType = 'UndoFlag' | 'Accept' | 'Reject' | 'Generic';
 
@@ -24,6 +25,13 @@ export interface ModerationDecision {
   targetActorUri?: string;
   targetAtDid?: string;
   targetHandle?: string;
+  targetDomain?: string;
+  domainBlockSeverity?: DomainBlockSeverity;
+  rejectMedia?: boolean;
+  rejectReports?: boolean;
+  privateComment?: string;
+  publicComment?: string;
+  obfuscate?: boolean;
   sourceCaseId?: string;
   reason?: string;
   protocols?: 'none' | 'ap' | 'at' | 'both';
@@ -350,6 +358,9 @@ export const caseForwardingControl = (entry: ModerationCase): CaseForwardingCont
 export const decisionEnforcementLines = (decision: ModerationDecision) => {
   const lines = [];
 
+  if (decision.domainBlockSeverity) {
+    lines.push(`Mastodon domain severity: ${decision.domainBlockSeverity}`);
+  }
   if (decision.mrfPatched) {
     lines.push('AP subject rule applied');
   }

@@ -38,6 +38,7 @@ import {
   caseTargetLines,
   decisionEnforcementLines,
   describeCaseSource,
+  type DomainBlockSeverity,
   protocolColor,
   type ModerationAction,
   type ModerationCase,
@@ -103,6 +104,12 @@ const ACTIONS: Array<{ value: ModerationAction; label: string }> = [
   { value: 'filter', label: 'Filter' },
   { value: 'block', label: 'Block' },
   { value: 'suspend', label: 'Suspend' }
+];
+
+const DOMAIN_SEVERITIES: Array<{ value: DomainBlockSeverity; label: string; action: ModerationAction }> = [
+  { value: 'noop', label: 'Noop', action: 'label' },
+  { value: 'silence', label: 'Silence / Limit', action: 'filter' },
+  { value: 'suspend', label: 'Suspend', action: 'suspend' }
 ];
 
 const DEFAULT_AT_LABELS = [
@@ -228,6 +235,13 @@ export const ProviderCrossProtocolModerationPage: React.FC = () => {
   const [targetActorUri, setTargetActorUri] = useState('');
   const [targetAtDid, setTargetAtDid] = useState('');
   const [targetHandle, setTargetHandle] = useState('');
+  const [targetDomain, setTargetDomain] = useState('');
+  const [domainBlockSeverity, setDomainBlockSeverity] = useState<DomainBlockSeverity>('silence');
+  const [rejectMedia, setRejectMedia] = useState(false);
+  const [rejectReports, setRejectReports] = useState(false);
+  const [obfuscate, setObfuscate] = useState(false);
+  const [privateComment, setPrivateComment] = useState('');
+  const [publicComment, setPublicComment] = useState('');
   const [sourceCaseId, setSourceCaseId] = useState('');
   const [action, setAction] = useState<ModerationAction>('warn');
   const [labelsInput, setLabelsInput] = useState('');
@@ -354,6 +368,13 @@ export const ProviderCrossProtocolModerationPage: React.FC = () => {
     setTargetActorUri('');
     setTargetAtDid('');
     setTargetHandle('');
+    setTargetDomain('');
+    setDomainBlockSeverity('silence');
+    setRejectMedia(false);
+    setRejectReports(false);
+    setObfuscate(false);
+    setPrivateComment('');
+    setPublicComment('');
     setSourceCaseId('');
     setAction('warn');
     setLabelsInput('');
@@ -364,20 +385,35 @@ export const ProviderCrossProtocolModerationPage: React.FC = () => {
     setError(null);
     setSuccess(null);
 
-    if (!targetWebId.trim() && !targetActorUri.trim() && !targetAtDid.trim() && !targetHandle.trim()) {
-      setError('Provide at least one target: WebID, AP actor URI, AT DID, or handle');
+    if (
+      !targetWebId.trim() &&
+      !targetActorUri.trim() &&
+      !targetAtDid.trim() &&
+      !targetHandle.trim() &&
+      !targetDomain.trim()
+    ) {
+      setError('Provide at least one target: WebID, AP actor URI, AT DID, handle, or server domain');
       return;
     }
 
     setSubmitting(true);
     try {
+      const hasDomainTarget = Boolean(targetDomain.trim());
+      const domainAction = DOMAIN_SEVERITIES.find(item => item.value === domainBlockSeverity)?.action || 'filter';
       const response = await dashboardApi.applyModerationDecision({
-        targetWebId: targetWebId.trim() || undefined,
-        targetActorUri: targetActorUri.trim() || undefined,
-        targetAtDid: targetAtDid.trim() || undefined,
-        targetHandle: targetHandle.trim() || undefined,
+        targetWebId: hasDomainTarget ? undefined : targetWebId.trim() || undefined,
+        targetActorUri: hasDomainTarget ? undefined : targetActorUri.trim() || undefined,
+        targetAtDid: hasDomainTarget ? undefined : targetAtDid.trim() || undefined,
+        targetHandle: hasDomainTarget ? undefined : targetHandle.trim() || undefined,
+        targetDomain: targetDomain.trim() || undefined,
         sourceCaseId: sourceCaseId.trim() || undefined,
-        action,
+        action: hasDomainTarget ? domainAction : action,
+        domainBlockSeverity: hasDomainTarget ? domainBlockSeverity : undefined,
+        rejectMedia: hasDomainTarget ? rejectMedia : undefined,
+        rejectReports: hasDomainTarget ? rejectReports : undefined,
+        obfuscate: hasDomainTarget ? obfuscate : undefined,
+        privateComment: hasDomainTarget ? privateComment.trim() || undefined : undefined,
+        publicComment: hasDomainTarget ? publicComment.trim() || undefined : undefined,
         labels: parsedLabels,
         reason: reason.trim() || undefined
       });
@@ -686,7 +722,9 @@ export const ProviderCrossProtocolModerationPage: React.FC = () => {
               <Alert severity="info" sx={{ fontSize: '0.8rem' }}>
                 <strong>Protocol targeting:</strong> supplying an AP actor URI or WebID enforces via ActivityPub (MRF
                 rule). Supplying an AT DID or handle enforces via AT Protocol (signed label + suspension if applicable).
-                Both sets of identifiers will apply to both protocols simultaneously.
+                A server domain is submitted as a domain-only provider rule with Mastodon-style severity: Noop records
+                metadata, Silence/Limit keeps Pod delivery while suppressing public surfacing, and Suspend rejects
+                inbound delivery.
               </Alert>
               <TextField
                 label="Target WebID"
@@ -716,6 +754,66 @@ export const ProviderCrossProtocolModerationPage: React.FC = () => {
                 placeholder="alice.bsky.social"
                 fullWidth
               />
+              <TextField
+                label="Target server domain"
+                value={targetDomain}
+                onChange={e => setTargetDomain(e.target.value)}
+                placeholder="remote.example"
+                helperText="Use for provider-level Mastodon-compatible server actions. Severity below controls the AP domain rule."
+                fullWidth
+              />
+
+              <FormControl fullWidth>
+                <InputLabel id="domain-severity-label">Server severity</InputLabel>
+                <Select
+                  labelId="domain-severity-label"
+                  label="Server severity"
+                  value={domainBlockSeverity}
+                  onChange={(e: SelectChangeEvent<DomainBlockSeverity>) =>
+                    setDomainBlockSeverity(e.target.value as DomainBlockSeverity)
+                  }
+                  disabled={!targetDomain.trim()}
+                >
+                  {DOMAIN_SEVERITIES.map(item => (
+                    <MenuItem key={item.value} value={item.value}>
+                      {item.label}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+
+              {targetDomain.trim() && (
+                <Stack spacing={1}>
+                  <Stack direction={{ xs: 'column', md: 'row' }} spacing={1}>
+                    <FormControlLabel
+                      control={<Checkbox checked={rejectMedia} onChange={e => setRejectMedia(e.target.checked)} />}
+                      label="Reject media"
+                    />
+                    <FormControlLabel
+                      control={<Checkbox checked={rejectReports} onChange={e => setRejectReports(e.target.checked)} />}
+                      label="Reject reports"
+                    />
+                    <FormControlLabel
+                      control={<Checkbox checked={obfuscate} onChange={e => setObfuscate(e.target.checked)} />}
+                      label="Obfuscate public entry"
+                    />
+                  </Stack>
+                  <TextField
+                    label="Private moderator comment"
+                    value={privateComment}
+                    onChange={e => setPrivateComment(e.target.value)}
+                    inputProps={{ maxLength: 500 }}
+                    fullWidth
+                  />
+                  <TextField
+                    label="Public comment"
+                    value={publicComment}
+                    onChange={e => setPublicComment(e.target.value)}
+                    inputProps={{ maxLength: 500 }}
+                    fullWidth
+                  />
+                </Stack>
+              )}
 
               <FormControl fullWidth>
                 <InputLabel id="moderation-action-label">Action</InputLabel>
@@ -731,6 +829,11 @@ export const ProviderCrossProtocolModerationPage: React.FC = () => {
                     </MenuItem>
                   ))}
                 </Select>
+                {targetDomain.trim() && (
+                  <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+                    Server-domain submissions use the server severity above and ignore account/DID target fields.
+                  </Typography>
+                )}
               </FormControl>
 
               <TextField
@@ -1037,10 +1140,25 @@ export const ProviderCrossProtocolModerationPage: React.FC = () => {
                                 {decision.targetWebId}
                               </Typography>
                             )}
+                            {decision.targetDomain && (
+                              <Typography variant="caption" sx={{ fontFamily: 'monospace' }}>
+                                {decision.targetDomain}
+                              </Typography>
+                            )}
                           </Stack>
                         </TableCell>
                         <TableCell>
-                          <Chip label={decision.action} size="small" variant="outlined" />
+                          <Stack spacing={0.5} alignItems="flex-start">
+                            <Chip label={decision.action} size="small" variant="outlined" />
+                            {decision.domainBlockSeverity && (
+                              <Chip
+                                label={`domain: ${decision.domainBlockSeverity}`}
+                                size="small"
+                                variant="outlined"
+                                color="info"
+                              />
+                            )}
+                          </Stack>
                         </TableCell>
                         <TableCell>
                           <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">

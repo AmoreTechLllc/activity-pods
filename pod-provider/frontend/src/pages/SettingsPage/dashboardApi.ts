@@ -1,19 +1,35 @@
 import urlJoin from 'url-join';
 
-declare const CONFIG: { BACKEND_URL: string };
+declare const CONFIG: { BACKEND_URL: string; DEFAULT_LOCALE?: string };
 
 const BASE = urlJoin(CONFIG.BACKEND_URL, '/api/dashboard');
 
 type UnknownRecord = Record<string, unknown>;
 // Settings pages consume heterogeneous API payloads and refine types at call sites.
 // Keep this transport layer permissive to avoid forcing brittle unions here.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type JsonObject = any;
 
 const asRecord = (value: unknown): UnknownRecord | null =>
   value && typeof value === 'object' ? (value as UnknownRecord) : null;
 
 const asString = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
+
+const requestFailedMessages: Record<string, string> = {
+  en: 'Request failed (%{status})',
+  fr: 'La requête a échoué (%{status})'
+};
+
+function getClientLocale(): string {
+  const configuredLocale = CONFIG.DEFAULT_LOCALE || 'en';
+  const documentLocale = typeof document !== 'undefined' ? document.documentElement.lang : undefined;
+  const browserLocale = typeof navigator !== 'undefined' ? navigator.language : undefined;
+  return (documentLocale || browserLocale || configuredLocale).split('-')[0].toLowerCase();
+}
+
+function requestFailedMessage(status: number): string {
+  const template = requestFailedMessages[getClientLocale()] || requestFailedMessages.en;
+  return template.replace('%{status}', String(status));
+}
 
 function headers() {
   const token = localStorage.getItem('token');
@@ -42,7 +58,7 @@ async function reqWithBase(base: string, path: string, options: RequestInit = {}
     const payload = asRecord(json);
     const errorPayload = asRecord(payload?.error);
     const errorMessage =
-      asString(errorPayload?.message) || asString(payload?.message) || `Request failed (${res.status})`;
+      asString(errorPayload?.message) || asString(payload?.message) || requestFailedMessage(res.status);
     const error: Error & { code?: string; status?: number; details?: unknown; requestId?: string } = new Error(
       errorMessage
     );
@@ -239,6 +255,13 @@ export const dashboardApi = {
     targetActorUri?: string;
     targetAtDid?: string;
     targetHandle?: string;
+    targetDomain?: string;
+    domainBlockSeverity?: 'noop' | 'silence' | 'suspend';
+    rejectMedia?: boolean;
+    rejectReports?: boolean;
+    privateComment?: string;
+    publicComment?: string;
+    obfuscate?: boolean;
     sourceCaseId?: string;
     action: 'label' | 'warn' | 'filter' | 'block' | 'suspend';
     labels?: string[];
