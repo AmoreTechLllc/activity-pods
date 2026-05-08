@@ -12,7 +12,15 @@ const { normalizeHashtag } = require('../../utils/hashtags');
 
 const JSON_LD = 'application/ld+json';
 
-const ALLOWED = new Set(['filters', 'blocks', 'mutes', 'preferences', 'app-consents', 'trust-sources']);
+const ALLOWED = new Set([
+  'filters',
+  'blocks',
+  'mutes',
+  'preferences',
+  'app-consents',
+  'trust-sources',
+  'server-policies'
+]);
 
 const IMMUTABLE_FIELDS = ['@context', '@id', 'id', 'type', '@type', 'createdAt', 'schemaVersion'];
 
@@ -34,6 +42,14 @@ const CONTEXT = {
   expiresAt: 'apods:expiresAt',
   subjectCanonicalId: 'apods:subjectCanonicalId',
   subjectProtocol: 'apods:subjectProtocol',
+  serverDomain: 'apods:serverDomain',
+  severity: 'apods:severity',
+  domainBlockSeverity: 'apods:domainBlockSeverity',
+  rejectMedia: 'apods:rejectMedia',
+  rejectReports: 'apods:rejectReports',
+  privateComment: 'apods:privateComment',
+  publicComment: 'apods:publicComment',
+  obfuscate: 'apods:obfuscate',
   clientId: 'apods:clientId',
   permissions: 'apods:permissions',
   source: 'apods:source',
@@ -58,7 +74,8 @@ const RESOURCE_TYPE_BY_CONTAINER = {
   mutes: 'apods:Mute',
   preferences: 'apods:Preference',
   'app-consents': 'apods:AppConsent',
-  'trust-sources': 'apods:TrustSource'
+  'trust-sources': 'apods:TrustSource',
+  'server-policies': 'apods:ServerPolicy'
 };
 
 const RESOURCE_CLASS_URI_BY_CONTAINER = {
@@ -67,7 +84,8 @@ const RESOURCE_CLASS_URI_BY_CONTAINER = {
   mutes: 'https://activitypods.org/ns/core#Mute',
   preferences: 'https://activitypods.org/ns/core#Preference',
   'app-consents': 'https://activitypods.org/ns/core#AppConsent',
-  'trust-sources': 'https://activitypods.org/ns/core#TrustSource'
+  'trust-sources': 'https://activitypods.org/ns/core#TrustSource',
+  'server-policies': 'https://activitypods.org/ns/core#ServerPolicy'
 };
 
 const MRF_TRACE_QUERY_KEYS = new Set([
@@ -92,6 +110,8 @@ const MODERATION_QUERY_KEYS = new Set([
   'targetAtDid',
   'targetActorUri',
   'targetWebId',
+  'targetDomain',
+  'domainBlockSeverity',
   'status',
   'sourceActorUri',
   'recipientWebId',
@@ -133,6 +153,12 @@ const FEDISEER_PAGE_SIZE = 200;
 const PROVIDER_INBOX_EVENTS_MAX = 2000;
 const PROVIDER_INBOX_RAW_MAX_CHARS = 32 * 1024;
 const PROVIDER_INBOX_EVENT_TYPES = new Set(['UndoFlag', 'Accept', 'Reject', 'Generic']);
+const DOMAIN_BLOCK_SEVERITIES = new Set(['noop', 'silence', 'suspend']);
+const DOMAIN_SEVERITY_TO_ACTION = {
+  noop: 'label',
+  silence: 'filter',
+  suspend: 'suspend'
+};
 
 module.exports = {
   name: 'user-settings-api',
@@ -324,6 +350,8 @@ module.exports = {
           'POST /apps/moderation/blocks': 'user-settings-api.createAppModerationBlock',
           'GET /apps/moderation/mutes': 'user-settings-api.listAppModerationMutes',
           'POST /apps/moderation/mutes': 'user-settings-api.createAppModerationMute',
+          'GET /apps/moderation/server-policies': 'user-settings-api.listAppServerPolicies',
+          'POST /apps/moderation/server-policies': 'user-settings-api.createAppServerPolicy',
           'GET /apps/moderation/filters': 'user-settings-api.listAppModerationFilters',
           'POST /apps/moderation/filters': 'user-settings-api.createAppModerationFilter',
           'PUT /apps/moderation/filters': 'user-settings-api.updateAppModerationFilter',
@@ -776,7 +804,14 @@ module.exports = {
       const input = ctx.params.data || ctx.params || {};
       const allowedActions = new Set(['label', 'warn', 'filter', 'block', 'suspend']);
 
-      const action = typeof input.action === 'string' ? input.action.trim() : '';
+      const requestedDomainBlockSeverity = this.normalizeOptionalDomainBlockSeverity(
+        input.domainBlockSeverity || input.targetDomainSeverity || input.severity
+      );
+      const action = requestedDomainBlockSeverity
+        ? DOMAIN_SEVERITY_TO_ACTION[requestedDomainBlockSeverity]
+        : typeof input.action === 'string'
+          ? input.action.trim()
+          : '';
       if (!allowedActions.has(action)) {
         throw new MoleculerError('Invalid moderation action', 400, 'VALIDATION_ERROR');
       }
@@ -785,11 +820,22 @@ module.exports = {
       const targetActorUri = typeof input.targetActorUri === 'string' ? input.targetActorUri.trim() : undefined;
       let targetAtDid = typeof input.targetAtDid === 'string' ? input.targetAtDid.trim() : undefined;
       const targetHandle = typeof input.targetHandle === 'string' ? input.targetHandle.trim() : undefined;
+      const targetDomain = input.targetDomain
+        ? this.normalizeModerationDomain(input.targetDomain, 'targetDomain')
+        : undefined;
+      const domainBlockSeverity = targetDomain ? requestedDomainBlockSeverity : undefined;
+      const rejectMedia = targetDomain ? this.normalizeOptionalBoolean(input.rejectMedia, 'rejectMedia') : undefined;
+      const rejectReports = targetDomain
+        ? this.normalizeOptionalBoolean(input.rejectReports, 'rejectReports')
+        : undefined;
+      const privateComment = targetDomain ? this.normalizeOptionalTrimmedString(input.privateComment, 500) : undefined;
+      const publicComment = targetDomain ? this.normalizeOptionalTrimmedString(input.publicComment, 500) : undefined;
+      const obfuscate = targetDomain ? this.normalizeOptionalBoolean(input.obfuscate, 'obfuscate') : undefined;
       const sourceCaseId = typeof input.sourceCaseId === 'string' ? input.sourceCaseId.trim() : undefined;
 
-      if (!targetWebId && !targetActorUri && !targetAtDid && !targetHandle) {
+      if (!targetWebId && !targetActorUri && !targetAtDid && !targetHandle && !targetDomain) {
         throw new MoleculerError(
-          'targetWebId, targetActorUri, targetAtDid, or targetHandle is required',
+          'targetWebId, targetActorUri, targetAtDid, targetHandle, or targetDomain is required',
           400,
           'VALIDATION_ERROR'
         );
@@ -825,6 +871,13 @@ module.exports = {
         targetActorUri,
         targetAtDid,
         targetHandle,
+        targetDomain,
+        domainBlockSeverity,
+        rejectMedia,
+        rejectReports,
+        privateComment,
+        publicComment,
+        obfuscate,
         sourceCaseId,
         action,
         labels,
@@ -1970,6 +2023,28 @@ module.exports = {
       );
     },
 
+    async listAppServerPolicies(ctx) {
+      const delegated = await this.requireDelegatedModerationAccess(ctx, 'read:moderation');
+      return { data: await this.listByContainer(ctx, delegated.ownerWebId, 'server-policies') };
+    },
+
+    async createAppServerPolicy(ctx) {
+      const delegated = await this.requireDelegatedModerationAccess(ctx, 'write:moderation');
+
+      return ctx.call(
+        'user-settings-api.create',
+        {
+          container: 'server-policies',
+          data: ctx.params.data || {}
+        },
+        {
+          meta: {
+            webId: delegated.ownerWebId
+          }
+        }
+      );
+    },
+
     async listAppModerationFilters(ctx) {
       const delegated = await this.requireDelegatedModerationAccess(ctx, 'read:moderation');
 
@@ -2504,6 +2579,30 @@ module.exports = {
         throw new MoleculerError(`Value exceeds maximum length (${maxLen})`, 400, 'VALIDATION_ERROR');
       }
       return trimmed;
+    },
+
+    normalizeOptionalBoolean(value, fieldName) {
+      if (value === undefined || value === null || value === '') return undefined;
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === 'true') return true;
+        if (normalized === 'false') return false;
+      }
+      throw new MoleculerError(`${fieldName} must be boolean`, 400, 'VALIDATION_ERROR');
+    },
+
+    normalizeOptionalDomainBlockSeverity(value) {
+      if (value === undefined || value === null || value === '') return undefined;
+      const normalized = String(value).trim().toLowerCase();
+      if (!DOMAIN_BLOCK_SEVERITIES.has(normalized)) {
+        throw new MoleculerError(
+          `domainBlockSeverity must be one of: ${[...DOMAIN_BLOCK_SEVERITIES].join(', ')}`,
+          400,
+          'VALIDATION_ERROR'
+        );
+      }
+      return normalized;
     },
 
     normalizeOptionalIsoTimestamp(value) {
@@ -3305,6 +3404,8 @@ module.exports = {
       const targetAtDid = typeof query.targetAtDid === 'string' ? query.targetAtDid : '';
       const targetActorUri = typeof query.targetActorUri === 'string' ? query.targetActorUri : '';
       const targetWebId = typeof query.targetWebId === 'string' ? query.targetWebId : '';
+      const targetDomain = typeof query.targetDomain === 'string' ? query.targetDomain : '';
+      const domainBlockSeverity = typeof query.domainBlockSeverity === 'string' ? query.domainBlockSeverity : '';
 
       const ordered = [...this._moderationDecisions].reverse().filter(entry => {
         if (!includeRevoked && entry?.revoked) return false;
@@ -3312,6 +3413,8 @@ module.exports = {
         if (targetAtDid && entry?.targetAtDid !== targetAtDid) return false;
         if (targetActorUri && entry?.targetActorUri !== targetActorUri) return false;
         if (targetWebId && entry?.targetWebId !== targetWebId) return false;
+        if (targetDomain && entry?.targetDomain !== targetDomain) return false;
+        if (domainBlockSeverity && entry?.domainBlockSeverity !== domainBlockSeverity) return false;
         return true;
       });
 
@@ -3720,6 +3823,16 @@ module.exports = {
       } catch {
         throw new MoleculerError(`Invalid ${fieldName}`, 400, 'VALIDATION_ERROR');
       }
+    },
+
+    normalizeModerationDomain(value, fieldName = 'domain') {
+      const hostname = this.normalizeDomainLike(value, fieldName);
+      const validHostname = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(hostname);
+      const isIpv4 = /^\d+\.\d+\.\d+\.\d+$/.test(hostname);
+      if (!validHostname || isIpv4 || hostname.startsWith('[')) {
+        throw new MoleculerError(`Invalid ${fieldName}`, 400, 'VALIDATION_ERROR');
+      }
+      return hostname;
     },
 
     normalizeFediseerSourceDomains(values) {

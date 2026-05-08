@@ -6,6 +6,7 @@ const {
   validatePreference,
   validateAppConsent,
   validateTrustSource,
+  validateServerPolicy,
   validateForContainer,
   prepareAppConsent,
   prepareForContainer,
@@ -13,6 +14,7 @@ const {
   FILTER_ACTIONS,
   FILTER_MATCH_TYPES,
   FILTER_DURATIONS,
+  SERVER_POLICY_SEVERITIES,
   CURRENT_SCHEMA_VERSION,
   TRUST_SOURCE_TYPES,
   TRUST_SOURCE_SCOPES
@@ -397,6 +399,39 @@ describe('validateTrustSource', () => {
 });
 
 // ---------------------------------------------------------------------------
+// validateServerPolicy
+// ---------------------------------------------------------------------------
+describe('validateServerPolicy', () => {
+  test('accepts user-owned Mastodon-style server limits and blocks', () => {
+    expect(validateServerPolicy({ serverDomain: 'remote.example', severity: 'silence' })).toBeNull();
+    expect(validateServerPolicy({ serverDomain: 'remote.example', severity: 'suspend' })).toBeNull();
+  });
+
+  test('rejects invalid server policy domains and severities', () => {
+    expect(validateServerPolicy({ serverDomain: '127.0.0.1', severity: 'silence' })).toMatch(/serverDomain/);
+    expect(validateServerPolicy({ serverDomain: 'remote.example', severity: 'filter' })).toMatch(/severity/);
+  });
+
+  test('prepareForContainer normalizes server policy records', () => {
+    const { data, error } = prepareForContainer('server-policies', {
+      serverDomain: 'https://Remote.EXAMPLE/path',
+      severity: 'silence',
+      note: '  personal limit  '
+    });
+
+    expect(error).toBeNull();
+    expect(data.serverDomain).toBe('remote.example');
+    expect(data.severity).toBe('silence');
+    expect(data.note).toBe('personal limit');
+    expect(data.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
+  });
+
+  test('server policy severities stay stable', () => {
+    expect([...SERVER_POLICY_SEVERITIES].sort()).toEqual(['silence', 'suspend']);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // validateForContainer dispatch
 // ---------------------------------------------------------------------------
 describe('validateForContainer', () => {
@@ -436,6 +471,11 @@ describe('validateForContainer', () => {
       })
     ).toBeNull();
     expect(validateForContainer('trust-sources', {})).toMatch(/source/);
+  });
+
+  test('dispatches to validateServerPolicy for server-policies container', () => {
+    expect(validateForContainer('server-policies', { serverDomain: 'remote.example', severity: 'silence' })).toBeNull();
+    expect(validateForContainer('server-policies', {})).toMatch(/serverDomain/);
   });
 
   test('returns null for unknown container (blocked upstream)', () => {
@@ -1033,6 +1073,85 @@ describe('user-settings-api.create validation wiring', () => {
     );
 
     expect(result.data[0].pattern).toBe('token-granted');
+
+    listByContainerSpy.mockRestore();
+  });
+
+  test('listAppServerPolicies allows delegated app with read:moderation token scope', async () => {
+    const listByContainerSpy = jest
+      .spyOn(service, 'listByContainer')
+      .mockImplementation(async (_ctx, _webId, container) => {
+        if (container === 'server-policies') {
+          return [
+            {
+              '@id': 'http://localhost/alice/data/server-policy-1',
+              serverDomain: 'remote.example',
+              severity: 'silence'
+            }
+          ];
+        }
+
+        if (container === 'app-consents') {
+          return [];
+        }
+
+        throw new Error(`Unexpected container ${container}`);
+      });
+
+    const result = await broker.call(
+      'user-settings-api.listAppServerPolicies',
+      {},
+      {
+        meta: {
+          webId: 'https://memory.example/apps/memory',
+          impersonatedUser: 'http://localhost/alice#me',
+          tokenPayload: { scope: 'openid webid read:moderation' }
+        }
+      }
+    );
+
+    expect(result.data[0].serverDomain).toBe('remote.example');
+    expect(result.data[0].severity).toBe('silence');
+
+    listByContainerSpy.mockRestore();
+  });
+
+  test('createAppServerPolicy writes a user-owned server rule with delegated write consent', async () => {
+    const listByContainerSpy = jest
+      .spyOn(service, 'listByContainer')
+      .mockImplementation(async (_ctx, _webId, container) => {
+        if (container === 'app-consents') {
+          return [
+            {
+              '@id': 'http://localhost/alice/data/consent-memory',
+              clientId: 'https://memory.example/apps/memory',
+              permissions: ['read:moderation', 'write:moderation']
+            }
+          ];
+        }
+        return [];
+      });
+
+    await broker.call(
+      'user-settings-api.createAppServerPolicy',
+      {
+        data: {
+          serverDomain: 'https://Remote.EXAMPLE/path',
+          severity: 'suspend'
+        }
+      },
+      {
+        meta: {
+          webId: 'https://memory.example/apps/memory',
+          impersonatedUser: 'http://localhost/alice#me',
+          tokenPayload: { scope: 'openid webid' }
+        }
+      }
+    );
+
+    expect(lastPostedWebId).toBe('http://localhost/alice#me');
+    expect(lastPostedResource.serverDomain).toBe('remote.example');
+    expect(lastPostedResource.severity).toBe('suspend');
 
     listByContainerSpy.mockRestore();
   });

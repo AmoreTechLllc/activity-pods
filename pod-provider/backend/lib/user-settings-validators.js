@@ -30,6 +30,7 @@ const TRUST_SOURCE_SCOPES = new Set([
 const FILTER_ACTIONS = new Set(['hide', 'warn', 'filter']);
 const FILTER_MATCH_TYPES = new Set(['word', 'phrase']);
 const FILTER_DURATIONS = new Set(['indefinite', '12h', '1d', '1w', '1m']);
+const SERVER_POLICY_SEVERITIES = new Set(['silence', 'suspend']);
 
 /**
  * Returns an error message string if validation fails, or null if valid.
@@ -75,6 +76,19 @@ function isDomainPattern(value) {
     typeof value === 'string' &&
     /^(\*\.)?(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(value.trim())
   );
+}
+
+function normalizeDomain(value) {
+  const normalized = normalizeString(value);
+  if (typeof normalized !== 'string' || normalized.length === 0) return normalized;
+  const withoutWildcard = normalized.startsWith('*.') ? normalized.slice(2) : normalized;
+  const urlLike = /^[a-z][a-z0-9+.-]*:\/\//i.test(withoutWildcard) ? withoutWildcard : `https://${withoutWildcard}`;
+  try {
+    const parsed = new URL(urlLike);
+    return parsed.hostname.toLowerCase();
+  } catch {
+    return normalized.toLowerCase();
+  }
 }
 
 function validateSchemaVersion(data) {
@@ -169,6 +183,17 @@ function prepareTrustSource(data) {
   }
 
   return { data: prepared, error: validateTrustSource(prepared) };
+}
+
+function prepareServerPolicy(data) {
+  const prepared = withSchemaVersion({
+    ...(data || {}),
+    serverDomain: normalizeDomain(data?.serverDomain),
+    severity: normalizeString(data?.severity) || 'silence',
+    note: normalizeString(data?.note)
+  });
+
+  return { data: prepared, error: validateServerPolicy(prepared) };
 }
 
 function validateFilter(data) {
@@ -333,13 +358,34 @@ function validateTrustSource(data) {
   return null;
 }
 
+function validateServerPolicy(data) {
+  if (!data) {
+    return 'server policy requires a serverDomain';
+  }
+  const schemaError = validateSchemaVersion(withSchemaVersion(data));
+  if (schemaError) {
+    return schemaError;
+  }
+  if (!isDomainPattern(data.serverDomain)) {
+    return 'server policy serverDomain must be a valid domain name';
+  }
+  if (!SERVER_POLICY_SEVERITIES.has(data.severity)) {
+    return `server policy severity must be one of: ${[...SERVER_POLICY_SEVERITIES].join(', ')}`;
+  }
+  if (data.note !== undefined && (typeof data.note !== 'string' || data.note.length > 500)) {
+    return 'server policy note must be a string no longer than 500 characters';
+  }
+  return null;
+}
+
 const PREPARERS_BY_CONTAINER = {
   filters: prepareFilter,
   mutes: prepareMuteOrBlock,
   blocks: prepareMuteOrBlock,
   preferences: preparePreference,
   'app-consents': prepareAppConsent,
-  'trust-sources': prepareTrustSource
+  'trust-sources': prepareTrustSource,
+  'server-policies': prepareServerPolicy
 };
 
 /**
@@ -363,6 +409,7 @@ module.exports = {
   validatePreference,
   validateAppConsent,
   validateTrustSource,
+  validateServerPolicy,
   validateForContainer,
   prepareAppConsent,
   prepareForContainer,
@@ -370,6 +417,7 @@ module.exports = {
   FILTER_ACTIONS,
   FILTER_MATCH_TYPES,
   FILTER_DURATIONS,
+  SERVER_POLICY_SEVERITIES,
   CURRENT_SCHEMA_VERSION,
   TRUST_SOURCE_TYPES,
   TRUST_SOURCE_SCOPES
