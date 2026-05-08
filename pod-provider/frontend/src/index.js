@@ -1,6 +1,9 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
+import { applyPlatformCapabilities } from './platform/capabilities';
+
+applyPlatformCapabilities();
 
 // If the global CONFIG object is not set, it means the backend is offline
 if (typeof CONFIG !== 'undefined') {
