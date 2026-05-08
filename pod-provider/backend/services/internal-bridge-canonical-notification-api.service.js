@@ -165,6 +165,37 @@ module.exports = {
             deliveredRecipients = await this.deliverToLocalInboxes(ctx, params, localRecipients, actorUri);
             delivered = deliveredRecipients.length > 0;
           }
+
+          // For DirectMessage: track conversation + submit attachments to media pipeline.
+          // Fire-and-forget — delivery already succeeded; these are best-effort side-effects.
+          if (kind === 'DirectMessage' && actorUri && deliveredRecipients.length > 0) {
+            for (const recipientWebId of deliveredRecipients) {
+              const participantUris = [...new Set([actorUri, recipientWebId])];
+              ctx
+                .call('dm.conversations.upsert', {
+                  actorUri: recipientWebId,
+                  participantUris,
+                  timestamp: params.createdAt
+                })
+                .catch(() => {});
+            }
+            const attachments = Array.isArray(params.attachments) ? params.attachments : [];
+            for (const att of attachments) {
+              const url = typeof att?.url === 'string' ? att.url : null;
+              if (url && /^https?:\/\//.test(url)) {
+                for (const recipientWebId of deliveredRecipients) {
+                  ctx
+                    .call('media-pipeline-emitter.submitAttachment', {
+                      url,
+                      ownerId: recipientWebId,
+                      alt: typeof att?.alt === 'string' ? att.alt : null,
+                      isSensitive: !!params.isSensitive
+                    })
+                    .catch(() => {});
+                }
+              }
+            }
+          }
         } catch (err) {
           // Log but don't fail — the sidecar treats non-2xx as an error and won't commit offset
           this.logger.error('[CanonicalNotificationApi] Delivery error', {
@@ -343,12 +374,27 @@ module.exports = {
             }
           }
         } else if (kind === 'DirectMessage') {
-          // Recipient is a CanonicalActorRef describing the intended receiver
+          // Primary recipient
           const recipientRef = payload.recipient;
           if (recipientRef && typeof recipientRef === 'object' && !Array.isArray(recipientRef)) {
             const recipientUri = recipientRef.activityPubActorUri || recipientRef.webId;
-            if (recipientUri && typeof recipientUri === 'string' && this.isHttpUrl(recipientUri)) {
+            if (
+              recipientUri &&
+              typeof recipientUri === 'string' &&
+              this.isHttpUrl(recipientUri) &&
+              recipientUri.length <= MAX_URI_LENGTH
+            ) {
               candidates.add(recipientUri.trim());
+            }
+          }
+          // Additional recipients for group DMs
+          const additionalRecipients = Array.isArray(payload.additionalRecipients) ? payload.additionalRecipients : [];
+          for (const ref of additionalRecipients) {
+            if (ref && typeof ref === 'object' && !Array.isArray(ref)) {
+              const uri = ref.activityPubActorUri || ref.webId;
+              if (uri && typeof uri === 'string' && this.isHttpUrl(uri) && uri.length <= MAX_URI_LENGTH) {
+                candidates.add(uri.trim());
+              }
             }
           }
         }
@@ -502,21 +548,56 @@ module.exports = {
         case 'DirectMessage': {
           const text = typeof payload.text === 'string' ? payload.text : '';
           const noteId = `${baseUrl}/_bridge/canonical/${encodeURIComponent(canonicalIntentId)}#note`;
+
+          const note = {
+            '@context': AS_CONTEXT,
+            id: noteId,
+            type: 'Note',
+            attributedTo: actorUri,
+            to: [recipientWebId],
+            cc: [],
+            content: text.length > 8192 ? text.slice(0, 8192) : text,
+            published: createdAt
+          };
+
+          const inReplyToId = this.extractObjectId(payload.inReplyTo);
+          if (inReplyToId) note.inReplyTo = inReplyToId;
+
+          const quoteId = this.extractObjectId(payload.quoteOf);
+          if (quoteId) {
+            note.quote = quoteId;
+            note.quoteUrl = quoteId;
+          }
+
+          const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+          const apAttachments = attachments
+            .slice(0, 10)
+            .map(att => {
+              const url = typeof att?.url === 'string' ? att.url : null;
+              if (!url) return null;
+              const mimeType = typeof att?.mediaType === 'string' ? att.mediaType : 'application/octet-stream';
+              return {
+                type: mimeType.startsWith('image/')
+                  ? 'Image'
+                  : mimeType.startsWith('video/')
+                    ? 'Video'
+                    : mimeType.startsWith('audio/')
+                      ? 'Audio'
+                      : 'Document',
+                mediaType: mimeType,
+                url,
+                name: typeof att?.alt === 'string' ? att.alt : undefined
+              };
+            })
+            .filter(Boolean);
+          if (apAttachments.length > 0) note.attachment = apAttachments;
+
           return {
             ...base,
             type: 'Create',
             to: [recipientWebId],
             cc: [],
-            object: {
-              '@context': AS_CONTEXT,
-              id: noteId,
-              type: 'Note',
-              attributedTo: actorUri,
-              to: [recipientWebId],
-              cc: [],
-              content: text.length > 8192 ? text.slice(0, 8192) : text,
-              published: createdAt
-            }
+            object: note
           };
         }
 

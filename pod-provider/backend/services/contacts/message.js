@@ -30,12 +30,25 @@ module.exports = {
             webId: emitterUri
           });
         }
+
+        // Track conversation so the recipient appears in @mention autocomplete for future DMs
+        const recipientUris = arrayOf(activity.to).filter(u => /^https?:\/\//.test(u));
+        if (recipientUris.length >= 1) {
+          const participantUris = [...new Set([emitterUri, ...recipientUris])];
+          ctx
+            .call('dm.conversations.upsert', {
+              actorUri: emitterUri,
+              participantUris,
+              timestamp: activity.published
+            })
+            .catch(() => {});
+        }
       },
+
       async onReceive(ctx, activity, recipientUri) {
-        // For now, only send notification for direct messages (not sent through followers list, nor CCed)
-        // Otherwise we may get dozens of messages from Mastodon actors, which should be read on Mastopod feed
+        // Only notify for messages directly addressed to the recipient (not CC/followers-list)
         if (arrayOf(activity.to).includes(recipientUri)) {
-          return await ctx.call('mail-notifications.notify', {
+          await ctx.call('mail-notifications.notify', {
             template: {
               title: {
                 en: `{{#if activity.object.summary}}{{{activity.object.summary}}}{{else}}{{#if emitterProfile.vcard:given-name}}{{{emitterProfile.vcard:given-name}}}{{else}}{{{emitter.name}}}{{/if}} sent you a message{{/if}}`,
@@ -56,6 +69,42 @@ module.exports = {
             activity,
             context: activity.object.id
           });
+        }
+
+        // Track conversation so this sender appears in @mention autocomplete
+        const senderUri =
+          typeof activity.actor === 'string'
+            ? activity.actor
+            : activity.actor && typeof activity.actor === 'object'
+              ? activity.actor.id
+              : null;
+
+        if (senderUri && /^https?:\/\//.test(senderUri)) {
+          const otherRecipients = arrayOf(activity.to).filter(u => u !== recipientUri && /^https?:\/\//.test(u));
+          const participantUris = [...new Set([senderUri, recipientUri, ...otherRecipients])];
+
+          ctx
+            .call('dm.conversations.upsert', {
+              actorUri: recipientUri,
+              participantUris,
+              timestamp: activity.published
+            })
+            .catch(() => {});
+
+          // Submit remote media attachments to the media pipeline for safety/moderation
+          for (const att of arrayOf(activity.object?.attachment || [])) {
+            const url = typeof att === 'string' ? att : att?.url;
+            if (url && /^https?:\/\//.test(url)) {
+              ctx
+                .call('media-pipeline-emitter.submitAttachment', {
+                  url,
+                  ownerId: recipientUri,
+                  alt: att?.name || att?.alt || null,
+                  isSensitive: !!activity.object?.sensitive
+                })
+                .catch(() => {});
+            }
+          }
         }
       }
     }

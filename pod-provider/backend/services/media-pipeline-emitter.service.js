@@ -46,6 +46,57 @@ module.exports = {
     });
   },
 
+  actions: {
+    /**
+     * Submit a remote media URL directly to the media pipeline.
+     * Used for DM attachments whose media lives on a remote server.
+     * The media-pipeline sidecar fetches the URL itself when no
+     * sourceResolver is specified, running the same safety/moderation
+     * pipeline as for locally uploaded files.
+     *
+     * params: { url, ownerId, alt?, isSensitive? }
+     */
+    async submitAttachment(ctx) {
+      const { url, ownerId, alt, isSensitive } = ctx.params ?? {};
+
+      if (!url || typeof url !== 'string' || !/^https?:\/\//.test(url)) {
+        throw new Error('submitAttachment: url must be a valid http(s) URL');
+      }
+      if (!this.settings.enabled || !this.settings.mediaPipelineToken) {
+        return;
+      }
+
+      const body = JSON.stringify({
+        sourceUrl: url,
+        ownerId: ownerId || url,
+        alt: typeof alt === 'string' && alt.trim() ? alt.trim() : undefined,
+        isSensitive: !!isSensitive
+        // No sourceResolver → sidecar falls back to remote fetch via fetchWorker
+      });
+
+      await this.retryWithBackoff(async () => {
+        const response = await fetch(this.settings.mediaPipelineIngressUrl, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${this.settings.mediaPipelineToken}`
+          },
+          body,
+          signal: AbortSignal.timeout(this.settings.requestTimeoutMs)
+        });
+
+        if (response.ok) {
+          this.logger.debug('[MediaPipelineEmitter] Queued remote DM attachment', { url, ownerId });
+          return;
+        }
+
+        const error = new Error(`Media pipeline ingress returned HTTP ${response.status}`);
+        error.retryable = response.status === 429 || response.status >= 500;
+        throw error;
+      });
+    }
+  },
+
   events: {
     'ldp.resource.created': {
       async handler(ctx) {
