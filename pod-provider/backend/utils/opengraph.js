@@ -6,11 +6,15 @@ const { getAttributionDomains, isAuthorizedAttributionDomain } = require('./auth
 
 const USER_AGENT = 'ActivityPods/1.0 (+https://activitypods.org; +bot)';
 const TIMEOUT_MS = 4_000;
+const SAFE_BROWSING_TIMEOUT_MS = 2_500;
 const AUTHOR_ATTRIBUTION_TIMEOUT_MS = 3_000;
 const MAX_READ_BYTES = 50_000;
 const MAX_JSON_READ_BYTES = 100_000;
 const MAX_PREVIEW_AUTHORS = 4;
 const ALLOW_PRIVATE_PREVIEW_FETCHES_ENV = 'ALLOW_PRIVATE_PREVIEW_FETCHES';
+const GOOGLE_SAFE_BROWSING_API_KEY_ENV = 'GOOGLE_SAFE_BROWSING_API_KEY';
+const SAFE_BROWSING_API_KEY_ENV = 'SAFE_BROWSING_API_KEY';
+const SAFE_BROWSING_FAIL_CLOSED_ENV = 'SAFE_BROWSING_FAIL_CLOSED';
 
 const asRecord = value => (value && typeof value === 'object' && !Array.isArray(value) ? value : null);
 
@@ -62,6 +66,54 @@ const isDisallowedPreviewHost = hostname => {
 const isPreviewTargetAllowed = url => {
   if (isPrivatePreviewAllowed()) return true;
   return !isDisallowedPreviewHost(url.hostname);
+};
+
+/**
+ * Google Safe Browsing v5alpha1 lookup.
+ *
+ * Returns true when:
+ *   - no API key is configured (feature disabled), or
+ *   - the URL has zero matching threat entries.
+ *
+ * Returns false when the API reports threats. On API/network errors the
+ * default is fail-open (returns true) so a transient Safe Browsing outage
+ * does not break link previews; set SAFE_BROWSING_FAIL_CLOSED=1 to invert.
+ */
+const passesSafeBrowsing = async targetUrl => {
+  const apiKey =
+    (process.env[GOOGLE_SAFE_BROWSING_API_KEY_ENV] || '').trim() ||
+    (process.env[SAFE_BROWSING_API_KEY_ENV] || '').trim();
+  if (!apiKey) return true;
+
+  const failClosed = /^(1|true|yes)$/i.test(process.env[SAFE_BROWSING_FAIL_CLOSED_ENV] || '');
+  const params = new URLSearchParams();
+  params.append('urls', targetUrl);
+  const endpoint = `https://safebrowsing.googleapis.com/v5alpha1/urls:search?${params.toString()}`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      timeout: SAFE_BROWSING_TIMEOUT_MS,
+      headers: {
+        'x-goog-api-key': apiKey,
+        'User-Agent': USER_AGENT
+      }
+    });
+
+    if (!response.ok) return !failClosed;
+
+    const payload = await response.text();
+    let parsed;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      return !failClosed;
+    }
+    const threats = Array.isArray(parsed && parsed.threats) ? parsed.threats : [];
+    return threats.length === 0;
+  } catch {
+    return !failClosed;
+  }
 };
 
 const readBodyLimited = async (stream, maxBytes) => {
@@ -364,6 +416,7 @@ const fetchOpenGraph = async url => {
   if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') return null;
   if (parsedUrl.username || parsedUrl.password) return null;
   if (!isPreviewTargetAllowed(parsedUrl)) return null;
+  if (!(await passesSafeBrowsing(parsedUrl.toString()))) return null;
 
   try {
     const response = await fetch(parsedUrl.toString(), {
@@ -398,4 +451,4 @@ const unescapeHtml = value =>
     .replace(/&#0*39;/g, "'")
     .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)));
 
-module.exports = { fetchOpenGraph };
+module.exports = { fetchOpenGraph, passesSafeBrowsing };
