@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { Admin, Resource, CustomRoutes, localStorageStore } from 'react-admin';
 import { BrowserRouter, Navigate, Route } from 'react-router-dom';
 import { QueryClient } from 'react-query';
@@ -12,47 +12,49 @@ import * as resources from './resources';
 import Layout from './layout/Layout';
 import theme from './config/theme';
 
-import HomePage from './pages/HomePage';
-import DataPage from './pages/DataPage/DataListPage';
-import DataResourcePage from './pages/DataPage/DataShowPage';
-import SettingsPage from './pages/SettingsPage/SettingsPage';
-import SettingsOwnerDashboardPage from './pages/SettingsPage/SettingsOwnerDashboardPage';
-import SettingsProviderDashboardPage from './pages/SettingsPage/SettingsProviderDashboardPage';
-import SettingsAtprotoLinkPage from './pages/SettingsPage/SettingsAtprotoLinkPage';
-import AdvancedSettingsPage from './pages/SettingsPage/AdvancedSettingsPage';
-import SettingsPasswordPage from './pages/SettingsPage/SettingsPasswordPage';
-import SettingsEmailPage from './pages/SettingsPage/SettingsEmailPage';
-import SettingsExportPage from './pages/SettingsPage/SettingsExportPage';
-import SettingsDeletePage from './pages/SettingsPage/SettingsDeletePage';
-import ProfileCreatePage from './pages/ProfileCreatePage/ProfileCreatePage';
-import AuthorizePage from './pages/AuthorizePage/AuthorizePage';
-import UserPage from './pages/UserPage';
-import RedirectPage from './pages/RedirectPage';
-import InvitePage from './pages/InvitePage/InvitePage';
-import ApplicationsPage from './pages/ApplicationsPage/ApplicationsPage';
-import LoginPage from './pages/LoginPage';
-import NetworkPage from './pages/NetworkPage/NetworkPage';
-import NetworkActorPage from './pages/NetworkPage/NetworkActorPage';
-import NetworkRequestPage from './pages/NetworkPage/NetworkRequestPage';
-import SettingsLocalePage from './pages/SettingsPage/SettingsLocalePage';
-import SettingsProfilesPage from './pages/SettingsPage/ProfilesPage/SettingsProfilesPage';
-import CreateGroupPage from './pages/CreateGroupPage';
-import GroupSettingsPage from './pages/SettingsPage/GroupSettingsPage';
-import PublicProfilePage from './pages/SettingsPage/ProfilesPage/PublicProfilePage';
-import PrivateProfilePage from './pages/SettingsPage/ProfilesPage/PrivateProfilePage';
-import ModerationPage from './pages/SettingsPage/ModerationPage';
-import ModerationListsPage from './pages/SettingsPage/ModerationListsPage';
-import AppPermissionsPage from './pages/SettingsPage/AppPermissionsPage';
-import TrustSourcesPage from './pages/SettingsPage/TrustSourcesPage';
-import MrfControlPage from './pages/SettingsPage/MrfControlPage';
-import MrfTraceViewerPage from './pages/SettingsPage/MrfTraceViewerPage';
-import ProviderAnnouncementsPage from './pages/SettingsPage/ProviderAnnouncementsPage';
-import ProviderInvitationsPage from './pages/SettingsPage/ProviderInvitationsPage';
-import ProviderPodsPage from './pages/SettingsPage/ProviderPodsPage';
-import ProviderAuditLogPage from './pages/SettingsPage/ProviderAuditLogPage';
-import ProviderCrossProtocolModerationPage from './pages/SettingsPage/ProviderCrossProtocolModerationPage';
-import ProviderSpamProtectionPage from './pages/SettingsPage/ProviderSpamProtectionPage';
-import OwnerModerationPage from './pages/SettingsPage/OwnerModerationPage';
+const HomePage = lazy(() => import('./pages/HomePage'));
+const DataPage = lazy(() => import('./pages/DataPage/DataListPage'));
+const DataResourcePage = lazy(() => import('./pages/DataPage/DataShowPage'));
+const SettingsPage = lazy(() => import('./pages/SettingsPage/SettingsPage'));
+const SettingsOwnerDashboardPage = lazy(() => import('./pages/SettingsPage/SettingsOwnerDashboardPage'));
+const SettingsProviderDashboardPage = lazy(() => import('./pages/SettingsPage/SettingsProviderDashboardPage'));
+const SettingsAtprotoLinkPage = lazy(() => import('./pages/SettingsPage/SettingsAtprotoLinkPage'));
+const AdvancedSettingsPage = lazy(() => import('./pages/SettingsPage/AdvancedSettingsPage'));
+const SettingsPasswordPage = lazy(() => import('./pages/SettingsPage/SettingsPasswordPage'));
+const SettingsEmailPage = lazy(() => import('./pages/SettingsPage/SettingsEmailPage'));
+const SettingsExportPage = lazy(() => import('./pages/SettingsPage/SettingsExportPage'));
+const SettingsDeletePage = lazy(() => import('./pages/SettingsPage/SettingsDeletePage'));
+const ProfileCreatePage = lazy(() => import('./pages/ProfileCreatePage/ProfileCreatePage'));
+const AuthorizePage = lazy(() => import('./pages/AuthorizePage/AuthorizePage'));
+const UserPage = lazy(() => import('./pages/UserPage'));
+const RedirectPage = lazy(() => import('./pages/RedirectPage'));
+const InvitePage = lazy(() => import('./pages/InvitePage/InvitePage'));
+const ApplicationsPage = lazy(() => import('./pages/ApplicationsPage/ApplicationsPage'));
+const LoginPage = lazy(() => import('./pages/LoginPage'));
+const NetworkPage = lazy(() => import('./pages/NetworkPage/NetworkPage'));
+const NetworkActorPage = lazy(() => import('./pages/NetworkPage/NetworkActorPage'));
+const NetworkRequestPage = lazy(() => import('./pages/NetworkPage/NetworkRequestPage'));
+const SettingsLocalePage = lazy(() => import('./pages/SettingsPage/SettingsLocalePage'));
+const SettingsProfilesPage = lazy(() => import('./pages/SettingsPage/ProfilesPage/SettingsProfilesPage'));
+const CreateGroupPage = lazy(() => import('./pages/CreateGroupPage'));
+const GroupSettingsPage = lazy(() => import('./pages/SettingsPage/GroupSettingsPage'));
+const PublicProfilePage = lazy(() => import('./pages/SettingsPage/ProfilesPage/PublicProfilePage'));
+const PrivateProfilePage = lazy(() => import('./pages/SettingsPage/ProfilesPage/PrivateProfilePage'));
+const ModerationPage = lazy(() => import('./pages/SettingsPage/ModerationPage'));
+const ModerationListsPage = lazy(() => import('./pages/SettingsPage/ModerationListsPage'));
+const AppPermissionsPage = lazy(() => import('./pages/SettingsPage/AppPermissionsPage'));
+const TrustSourcesPage = lazy(() => import('./pages/SettingsPage/TrustSourcesPage'));
+const MrfControlPage = lazy(() => import('./pages/SettingsPage/MrfControlPage'));
+const MrfTraceViewerPage = lazy(() => import('./pages/SettingsPage/MrfTraceViewerPage'));
+const ProviderAnnouncementsPage = lazy(() => import('./pages/SettingsPage/ProviderAnnouncementsPage'));
+const ProviderInvitationsPage = lazy(() => import('./pages/SettingsPage/ProviderInvitationsPage'));
+const ProviderPodsPage = lazy(() => import('./pages/SettingsPage/ProviderPodsPage'));
+const ProviderAuditLogPage = lazy(() => import('./pages/SettingsPage/ProviderAuditLogPage'));
+const ProviderCrossProtocolModerationPage = lazy(
+  () => import('./pages/SettingsPage/ProviderCrossProtocolModerationPage')
+);
+const ProviderSpamProtectionPage = lazy(() => import('./pages/SettingsPage/ProviderSpamProtectionPage'));
+const OwnerModerationPage = lazy(() => import('./pages/SettingsPage/OwnerModerationPage'));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -67,90 +69,92 @@ const queryClient = new QueryClient({
 
 const App = () => (
   <StyledEngineProvider injectFirst>
-    <BrowserRouter>
-      <Admin
-        title={CONFIG.INSTANCE_NAME}
-        authProvider={authProvider}
-        dataProvider={dataProvider}
-        i18nProvider={i18nProvider}
-        loginPage={LoginPage}
-        layout={Layout}
-        theme={theme}
-        store={localStorageStore()}
-        queryClient={queryClient}
-        disableTelemetry
-      >
-        {Object.entries(resources).map(([key, resource]) => (
-          <Resource key={key} name={key} {...resource.config} />
-        ))}
-        <CustomRoutes noLayout>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/u/:id" element={<UserPage />} />
-          <Route path="/r" element={<RedirectPage />} />
-          <Route path="/initialize" element={<ProfileCreatePage />} />
-          <Route path="/authorize" element={<AuthorizePage />} />
-          <Route path="/invite/:capability" element={<InvitePage />} />
-          <Route path="/groups">
-            <Route path="create" element={<CreateGroupPage />} />
-          </Route>
-        </CustomRoutes>
-        <CustomRoutes>
-          <Route path="/Profile" element={<Navigate to="/settings/profiles" replace />} />
-          <Route path="/profile" element={<Navigate to="/settings/profiles" replace />} />
-          <Route path="/network">
-            <Route index element={<NetworkPage />} />
-            <Route path="request" element={<NetworkRequestPage />} />
-            <Route path=":webfingerId" element={<NetworkActorPage />} />
-          </Route>
-          <Route path="/apps" element={<ApplicationsPage />} />
-          <Route path="/data">
-            <Route index element={<DataPage />} />
-            <Route path=":resourceUri" element={<DataResourcePage />} />
-          </Route>
-          <Route path="/settings">
-            <Route index element={<SettingsPage />} />
-            <Route path="owner" element={<SettingsOwnerDashboardPage />} />
-            <Route path="provider" element={<SettingsProviderDashboardPage />} />
-            <Route path="profiles">
-              <Route index element={<SettingsProfilesPage />} />
-              <Route path="public" element={<PublicProfilePage />} />
-              <Route path="private" element={<PrivateProfilePage />} />
+    <Suspense fallback={null}>
+      <BrowserRouter>
+        <Admin
+          title={CONFIG.INSTANCE_NAME}
+          authProvider={authProvider}
+          dataProvider={dataProvider}
+          i18nProvider={i18nProvider}
+          loginPage={LoginPage}
+          layout={Layout}
+          theme={theme}
+          store={localStorageStore()}
+          queryClient={queryClient}
+          disableTelemetry
+        >
+          {Object.entries(resources).map(([key, resource]) => (
+            <Resource key={key} name={key} {...resource.config} />
+          ))}
+          <CustomRoutes noLayout>
+            <Route path="/" element={<HomePage />} />
+            <Route path="/u/:id" element={<UserPage />} />
+            <Route path="/r" element={<RedirectPage />} />
+            <Route path="/initialize" element={<ProfileCreatePage />} />
+            <Route path="/authorize" element={<AuthorizePage />} />
+            <Route path="/invite/:capability" element={<InvitePage />} />
+            <Route path="/groups">
+              <Route path="create" element={<CreateGroupPage />} />
             </Route>
-            <Route path="email" element={<SettingsEmailPage />} />
-            <Route path="password" element={<SettingsPasswordPage />} />
-            <Route path="atproto-link" element={<SettingsAtprotoLinkPage />} />
-            <Route path="locale" element={<SettingsLocalePage />} />
-            <Route path="advanced" element={<AdvancedSettingsPage />} />
-            <Route path="export" element={<SettingsExportPage />} />
-            <Route path="delete" element={<SettingsDeletePage />} />
-            <Route path="moderation" element={<ModerationListsPage />} />
-            <Route path="moderation/reports" element={<OwnerModerationPage />} />
-            <Route path="moderation/rules" element={<ModerationPage />} />
-            <Route path="apps" element={<AppPermissionsPage />} />
-            <Route path="trust-sources" element={<TrustSourcesPage />} />
-            <Route path="mrf" element={<MrfControlPage />} />
-            <Route path="mrf/:moduleId" element={<MrfControlPage />} />
-            <Route path="mrf/traces" element={<MrfTraceViewerPage />} />
-            <Route path="mrf/traces/:traceId" element={<MrfTraceViewerPage />} />
-            <Route path="provider/announcements" element={<ProviderAnnouncementsPage />} />
-            <Route path="provider/invitations" element={<ProviderInvitationsPage />} />
-            <Route path="provider/pods" element={<ProviderPodsPage />} />
-            <Route path="provider/audit-log" element={<ProviderAuditLogPage />} />
-            <Route path="provider/moderation" element={<ProviderCrossProtocolModerationPage />} />
-            <Route path="provider/spam" element={<ProviderSpamProtectionPage />} />
-          </Route>
-          <Route path="/group/:groupId">
-            <Route path="settings">
-              <Route index element={<GroupSettingsPage />} />
-              <Route path="profile" element={<PublicProfilePage />} />
+          </CustomRoutes>
+          <CustomRoutes>
+            <Route path="/Profile" element={<Navigate to="/settings/profiles" replace />} />
+            <Route path="/profile" element={<Navigate to="/settings/profiles" replace />} />
+            <Route path="/network">
+              <Route index element={<NetworkPage />} />
+              <Route path="request" element={<NetworkRequestPage />} />
+              <Route path=":webfingerId" element={<NetworkActorPage />} />
+            </Route>
+            <Route path="/apps" element={<ApplicationsPage />} />
+            <Route path="/data">
+              <Route index element={<DataPage />} />
+              <Route path=":resourceUri" element={<DataResourcePage />} />
+            </Route>
+            <Route path="/settings">
+              <Route index element={<SettingsPage />} />
+              <Route path="owner" element={<SettingsOwnerDashboardPage />} />
+              <Route path="provider" element={<SettingsProviderDashboardPage />} />
+              <Route path="profiles">
+                <Route index element={<SettingsProfilesPage />} />
+                <Route path="public" element={<PublicProfilePage />} />
+                <Route path="private" element={<PrivateProfilePage />} />
+              </Route>
+              <Route path="email" element={<SettingsEmailPage />} />
+              <Route path="password" element={<SettingsPasswordPage />} />
+              <Route path="atproto-link" element={<SettingsAtprotoLinkPage />} />
+              <Route path="locale" element={<SettingsLocalePage />} />
+              <Route path="advanced" element={<AdvancedSettingsPage />} />
               <Route path="export" element={<SettingsExportPage />} />
               <Route path="delete" element={<SettingsDeletePage />} />
+              <Route path="moderation" element={<ModerationListsPage />} />
+              <Route path="moderation/reports" element={<OwnerModerationPage />} />
+              <Route path="moderation/rules" element={<ModerationPage />} />
+              <Route path="apps" element={<AppPermissionsPage />} />
+              <Route path="trust-sources" element={<TrustSourcesPage />} />
+              <Route path="mrf" element={<MrfControlPage />} />
+              <Route path="mrf/:moduleId" element={<MrfControlPage />} />
+              <Route path="mrf/traces" element={<MrfTraceViewerPage />} />
+              <Route path="mrf/traces/:traceId" element={<MrfTraceViewerPage />} />
+              <Route path="provider/announcements" element={<ProviderAnnouncementsPage />} />
+              <Route path="provider/invitations" element={<ProviderInvitationsPage />} />
+              <Route path="provider/pods" element={<ProviderPodsPage />} />
+              <Route path="provider/audit-log" element={<ProviderAuditLogPage />} />
+              <Route path="provider/moderation" element={<ProviderCrossProtocolModerationPage />} />
+              <Route path="provider/spam" element={<ProviderSpamProtectionPage />} />
             </Route>
-          </Route>
-          <Route path="*" element={<Navigate to="/network" replace />} />
-        </CustomRoutes>
-      </Admin>
-    </BrowserRouter>
+            <Route path="/group/:groupId">
+              <Route path="settings">
+                <Route index element={<GroupSettingsPage />} />
+                <Route path="profile" element={<PublicProfilePage />} />
+                <Route path="export" element={<SettingsExportPage />} />
+                <Route path="delete" element={<SettingsDeletePage />} />
+              </Route>
+            </Route>
+            <Route path="*" element={<Navigate to="/network" replace />} />
+          </CustomRoutes>
+        </Admin>
+      </BrowserRouter>
+    </Suspense>
   </StyledEngineProvider>
 );
 
