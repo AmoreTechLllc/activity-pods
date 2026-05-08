@@ -3,7 +3,7 @@
   "scripts": {
     "dev": "node ./scripts/start-dev.mjs",
     "start": "npm run dev",
-    "build": "react-scripts build",
+    "build": "node ./scripts/build.mjs",
     "test": "react-scripts test --watchAll=false",
     "eject": "react-scripts eject",
     "link-semapps-packages": "yalc link @semapps/activitypub-components @semapps/auth-provider @semapps/date-components @semapps/field-components @semapps/geo-components @semapps/input-components @semapps/list-components @semapps/markdown-components @semapps/semantic-data-provider",
@@ -43,7 +43,7 @@
     "react-helmet": "^6.1.0",
     "react-hook-form": "^7.47.0",
     "react-query": "^3.39.3",
-    "react-router-dom": "^6.17.0",
+    "react-router-dom": "^6.30.3",
     "react-sticky-box": "^2.0.4",
     "speakingurl": "^14.0.1",
     "url-join": "^4.0.1"
@@ -57,6 +57,38 @@
     "react-scripts": "^5.0.1",
     "typescript": "^5.2.2",
     "yalc": "1.0.0-pre.53"
+  },
+  "overrides": {
+    "@remix-run/router": "1.23.2",
+    "@tiptap/core": "2.10.4",
+    "@tiptap/extension-link": "2.10.4",
+    "@tiptap/pm": "2.10.4",
+    "brace-expansion": "1.1.14",
+    "browserslist": "4.28.2",
+    "caniuse-lite": "1.0.30001791",
+    "dompurify": "3.4.2",
+    "linkifyjs": "4.3.2",
+    "lodash": "4.18.1",
+    "markdown-it": "14.1.1",
+    "minimatch": "3.1.5",
+    "react-router": "6.30.3",
+    "yaml": "1.10.3"
+  },
+  "resolutions": {
+    "@remix-run/router": "1.23.2",
+    "@tiptap/core": "2.10.4",
+    "@tiptap/extension-link": "2.10.4",
+    "@tiptap/pm": "2.10.4",
+    "brace-expansion": "1.1.14",
+    "browserslist": "4.28.2",
+    "caniuse-lite": "1.0.30001791",
+    "dompurify": "3.4.2",
+    "linkifyjs": "4.3.2",
+    "lodash": "4.18.1",
+    "markdown-it": "14.1.1",
+    "minimatch": "3.1.5",
+    "react-router": "6.30.3",
+    "yaml": "1.10.3"
   },
   "browserslist": [
     ">0.2%",
