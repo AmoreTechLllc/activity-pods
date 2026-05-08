@@ -56,7 +56,7 @@ const SettingsPasswordPage = () => {
       const data = await listPasskeys(token);
       setPasskeys(Array.isArray(data) ? data : []);
     } catch (error) {
-      notify(error.message || 'Unable to load passkeys.', { type: 'error' });
+      notify(error.message || 'app.notification.passkeys_load_failed', { type: 'error' });
     } finally {
       setPasskeysLoading(false);
     }
@@ -81,17 +81,17 @@ const SettingsPasswordPage = () => {
   const handleRegisterPasskey = async () => {
     const token = localStorage.getItem('token');
     if (!token) {
-      notify('You need to sign in again before registering a passkey.', { type: 'error' });
+      notify('app.notification.passkey_signin_required_register', { type: 'error' });
       return;
     }
 
     setPasskeyBusy(true);
     try {
       await registerPasskey(token);
-      notify('Passkey saved to your account.', { type: 'success' });
+      notify('app.notification.passkey_saved', { type: 'success' });
       await loadPasskeys();
     } catch (error) {
-      notify(error.message || 'Passkey registration failed.', { type: 'error' });
+      notify(error.message || 'app.notification.passkey_registration_failed', { type: 'error' });
     } finally {
       setPasskeyBusy(false);
     }
@@ -100,17 +100,17 @@ const SettingsPasswordPage = () => {
   const handleDeletePasskey = async credentialId => {
     const token = localStorage.getItem('token');
     if (!token) {
-      notify('You need to sign in again before removing a passkey.', { type: 'error' });
+      notify('app.notification.passkey_signin_required_remove', { type: 'error' });
       return;
     }
 
     setPasskeyBusy(true);
     try {
       await deletePasskey(token, credentialId);
-      notify('Passkey removed.', { type: 'success' });
+      notify('app.notification.passkey_removed', { type: 'success' });
       await loadPasskeys();
     } catch (error) {
-      notify(error.message || 'Unable to remove the passkey.', { type: 'error' });
+      notify(error.message || 'app.notification.passkey_remove_failed', { type: 'error' });
     } finally {
       setPasskeyBusy(false);
     }
@@ -161,23 +161,23 @@ const SettingsPasswordPage = () => {
       <Box mt={2}>
         <Card sx={{ p: 3 }}>
           <Typography variant="h6" sx={{ mb: 1 }}>
-            Passkeys
+            {translate('app.message.passkeys_title')}
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Add a passkey so you can sign in without entering your password on this device or another synced device.
+            {translate('app.message.passkeys_description')}
           </Typography>
           <Button variant="contained" onClick={handleRegisterPasskey} disabled={passkeyBusy}>
-            {passkeyBusy ? 'Waiting for passkey…' : 'Add passkey'}
+            {passkeyBusy ? translate('app.message.passkey_waiting') : translate('app.action.add_passkey')}
           </Button>
           <Divider sx={{ my: 3 }} />
           {passkeysLoading ? (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
               <CircularProgress size={18} />
-              <Typography variant="body2">Loading registered passkeys…</Typography>
+              <Typography variant="body2">{translate('app.message.passkeys_loading')}</Typography>
             </Box>
           ) : passkeys.length === 0 ? (
             <Typography variant="body2" color="text.secondary">
-              No passkeys are registered for this account yet.
+              {translate('app.message.passkeys_empty')}
             </Typography>
           ) : (
             <List disablePadding>
@@ -191,30 +191,43 @@ const SettingsPasswordPage = () => {
                       onClick={() => handleDeletePasskey(passkey.credentialId)}
                       disabled={passkeyBusy}
                     >
-                      Remove
+                      {translate('app.action.remove')}
                     </Button>
                   }
                   sx={{ px: 0 }}
                 >
                   <ListItemText
-                    primary={passkey.deviceType === 'multiDevice' ? 'Synced passkey' : 'Device-bound passkey'}
+                    primary={
+                      passkey.deviceType === 'multiDevice'
+                        ? translate('app.message.passkey_synced')
+                        : translate('app.message.passkey_device_bound')
+                    }
                     secondary={
                       <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mt: 0.5 }}>
-                        <Chip size="small" label={passkey.backedUp ? 'Backed up' : 'Not backed up'} />
+                        <Chip
+                          size="small"
+                          label={
+                            passkey.backedUp
+                              ? translate('app.message.passkey_backed_up')
+                              : translate('app.message.passkey_not_backed_up')
+                          }
+                        />
                         <Chip
                           size="small"
                           label={
                             formatTimestamp(passkey.lastUsedAt)
-                              ? `Last used ${formatTimestamp(passkey.lastUsedAt)}`
-                              : 'Not used yet'
+                              ? translate('app.message.passkey_last_used', {
+                                  date: formatTimestamp(passkey.lastUsedAt)
+                                })
+                              : translate('app.message.passkey_not_used_yet')
                           }
                         />
                         <Chip
                           size="small"
                           label={
                             formatTimestamp(passkey.createdAt)
-                              ? `Created ${formatTimestamp(passkey.createdAt)}`
-                              : 'Created time unavailable'
+                              ? translate('app.message.passkey_created', { date: formatTimestamp(passkey.createdAt) })
+                              : translate('app.message.passkey_created_unavailable')
                           }
                         />
                       </Box>

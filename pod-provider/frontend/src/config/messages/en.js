@@ -49,7 +49,9 @@ module.exports = {
       verify_profile_links: 'Verify links',
       skip_to_main: 'Skip to main content',
       view_contact_profile: "View %{name}'s profile",
-      edit_profile: 'Edit your profile'
+      edit_profile: 'Edit your profile',
+      remove: 'Remove',
+      add_passkey: 'Add passkey'
     },
     tag: {
       members: 'Members',
@@ -261,7 +263,21 @@ module.exports = {
         "The application cannot work if you don't give it the authorizations it requires. Do you want to remove this application ?",
       default_app_changed: 'The default app has been successfully changed',
       backend_offline: 'The backend is offline. Please come back later.',
-      cannot_display_resource: 'For security reasons, this resource cannot be displayed here'
+      cannot_display_resource: 'For security reasons, this resource cannot be displayed here',
+      passkeys_title: 'Passkeys',
+      passkeys_description:
+        'Add a passkey so you can sign in without entering your password on this device or another synced device.',
+      passkey_waiting: 'Waiting for passkey...',
+      passkeys_loading: 'Loading registered passkeys...',
+      passkeys_empty: 'No passkeys are registered for this account yet.',
+      passkey_synced: 'Synced passkey',
+      passkey_device_bound: 'Device-bound passkey',
+      passkey_backed_up: 'Backed up',
+      passkey_not_backed_up: 'Not backed up',
+      passkey_last_used: 'Last used %{date}',
+      passkey_not_used_yet: 'Not used yet',
+      passkey_created: 'Created %{date}',
+      passkey_created_unavailable: 'Created time unavailable'
     },
     notification: {
       contact_request_accepted: 'Contact request accepted',
@@ -314,7 +330,15 @@ module.exports = {
       atproto_link_success: 'ATProto account linked successfully',
       atproto_link_password_required: 'Please enter your MyPod.local password to continue',
       atproto_link_start_failed: 'Unable to start ATProto link flow: %{error}',
-      atproto_link_start_failed_generic: 'Unable to start ATProto link flow'
+      atproto_link_start_failed_generic: 'Unable to start ATProto link flow',
+      request_failed: 'Request failed (%{status})',
+      passkeys_load_failed: 'Unable to load passkeys.',
+      passkey_signin_required_register: 'You need to sign in again before registering a passkey.',
+      passkey_signin_required_remove: 'You need to sign in again before removing a passkey.',
+      passkey_saved: 'Passkey saved to your account.',
+      passkey_registration_failed: 'Passkey registration failed.',
+      passkey_removed: 'Passkey removed.',
+      passkey_remove_failed: 'Unable to remove the passkey.'
     },
     user: {
       unknown: 'Unknown',

@@ -48,7 +48,9 @@ module.exports = {
       verify_profile_links: 'Vérifier les liens',
       skip_to_main: 'Passer au contenu principal',
       view_contact_profile: 'Voir le profil de %{name}',
-      edit_profile: 'Modifier votre profil'
+      edit_profile: 'Modifier votre profil',
+      remove: 'Retirer',
+      add_passkey: 'Ajouter une clé d’accès'
     },
     tag: {
       members: 'Contacts',
@@ -268,7 +270,21 @@ module.exports = {
         "Cette application ne peut pas fonctionner si vous ne lui donnez pas les autorisations qu'elle demande. Est-ce que vous souhaitez supprimer l'application ?",
       default_app_changed: "L'application par défaut a été changée",
       backend_offline: 'Le serveur est en panne. Merci de revenir plus tard.',
-      cannot_display_resource: 'Pour des raisons de sécurité, cette ressource ne peut être affichée ici'
+      cannot_display_resource: 'Pour des raisons de sécurité, cette ressource ne peut être affichée ici',
+      passkeys_title: 'Clés d’accès',
+      passkeys_description:
+        'Ajoutez une clé d’accès pour vous connecter sans saisir votre mot de passe sur cet appareil ou un autre appareil synchronisé.',
+      passkey_waiting: 'En attente de la clé d’accès...',
+      passkeys_loading: 'Chargement des clés enregistrées...',
+      passkeys_empty: 'Aucune clé d’accès n’est encore enregistrée pour ce compte.',
+      passkey_synced: 'Clé d’accès synchronisée',
+      passkey_device_bound: 'Clé d’accès liée à l’appareil',
+      passkey_backed_up: 'Sauvegardée',
+      passkey_not_backed_up: 'Non sauvegardée',
+      passkey_last_used: 'Dernière utilisation %{date}',
+      passkey_not_used_yet: 'Jamais utilisée',
+      passkey_created: 'Créée %{date}',
+      passkey_created_unavailable: 'Date de création indisponible'
     },
     notification: {
       contact_request_accepted: 'Demande de contact acceptée',
@@ -321,7 +337,15 @@ module.exports = {
       atproto_link_success: 'Compte ATProto lié avec succès',
       atproto_link_password_required: 'Veuillez entrer votre mot de passe MyPod.local pour continuer',
       atproto_link_start_failed: 'Impossible de démarrer la liaison ATProto : %{error}',
-      atproto_link_start_failed_generic: 'Impossible de démarrer la liaison ATProto'
+      atproto_link_start_failed_generic: 'Impossible de démarrer la liaison ATProto',
+      request_failed: 'La requête a échoué (%{status})',
+      passkeys_load_failed: 'Impossible de charger les clés d’accès.',
+      passkey_signin_required_register: 'Veuillez vous reconnecter avant d’enregistrer une clé d’accès.',
+      passkey_signin_required_remove: 'Veuillez vous reconnecter avant de supprimer une clé d’accès.',
+      passkey_saved: 'Clé d’accès enregistrée sur votre compte.',
+      passkey_registration_failed: 'L’enregistrement de la clé d’accès a échoué.',
+      passkey_removed: 'Clé d’accès supprimée.',
+      passkey_remove_failed: 'Impossible de supprimer la clé d’accès.'
     },
     user: {
       unknown: 'Inconnu',
