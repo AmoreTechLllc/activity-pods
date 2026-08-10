@@ -3,6 +3,7 @@
 const QueueMixin = require('moleculer-bull');
 const { as, sec } = require('@semapps/ontologies');
 const semappsActivityPubPackage = require('@semapps/activitypub/package.json');
+const { buildDeliveryPlanV1 } = require('../utils/activitypub-delivery-planner');
 
 const SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION = '1.1.4';
 const REMOTE_DELIVERY_MODES = new Set(['native', 'external']);
@@ -54,9 +55,12 @@ function loadSemappsActivityPubInternals() {
   );
 }
 
-function createOutboxPostHandler(nativePostHandler) {
+function createOutboxPostHandler(nativePostHandler, { buildDeliveryPlan = buildDeliveryPlanV1 } = {}) {
   if (typeof nativePostHandler !== 'function') {
     throw new TypeError('SemApps outbox post handler must be a function');
+  }
+  if (typeof buildDeliveryPlan !== 'function') {
+    throw new TypeError('ActivityPub delivery plan builder must be a function');
   }
 
   return async function postWithRemoteDeliveryStrategy(ctx) {
@@ -69,13 +73,15 @@ function createOutboxPostHandler(nativePostHandler) {
     if (!this.settings.allowExternalDeliveryPreview) {
       throw new Error(
         'ActivityPub external remote delivery is not yet enabled for production. ' +
-          'APDM Phase 2 only exposes the pre-remotePost strategy seam; durable external handoff is introduced in a later phase.'
+          'APDM Phase 3 exposes authoritative recipient planning only; durable external handoff is introduced in a later phase.'
       );
     }
 
     const capturedRemotePosts = [];
+    let capturedLocalRecipients = [];
     const executionContext = Object.create(this);
     const nativeCreateJob = this.createJob.bind(this);
+    const nativeLocalPost = typeof this.localPost === 'function' ? this.localPost.bind(this) : null;
 
     executionContext.createJob = (queueName, jobId, payload, options) => {
       if (queueName === 'remotePost') {
@@ -91,16 +97,33 @@ function createOutboxPostHandler(nativePostHandler) {
       return nativeCreateJob(queueName, jobId, payload, options);
     };
 
+    if (nativeLocalPost) {
+      executionContext.localPost = (recipients, activity) => {
+        capturedLocalRecipients = Array.isArray(recipients) ? [...recipients] : [];
+        return nativeLocalPost(recipients, activity);
+      };
+    }
+
     const activity = await nativePostHandler.call(executionContext, ctx);
-    const remoteRecipients = [
+    const remoteRecipientUris = [
       ...new Set(capturedRemotePosts.map(job => job.recipientUri).filter(recipientUri => typeof recipientUri === 'string'))
     ];
+    const localRecipientUris = [...new Set(capturedLocalRecipients.filter(recipientUri => typeof recipientUri === 'string'))];
+
+    const deliveryPlan = await buildDeliveryPlan(ctx, {
+      activity,
+      localRecipientUris,
+      remoteRecipientUris,
+      podProvider: this.settings.podProvider
+    });
 
     this.broker.emit(
       REMOTE_DELIVERY_PLANNED_EVENT,
       {
         activity,
-        remoteRecipients,
+        deliveryPlan,
+        remoteRecipients: remoteRecipientUris,
+        localRecipients: localRecipientUris,
         suppressedNativeRemotePostCount: capturedRemotePosts.length,
         deliveryMode: 'external'
       },
@@ -117,7 +140,8 @@ function createOutboxServiceSchema({
   queueServiceUrl,
   remoteDeliveryMode,
   allowExternalDeliveryPreview,
-  internals
+  internals,
+  buildDeliveryPlan
 }) {
   const { OutboxService, FakeQueueMixin } = internals;
   const queueMixin = queueServiceUrl ? QueueMixin(queueServiceUrl) : FakeQueueMixin;
@@ -131,7 +155,7 @@ function createOutboxServiceSchema({
       allowExternalDeliveryPreview
     },
     actions: {
-      post: createOutboxPostHandler(OutboxService.actions.post)
+      post: createOutboxPostHandler(OutboxService.actions.post, { buildDeliveryPlan })
     }
   };
 }
@@ -140,7 +164,8 @@ function createActivityPubServiceWithDeliveryStrategy({
   remoteDeliveryMode = 'native',
   allowExternalDeliveryPreview = false,
   settings = {},
-  internals
+  internals,
+  buildDeliveryPlan
 } = {}) {
   assertSupportedSemappsVersion();
   const normalizedRemoteDeliveryMode = normalizeRemoteDeliveryMode(remoteDeliveryMode);
@@ -209,7 +234,8 @@ function createActivityPubServiceWithDeliveryStrategy({
           queueServiceUrl,
           remoteDeliveryMode: configuredRemoteDeliveryMode,
           allowExternalDeliveryPreview: configuredExternalPreview,
-          internals: resolvedInternals
+          internals: resolvedInternals,
+          buildDeliveryPlan
         })
       );
     },
