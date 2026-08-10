@@ -31,7 +31,7 @@ module.exports = {
   ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW:
     process.env.SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW === 'true',
   ACTIVITYPUB_DELIVERY_HANDOFF_URL:
-    process.env.SIDECAR_DELIVERY_HANDOFF_URL || 'http://fedify-sidecar:8080/handoff/activitypub/delivery-plan',
+    process.env.SIDECAR_DELIVERY_HANDOFF_URL || process.env.SIDECAR_WEBHOOK_URL || 'http://fedify-sidecar:8080/webhook/outbox',
   ACTIVITYPUB_DELIVERY_HANDOFF_TOKEN: process.env.SIDECAR_TOKEN || '',
   ACTIVITYPUB_DELIVERY_HANDOFF_TIMEOUT_MS: Number(process.env.SIDECAR_DELIVERY_HANDOFF_TIMEOUT_MS) || 5000,
   // Redis
