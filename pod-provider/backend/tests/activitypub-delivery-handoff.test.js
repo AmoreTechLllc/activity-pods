@@ -42,13 +42,23 @@ function createSettings() {
 }
 
 describe('APDM Phase 4 durable ActivityPub handoff', () => {
-  test('external durability fails closed without a real queue service URL', () => {
-    expect(() => assertDurableHandoffConfigured({ deliveryHandoffUrl: 'http://sidecar' })).toThrow(
+  test('external durability fails closed without queue, URL, HTTP(S), or token configuration', () => {
+    expect(() => assertDurableHandoffConfigured({ deliveryHandoffUrl: 'http://sidecar', deliveryHandoffToken: 'x' })).toThrow(
       /SEMAPPS_QUEUE_SERVICE_URL/u
     );
-    expect(() => assertDurableHandoffConfigured({ queueServiceUrl: 'redis://queue' })).toThrow(
-      /sidecar durable outbox handoff URL/u
+    expect(() => assertDurableHandoffConfigured({ queueServiceUrl: 'redis://queue', deliveryHandoffToken: 'x' })).toThrow(
+      /handoff URL/u
     );
+    expect(() => assertDurableHandoffConfigured({
+      queueServiceUrl: 'redis://queue',
+      deliveryHandoffUrl: 'ftp://sidecar/outbox',
+      deliveryHandoffToken: 'x'
+    })).toThrow(/HTTP\(S\)/u);
+    expect(() => assertDurableHandoffConfigured({
+      queueServiceUrl: 'redis://queue',
+      deliveryHandoffUrl: 'http://sidecar/outbox',
+      deliveryHandoffToken: ''
+    })).toThrow(/SIDECAR_TOKEN/u);
   });
 
   test('maps authoritative Delivery Plan targets onto the proven sidecar webhook contract', () => {
@@ -109,13 +119,12 @@ describe('APDM Phase 4 durable ActivityPub handoff', () => {
   test('worker treats sidecar 202 acknowledgement as durable acceptance', async () => {
     const plan = createPlan();
     const progress = jest.fn();
-    const fetchImpl = jest.fn(async (_url, options) => ({
+    const fetchImpl = jest.fn(async () => ({
       ok: true,
       status: 202,
       async json() {
         return { accepted: true, intentId: 'sidecar-intent-1', jobCount: 1 };
-      },
-      options
+      }
     }));
     const service = { settings: createSettings() };
 
@@ -128,14 +137,30 @@ describe('APDM Phase 4 durable ActivityPub handoff', () => {
       jobCount: 1
     });
     expect(progress).toHaveBeenCalledWith(100);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [, request] = fetchImpl.mock.calls[0];
     expect(request.headers.Authorization).toBe('Bearer secret');
     expect(request.headers['X-APDM-Intent-Id']).toBe(plan.intentId);
     expect(JSON.parse(request.body).meta.deliveryPlanIntentId).toBe(plan.intentId);
   });
 
-  test('worker throws on non-2xx so Bull retries instead of dropping the handoff', async () => {
+  test('worker rejects a generic 200 even when the body says accepted', async () => {
+    const fetchImpl = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        return { accepted: true, intentId: 'not-durable-proof' };
+      }
+    }));
+    await expect(
+      processDeliveryHandoffJob(
+        { settings: createSettings() },
+        { data: { deliveryPlan: createPlan() }, progress: jest.fn() },
+        fetchImpl
+      )
+    ).rejects.toThrow(/expected durable 202 acceptance/u);
+  });
+
+  test('worker throws on non-202 so Bull retries instead of dropping the handoff', async () => {
     const fetchImpl = jest.fn(async () => ({ ok: false, status: 503 }));
     await expect(
       processDeliveryHandoffJob(
@@ -146,12 +171,11 @@ describe('APDM Phase 4 durable ActivityPub handoff', () => {
     ).rejects.toThrow(/returned 503/u);
   });
 
-  test('worker throws when response is 2xx but does not prove Redis acceptance', async () => {
+  test('worker rejects malformed acknowledgement JSON', async () => {
     const fetchImpl = jest.fn(async () => ({
-      ok: true,
       status: 202,
       async json() {
-        return { accepted: false };
+        throw new SyntaxError('bad json');
       }
     }));
     await expect(
@@ -160,10 +184,33 @@ describe('APDM Phase 4 durable ActivityPub handoff', () => {
         { data: { deliveryPlan: createPlan() }, progress: jest.fn() },
         fetchImpl
       )
-    ).rejects.toThrow(/did not confirm Redis acceptance/u);
+    ).rejects.toThrow(/invalid acknowledgement body/u);
   });
 
-  test('same Delivery Plan retry produces the same Bull job ID and same stable metadata ID', async () => {
+  test('worker throws when 202 body does not prove Redis acceptance', async () => {
+    for (const body of [
+      { accepted: false, intentId: 'x' },
+      { accepted: true },
+      { intentId: 'x' },
+      null
+    ]) {
+      const fetchImpl = jest.fn(async () => ({
+        status: 202,
+        async json() {
+          return body;
+        }
+      }));
+      await expect(
+        processDeliveryHandoffJob(
+          { settings: createSettings() },
+          { data: { deliveryPlan: createPlan() }, progress: jest.fn() },
+          fetchImpl
+        )
+      ).rejects.toThrow(/did not confirm Redis acceptance/u);
+    }
+  });
+
+  test('same Delivery Plan retry produces the same Bull job ID and stable metadata ID', async () => {
     const plan = createPlan();
     const createJob = jest.fn(async () => ({ id: plan.intentId }));
     const service = { settings: createSettings(), createJob };
