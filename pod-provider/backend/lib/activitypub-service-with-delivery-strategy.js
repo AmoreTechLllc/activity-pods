@@ -12,8 +12,8 @@ const {
 
 const SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION = '1.1.4';
 const REMOTE_DELIVERY_MODES = new Set(['native', 'external']);
-// P4 event is observation-only. outbox-emitter intentionally listens to the
-// former P3 planned event name, so this cannot create a second sidecar HTTP path.
+// Observation only. The legacy P3 routing event is deliberately not emitted in
+// P4 external mode; the durable Bull handoff processor is the sole sidecar HTTP path.
 const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.handoff-queued';
 const SEMAPPS_INTERNAL_PATHS = Object.freeze({
   ActorService: '@semapps/activitypub/services/activitypub/subservices/actor',
@@ -46,6 +46,31 @@ function assertSupportedSemappsVersion() {
       `APDM delivery strategy adapter supports @semapps/activitypub ${SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION}; ` +
         `installed version is ${semappsActivityPubPackage.version}. Review the upstream outbox implementation before upgrading.`
     );
+  }
+}
+
+function assertExternalDeliveryConfiguration(settings) {
+  if (normalizeRemoteDeliveryMode(settings?.remoteDeliveryMode) !== 'external') return;
+  if (!settings.allowExternalDeliveryPreview) {
+    throw new Error('ActivityPub external remote delivery requires the explicit APDM preview guard until Phase 5 cutover.');
+  }
+  if (typeof settings.queueServiceUrl !== 'string' || settings.queueServiceUrl.trim().length === 0) {
+    throw new Error('ActivityPub external remote delivery requires SEMAPPS_QUEUE_SERVICE_URL; FakeQueueMixin is forbidden.');
+  }
+  if (typeof settings.deliveryHandoffUrl !== 'string' || settings.deliveryHandoffUrl.trim().length === 0) {
+    throw new Error('ActivityPub external remote delivery requires a sidecar Delivery Plan handoff URL.');
+  }
+  let handoffUrl;
+  try {
+    handoffUrl = new URL(settings.deliveryHandoffUrl);
+  } catch {
+    throw new Error('ActivityPub external remote delivery handoff URL must be a valid HTTP(S) URL.');
+  }
+  if (!['http:', 'https:'].includes(handoffUrl.protocol)) {
+    throw new Error('ActivityPub external remote delivery handoff URL must use HTTP(S).');
+  }
+  if (typeof settings.deliveryHandoffToken !== 'string' || settings.deliveryHandoffToken.length === 0) {
+    throw new Error('ActivityPub external remote delivery requires SIDECAR_TOKEN for authenticated durable handoff.');
   }
 }
 
@@ -83,12 +108,7 @@ function createOutboxPostHandler(
       return nativePostHandler.call(this, ctx);
     }
 
-    if (!this.settings.allowExternalDeliveryPreview) {
-      throw new Error(
-        'ActivityPub external remote delivery is not yet enabled for production. ' +
-          'APDM Phase 4 adds durable handoff only; production remote-authority cutover is APDM Phase 5.'
-      );
-    }
+    assertExternalDeliveryConfiguration(this.settings);
 
     const capturedRemotePosts = [];
     let capturedLocalRecipients = [];
@@ -167,20 +187,22 @@ function createOutboxServiceSchema({
   enqueueHandoff
 }) {
   const { OutboxService, FakeQueueMixin } = internals;
+  const settings = {
+    baseUri,
+    podProvider,
+    queueServiceUrl,
+    remoteDeliveryMode,
+    allowExternalDeliveryPreview,
+    deliveryHandoffUrl,
+    deliveryHandoffToken,
+    deliveryHandoffTimeoutMs
+  };
+  assertExternalDeliveryConfiguration(settings);
   const queueMixin = queueServiceUrl ? QueueMixin(queueServiceUrl) : FakeQueueMixin;
 
   return {
     mixins: [OutboxService, queueMixin],
-    settings: {
-      baseUri,
-      podProvider,
-      queueServiceUrl,
-      remoteDeliveryMode,
-      allowExternalDeliveryPreview,
-      deliveryHandoffUrl,
-      deliveryHandoffToken,
-      deliveryHandoffTimeoutMs
-    },
+    settings,
     actions: {
       post: createOutboxPostHandler(OutboxService.actions.post, { buildDeliveryPlan, enqueueHandoff })
     },
@@ -206,24 +228,26 @@ function createActivityPubServiceWithDeliveryStrategy({
   assertSupportedSemappsVersion();
   const normalizedRemoteDeliveryMode = normalizeRemoteDeliveryMode(remoteDeliveryMode);
   const resolvedInternals = internals || loadSemappsActivityPubInternals();
+  const serviceSettings = {
+    baseUri: null,
+    podProvider: false,
+    activitiesPath: '/as/activity',
+    collectionsPath: '/as/collection',
+    activateTombstones: true,
+    selectActorData: null,
+    queueServiceUrl: null,
+    deliveryHandoffUrl: null,
+    deliveryHandoffToken: '',
+    deliveryHandoffTimeoutMs: 5000,
+    ...settings,
+    remoteDeliveryMode: normalizedRemoteDeliveryMode,
+    allowExternalDeliveryPreview: Boolean(allowExternalDeliveryPreview)
+  };
+  assertExternalDeliveryConfiguration(serviceSettings);
 
   return {
     name: 'activitypub',
-    settings: {
-      baseUri: null,
-      podProvider: false,
-      activitiesPath: '/as/activity',
-      collectionsPath: '/as/collection',
-      activateTombstones: true,
-      selectActorData: null,
-      queueServiceUrl: null,
-      deliveryHandoffUrl: null,
-      deliveryHandoffToken: '',
-      deliveryHandoffTimeoutMs: 5000,
-      ...settings,
-      remoteDeliveryMode: normalizedRemoteDeliveryMode,
-      allowExternalDeliveryPreview: Boolean(allowExternalDeliveryPreview)
-    },
+    settings: serviceSettings,
     dependencies: ['api', 'ontologies'],
     created() {
       const {
@@ -240,6 +264,7 @@ function createActivityPubServiceWithDeliveryStrategy({
         deliveryHandoffToken,
         deliveryHandoffTimeoutMs
       } = this.settings;
+      assertExternalDeliveryConfiguration(this.settings);
       const {
         ActorService,
         ActivityService,
@@ -296,6 +321,7 @@ module.exports = {
   REMOTE_DELIVERY_PLANNED_EVENT,
   SEMAPPS_INTERNAL_PATHS,
   SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION,
+  assertExternalDeliveryConfiguration,
   assertSupportedSemappsVersion,
   createActivityPubServiceWithDeliveryStrategy,
   createOutboxPostHandler,
