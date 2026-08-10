@@ -1,6 +1,7 @@
 'use strict';
 
 const fixture = require('../contracts/ap.delivery-plan.v1.fixture.json');
+const followersOnlyFixture = require('../contracts/ap.delivery-plan.v1.followers-only.fixture.json');
 const schema = require('../contracts/ap.delivery-plan.v1.schema.json');
 const {
   DELIVERY_PLAN_SCHEMA,
@@ -9,6 +10,8 @@ const {
   deliveryPlanFingerprint,
   validateDeliveryPlanV1
 } = require('../utils/activitypub-delivery-plan');
+
+const FOLLOWERS_ONLY_FIXTURE_SHA256 = 'e166848b9d82e369fa6bace448dbd8ca42949aae9bdbba3b4034f0749d3d087c';
 
 describe('APDM delivery plan v1 producer contract', () => {
   test('fixture validates against the producer contract helper', () => {
@@ -58,5 +61,19 @@ describe('APDM delivery plan v1 producer contract', () => {
       ]
     };
     expect(validateDeliveryPlanV1(invalid)).toBe(false);
+  });
+
+  test('Phase 3 followers-only fixture validates and carries only concrete expanded recipients', () => {
+    expect(validateDeliveryPlanV1(followersOnlyFixture)).toBe(true);
+    expect(deliveryPlanFingerprint(followersOnlyFixture)).toBe(FOLLOWERS_ONLY_FIXTURE_SHA256);
+    expect(followersOnlyFixture.activity.to).toEqual(['https://pods.example/alice/followers']);
+    expect(followersOnlyFixture.meta.visibility).toBe('followers');
+    expect(followersOnlyFixture.remoteRecipients).toHaveLength(2);
+    expect(
+      followersOnlyFixture.remoteRecipients.some(target => target.actorUri.endsWith('/followers'))
+    ).toBe(false);
+    expect(
+      followersOnlyFixture.remoteRecipients.every(target => /^https?:\/\//u.test(target.inboxUrl))
+    ).toBe(true);
   });
 });
