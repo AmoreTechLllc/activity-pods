@@ -3,24 +3,26 @@
 const QueueMixin = require('moleculer-bull');
 const { as, sec } = require('@semapps/ontologies');
 const semappsActivityPubPackage = require('@semapps/activitypub/package.json');
-const ActorService = require('@semapps/activitypub/services/activitypub/subservices/actor');
-const ActivityService = require('@semapps/activitypub/services/activitypub/subservices/activity');
-const ApiService = require('@semapps/activitypub/services/activitypub/subservices/api');
-const CollectionService = require('@semapps/activitypub/services/activitypub/subservices/collection');
-const FollowService = require('@semapps/activitypub/services/activitypub/subservices/follow');
-const InboxService = require('@semapps/activitypub/services/activitypub/subservices/inbox');
-const LikeService = require('@semapps/activitypub/services/activitypub/subservices/like');
-const ObjectService = require('@semapps/activitypub/services/activitypub/subservices/object');
-const OutboxService = require('@semapps/activitypub/services/activitypub/subservices/outbox');
-const CollectionsRegistryService = require('@semapps/activitypub/services/activitypub/subservices/collections-registry');
-const ReplyService = require('@semapps/activitypub/services/activitypub/subservices/reply');
-const ShareService = require('@semapps/activitypub/services/activitypub/subservices/share');
-const SideEffectsService = require('@semapps/activitypub/services/activitypub/subservices/side-effects');
-const FakeQueueMixin = require('@semapps/activitypub/mixins/fake-queue');
 
 const SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION = '1.1.4';
 const REMOTE_DELIVERY_MODES = new Set(['native', 'external']);
 const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.planned';
+const SEMAPPS_INTERNAL_PATHS = Object.freeze({
+  ActorService: '@semapps/activitypub/services/activitypub/subservices/actor',
+  ActivityService: '@semapps/activitypub/services/activitypub/subservices/activity',
+  ApiService: '@semapps/activitypub/services/activitypub/subservices/api',
+  CollectionService: '@semapps/activitypub/services/activitypub/subservices/collection',
+  FollowService: '@semapps/activitypub/services/activitypub/subservices/follow',
+  InboxService: '@semapps/activitypub/services/activitypub/subservices/inbox',
+  LikeService: '@semapps/activitypub/services/activitypub/subservices/like',
+  ObjectService: '@semapps/activitypub/services/activitypub/subservices/object',
+  OutboxService: '@semapps/activitypub/services/activitypub/subservices/outbox',
+  CollectionsRegistryService: '@semapps/activitypub/services/activitypub/subservices/collections-registry',
+  ReplyService: '@semapps/activitypub/services/activitypub/subservices/reply',
+  ShareService: '@semapps/activitypub/services/activitypub/subservices/share',
+  SideEffectsService: '@semapps/activitypub/services/activitypub/subservices/side-effects',
+  FakeQueueMixin: '@semapps/activitypub/mixins/fake-queue'
+});
 
 function normalizeRemoteDeliveryMode(value) {
   const normalized = String(value || 'native').trim().toLowerCase();
@@ -37,6 +39,19 @@ function assertSupportedSemappsVersion() {
         `installed version is ${semappsActivityPubPackage.version}. Review the upstream outbox implementation before upgrading.`
     );
   }
+}
+
+function resolveSemappsInternalPaths() {
+  return Object.fromEntries(
+    Object.entries(SEMAPPS_INTERNAL_PATHS).map(([name, modulePath]) => [name, require.resolve(modulePath)])
+  );
+}
+
+function loadSemappsActivityPubInternals() {
+  assertSupportedSemappsVersion();
+  return Object.fromEntries(
+    Object.entries(SEMAPPS_INTERNAL_PATHS).map(([name, modulePath]) => [name, require(modulePath)])
+  );
 }
 
 function createOutboxPostHandler(nativePostHandler) {
@@ -96,7 +111,15 @@ function createOutboxPostHandler(nativePostHandler) {
   };
 }
 
-function createOutboxServiceSchema({ baseUri, podProvider, queueServiceUrl, remoteDeliveryMode, allowExternalDeliveryPreview }) {
+function createOutboxServiceSchema({
+  baseUri,
+  podProvider,
+  queueServiceUrl,
+  remoteDeliveryMode,
+  allowExternalDeliveryPreview,
+  internals
+}) {
+  const { OutboxService, FakeQueueMixin } = internals;
   const queueMixin = queueServiceUrl ? QueueMixin(queueServiceUrl) : FakeQueueMixin;
 
   return {
@@ -116,10 +139,12 @@ function createOutboxServiceSchema({ baseUri, podProvider, queueServiceUrl, remo
 function createActivityPubServiceWithDeliveryStrategy({
   remoteDeliveryMode = 'native',
   allowExternalDeliveryPreview = false,
-  settings = {}
+  settings = {},
+  internals
 } = {}) {
   assertSupportedSemappsVersion();
   const normalizedRemoteDeliveryMode = normalizeRemoteDeliveryMode(remoteDeliveryMode);
+  const resolvedInternals = internals || loadSemappsActivityPubInternals();
 
   return {
     name: 'activitypub',
@@ -148,14 +173,24 @@ function createActivityPubServiceWithDeliveryStrategy({
         remoteDeliveryMode: configuredRemoteDeliveryMode,
         allowExternalDeliveryPreview: configuredExternalPreview
       } = this.settings;
-
+      const {
+        ActorService,
+        ActivityService,
+        ApiService,
+        CollectionService,
+        FollowService,
+        InboxService,
+        LikeService,
+        ObjectService,
+        CollectionsRegistryService,
+        ReplyService,
+        ShareService,
+        SideEffectsService,
+        FakeQueueMixin
+      } = resolvedInternals;
       const sideEffectsQueueMixin = queueServiceUrl ? QueueMixin(queueServiceUrl) : FakeQueueMixin;
 
-      this.broker.createService({
-        mixins: [SideEffectsService, sideEffectsQueueMixin],
-        settings: { podProvider }
-      });
-
+      this.broker.createService({ mixins: [SideEffectsService, sideEffectsQueueMixin], settings: { podProvider } });
       this.broker.createService({ mixins: [CollectionService], settings: { podProvider, path: collectionsPath } });
       this.broker.createService({ mixins: [CollectionsRegistryService], settings: { baseUri, podProvider } });
       this.broker.createService({ mixins: [ActorService], settings: { baseUri, selectActorData, podProvider } });
@@ -167,14 +202,14 @@ function createActivityPubServiceWithDeliveryStrategy({
       this.broker.createService({ mixins: [LikeService], settings: { baseUri, podProvider } });
       this.broker.createService({ mixins: [ShareService], settings: { baseUri, podProvider } });
       this.broker.createService({ mixins: [ReplyService], settings: { baseUri, podProvider } });
-
       this.broker.createService(
         createOutboxServiceSchema({
           baseUri,
           podProvider,
           queueServiceUrl,
           remoteDeliveryMode: configuredRemoteDeliveryMode,
-          allowExternalDeliveryPreview: configuredExternalPreview
+          allowExternalDeliveryPreview: configuredExternalPreview,
+          internals: resolvedInternals
         })
       );
     },
@@ -187,10 +222,13 @@ function createActivityPubServiceWithDeliveryStrategy({
 
 module.exports = {
   REMOTE_DELIVERY_PLANNED_EVENT,
+  SEMAPPS_INTERNAL_PATHS,
   SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION,
   assertSupportedSemappsVersion,
   createActivityPubServiceWithDeliveryStrategy,
   createOutboxPostHandler,
   createOutboxServiceSchema,
-  normalizeRemoteDeliveryMode
+  loadSemappsActivityPubInternals,
+  normalizeRemoteDeliveryMode,
+  resolveSemappsInternalPaths
 };
