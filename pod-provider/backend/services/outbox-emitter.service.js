@@ -13,9 +13,8 @@
 
 const { ulid } = require('ulid');
 const { retryWithBackoff } = require('../utils/backoff');
-
+const { validateDeliveryPlanV1 } = require('../utils/activitypub-delivery-plan');
 const { resolvePublicSearchConsent } = require('../utils/search-consent');
-
 const { extractHashtagsFromText } = require('../utils/hashtags');
 
 module.exports = {
@@ -28,6 +27,12 @@ module.exports = {
     sidecarWebhookUrl: process.env.SIDECAR_WEBHOOK_URL || 'http://fedify-sidecar:8080/webhook/outbox',
     sidecarToken: process.env.SIDECAR_TOKEN || '',
 
+    // During APDM native mode keeps the legacy raw-activity route. External
+    // preview mode ignores it and waits for the authoritative Delivery Plan.
+    remoteDeliveryMode: String(process.env.SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native')
+      .trim()
+      .toLowerCase(),
+
     // Retry settings for webhook delivery
     webhookRetries: Number(process.env.WEBHOOK_RETRIES) || 3,
     webhookTimeoutMs: Number(process.env.WEBHOOK_TIMEOUT_MS) || 5000
@@ -35,19 +40,24 @@ module.exports = {
 
   events: {
     /**
-     * Listen for outbox activity commits.
-     * This event is emitted by ActivityPods when an activity is successfully
-     * committed to an actor's outbox.
+     * Legacy/native path. In external-preview mode this event is deliberately
+     * ignored because it contains only the raw Activity and fires before the
+     * APDM wrapper can expose SemApps' already-expanded recipient partition.
      */
     'activitypub.outbox.posted': {
       async handler(ctx) {
+        if (this.settings.remoteDeliveryMode === 'external') {
+          this.logger.debug('Ignoring raw outbox.posted routing event in APDM external preview mode');
+          return;
+        }
+
         const { activity } = ctx.params;
         const actorUri = typeof activity.actor === 'string' ? activity.actor : activity.actor?.id || null;
         const visibility = this.determineVisibility(activity);
         const isPublicActivity = visibility === 'public' || visibility === 'unlisted';
         const searchConsent = await this.buildSearchConsent(ctx, activity, actorUri);
 
-        // Resolve remote delivery targets (not provided by ActivityPods in this event)
+        // Resolve remote delivery targets (not provided by stock SemApps in this event)
         let deliveryTargets = [];
         if (actorUri) {
           try {
@@ -58,40 +68,57 @@ module.exports = {
           }
         }
 
-        // Build the event payload matching the Stream1 schema
-        const event = {
-          schema: 'ap.outbox.committed.v1',
-          eventId: ulid(),
-          timestamp: new Date().toISOString(),
-
-          // Source
-          actorUri,
-          podDataset: ctx.meta?.podDataset,
-
-          // Activity
-          activityId: activity.id || activity['@id'],
-          objectId: this.extractObjectId(activity),
-          activityType: activity.type || activity['@type'],
+        const event = await this.buildCommittedEvent(ctx, {
           activity,
-
-          // Delivery targets (resolved above)
+          actorUri,
           deliveryTargets,
+          visibility,
+          isPublicActivity,
+          searchConsent
+        });
 
-          // Metadata
-          meta: {
-            isPublicActivity,
-            isPublicIndexable: isPublicActivity && searchConsent.isPublic,
-            isDeleteOrTombstone: this.isDeleteOrTombstone(activity),
-            visibility,
-            searchConsent,
-            hashtags: this.extractMetadataHashtags(activity)
-          }
-        };
-
-        // Emit internal event for local consumers
         ctx.emit('outbox.event.ready', event);
+        await this.deliverToSidecar(ctx, event);
+      }
+    },
 
-        // Deliver to sidecar webhook
+    /**
+     * APDM Phase 3 external-preview routing path. The delivery plan contains
+     * concrete recipients derived from SemApps' already-expanded partition.
+     */
+    'activitypub.outbox.remote-delivery.planned': {
+      async handler(ctx) {
+        if (this.settings.remoteDeliveryMode !== 'external') return;
+
+        const { activity, deliveryPlan } = ctx.params;
+        if (!validateDeliveryPlanV1(deliveryPlan)) {
+          throw new Error('Refusing invalid ap.delivery-plan.v1 payload');
+        }
+        if (deliveryPlan.activityId !== (activity.id || activity['@id'])) {
+          throw new Error('Delivery Plan activityId does not match emitted Activity');
+        }
+
+        const actorUri = deliveryPlan.actorUri;
+        const visibility = deliveryPlan.meta.visibility;
+        const isPublicActivity = deliveryPlan.meta.isPublicActivity;
+        const searchConsent = await this.buildSearchConsent(ctx, activity, actorUri);
+        const deliveryTargets = deliveryPlan.remoteRecipients.map(target => ({
+          targetDomain: target.targetDomain,
+          inboxUrl: target.inboxUrl,
+          ...(target.sharedInboxUrl ? { sharedInboxUrl: target.sharedInboxUrl } : {})
+        }));
+
+        const event = await this.buildCommittedEvent(ctx, {
+          activity,
+          actorUri,
+          deliveryTargets,
+          visibility,
+          isPublicActivity,
+          searchConsent,
+          deliveryPlanIntentId: deliveryPlan.intentId
+        });
+
+        ctx.emit('outbox.event.ready', event);
         await this.deliverToSidecar(ctx, event);
       }
     }
@@ -113,25 +140,14 @@ module.exports = {
         const isPublicActivity = visibility === 'public' || visibility === 'unlisted';
         const searchConsent = await this.buildSearchConsent(ctx, activity, actorUri);
 
-        const event = {
-          schema: 'ap.outbox.committed.v1',
-          eventId: ulid(),
-          timestamp: new Date().toISOString(),
-          actorUri,
-          activityId: activity.id || activity['@id'],
-          objectId: this.extractObjectId(activity),
-          activityType: activity.type || activity['@type'],
+        const event = await this.buildCommittedEvent(ctx, {
           activity,
+          actorUri,
           deliveryTargets: deliveryTargets || [],
-          meta: {
-            isPublicActivity,
-            isPublicIndexable: isPublicActivity && searchConsent.isPublic,
-            isDeleteOrTombstone: this.isDeleteOrTombstone(activity),
-            visibility,
-            searchConsent,
-            hashtags: this.extractMetadataHashtags(activity)
-          }
-        };
+          visibility,
+          isPublicActivity,
+          searchConsent
+        });
 
         await this.deliverToSidecar(ctx, event);
         return { success: true, eventId: event.eventId };
@@ -140,7 +156,8 @@ module.exports = {
 
     /**
      * Resolve delivery targets for an activity.
-     * This is called by the sidecar if it needs to resolve targets itself.
+     * Kept as a native-mode compatibility path during APDM. External preview
+     * does not use this raw-address parser as its routing authority.
      */
     resolveDeliveryTargets: {
       params: {
@@ -167,18 +184,16 @@ module.exports = {
           };
         }
 
-        // Get recipients from to/cc/bto/bcc
         const recipients = this.extractRecipients(activity);
 
-        // Resolve recipients to inbox URLs in parallel for performance
+        // Legacy/native compatibility path only. APDM external preview uses the
+        // bounded authoritative planner instead of this unbounded Promise.all.
         const targetResults = await Promise.all(
           recipients.map(async recipientUri => {
             try {
-              // Skip local actors (handled by internal federation)
               const isLocal = await ctx.call('activitypub.actor.isLocal', { actorUri: recipientUri });
               if (isLocal) return null;
 
-              // Resolve remote actor's inbox
               const actorDoc = await ctx.call('activitypub.actor.get', { actorUri: recipientUri });
               if (actorDoc) {
                 const host = new URL(recipientUri).hostname;
@@ -195,31 +210,52 @@ module.exports = {
           })
         );
 
-        // Filter out nulls (local or failed resolutions)
         const targets = targetResults.filter(t => t !== null);
-
-        // Deduplicate by sharedInbox
         const deduped = this.deduplicateBySharedInbox(targets);
-
         return { targets: deduped };
       }
     }
   },
 
   methods: {
+    async buildCommittedEvent(
+      ctx,
+      { activity, actorUri, deliveryTargets, visibility, isPublicActivity, searchConsent, deliveryPlanIntentId }
+    ) {
+      return {
+        schema: 'ap.outbox.committed.v1',
+        eventId: ulid(),
+        timestamp: new Date().toISOString(),
+        actorUri,
+        podDataset: ctx.meta?.podDataset,
+        activityId: activity.id || activity['@id'],
+        objectId: this.extractObjectId(activity),
+        activityType: activity.type || activity['@type'],
+        activity,
+        deliveryTargets,
+        meta: {
+          isPublicActivity,
+          isPublicIndexable: isPublicActivity && searchConsent.isPublic,
+          isDeleteOrTombstone: this.isDeleteOrTombstone(activity),
+          visibility,
+          searchConsent,
+          hashtags: this.extractMetadataHashtags(activity),
+          ...(deliveryPlanIntentId ? { deliveryPlanIntentId } : {})
+        }
+      };
+    },
+
     /**
      * Deliver event to sidecar webhook.
      */
     async deliverToSidecar(ctx, event) {
       const url = this.settings.sidecarWebhookUrl;
 
-      // Build the webhook payload in the shape the sidecar expects.
-      // The internal event schema differs from the sidecar's webhook contract.
       const payload = {
         actorUri: event.actorUri,
         activityId: event.activityId,
         activity: event.activity,
-        remoteTargets: event.deliveryTargets, // sidecar validates body.remoteTargets
+        remoteTargets: event.deliveryTargets,
         meta: event.meta
       };
 
@@ -269,9 +305,6 @@ module.exports = {
       }
     },
 
-    /**
-     * Extract object ID from activity.
-     */
     extractObjectId(activity) {
       const object = activity.object;
       if (!object) return null;
@@ -279,41 +312,22 @@ module.exports = {
       return object.id || object['@id'] || null;
     },
 
-    /**
-     * Check if activity is a delete or tombstone.
-     */
     isDeleteOrTombstone(activity) {
       const type = activity.type || activity['@type'];
       return type === 'Delete' || type === 'Tombstone' || (type === 'Undo' && activity.object?.type === 'Announce');
     },
 
-    /**
-     * Determine visibility level.
-     */
     determineVisibility(activity) {
       const publicAddress = 'https://www.w3.org/ns/activitystreams#Public';
       const to = Array.isArray(activity.to) ? activity.to : [activity.to];
       const cc = Array.isArray(activity.cc) ? activity.cc : [activity.cc];
 
-      if (to.includes(publicAddress) || to.includes('as:Public')) {
-        return 'public';
-      }
-      if (cc.includes(publicAddress) || cc.includes('as:Public')) {
-        return 'unlisted';
-      }
-      if (to.some(r => r?.endsWith('/followers'))) {
-        return 'followers';
-      }
+      if (to.includes(publicAddress) || to.includes('as:Public')) return 'public';
+      if (cc.includes(publicAddress) || cc.includes('as:Public')) return 'unlisted';
+      if (to.some(r => r?.endsWith('/followers'))) return 'followers';
       return 'direct';
     },
 
-    /**
-     * Build a search consent descriptor for the activity's inner object.
-     * Included in the event meta so the sidecar can skip indexing without
-     * re-parsing the object.
-     *
-     * Shape: { raw: string[], isPublic: boolean, explicitlySet: boolean }
-     */
     async buildSearchConsent(ctx, activity, actorUri) {
       const obj = activity.object && typeof activity.object === 'object' ? activity.object : activity;
       let attributedToActor = null;
@@ -336,20 +350,11 @@ module.exports = {
       return resolvePublicSearchConsent(obj, { attributedToActor });
     },
 
-    /**
-     * Extract hashtags for dual-protocol metadata (Facets).
-     * This allows the Firehose to serve hashtags as structured data
-     * without requiring consumers to parse the HTML content.
-     */
     extractMetadataHashtags(activity) {
       const obj = activity.object && typeof activity.object === 'object' ? activity.object : activity;
-
       return extractHashtagsFromText(obj.content || '');
     },
 
-    /**
-     * Extract all recipients from activity.
-     */
     extractRecipients(activity) {
       const recipients = new Set();
 
@@ -358,32 +363,20 @@ module.exports = {
         if (!values) continue;
 
         const arr = Array.isArray(values) ? values : [values];
-        for (const v of arr) {
-          if (typeof v === 'string' && v.startsWith('http')) {
-            recipients.add(v);
-          }
+        for (const value of arr) {
+          if (typeof value === 'string' && value.startsWith('http')) recipients.add(value);
         }
       }
-
-      // Expand followers collection if present
-      // (This would need additional logic to resolve followers)
 
       return [...recipients];
     },
 
-    /**
-     * Deduplicate targets by shared inbox.
-     */
     deduplicateBySharedInbox(targets) {
       const seen = new Map();
-
       for (const target of targets) {
         const key = target.sharedInboxUrl || target.inboxUrl;
-        if (!seen.has(key)) {
-          seen.set(key, target);
-        }
+        if (!seen.has(key)) seen.set(key, target);
       }
-
       return [...seen.values()];
     },
 
