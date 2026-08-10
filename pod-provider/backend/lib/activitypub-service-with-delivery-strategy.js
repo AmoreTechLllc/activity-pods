@@ -4,6 +4,11 @@ const QueueMixin = require('moleculer-bull');
 const { as, sec } = require('@semapps/ontologies');
 const semappsActivityPubPackage = require('@semapps/activitypub/package.json');
 const { buildDeliveryPlanV1 } = require('../utils/activitypub-delivery-planner');
+const {
+  DELIVERY_HANDOFF_QUEUE,
+  enqueueDeliveryHandoff,
+  processDeliveryHandoffJob
+} = require('../utils/activitypub-delivery-handoff');
 
 const SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION = '1.1.4';
 const REMOTE_DELIVERY_MODES = new Set(['native', 'external']);
@@ -55,12 +60,18 @@ function loadSemappsActivityPubInternals() {
   );
 }
 
-function createOutboxPostHandler(nativePostHandler, { buildDeliveryPlan = buildDeliveryPlanV1 } = {}) {
+function createOutboxPostHandler(
+  nativePostHandler,
+  { buildDeliveryPlan = buildDeliveryPlanV1, enqueueHandoff = enqueueDeliveryHandoff } = {}
+) {
   if (typeof nativePostHandler !== 'function') {
     throw new TypeError('SemApps outbox post handler must be a function');
   }
   if (typeof buildDeliveryPlan !== 'function') {
     throw new TypeError('ActivityPub delivery plan builder must be a function');
+  }
+  if (typeof enqueueHandoff !== 'function') {
+    throw new TypeError('ActivityPub durable handoff enqueuer must be a function');
   }
 
   return async function postWithRemoteDeliveryStrategy(ctx) {
@@ -73,7 +84,7 @@ function createOutboxPostHandler(nativePostHandler, { buildDeliveryPlan = buildD
     if (!this.settings.allowExternalDeliveryPreview) {
       throw new Error(
         'ActivityPub external remote delivery is not yet enabled for production. ' +
-          'APDM Phase 3 exposes authoritative recipient planning only; durable external handoff is introduced in a later phase.'
+          'APDM Phase 4 adds durable handoff only; production remote-authority cutover is APDM Phase 5.'
       );
     }
 
@@ -93,7 +104,6 @@ function createOutboxPostHandler(nativePostHandler, { buildDeliveryPlan = buildD
         });
         return undefined;
       }
-
       return nativeCreateJob(queueName, jobId, payload, options);
     };
 
@@ -117,6 +127,12 @@ function createOutboxPostHandler(nativePostHandler, { buildDeliveryPlan = buildD
       podProvider: this.settings.podProvider
     });
 
+    // P4 durability boundary: do not return from the outbox action until Bull
+    // confirms the handoff retry job has been inserted in the configured queue.
+    await enqueueHandoff(this, deliveryPlan);
+
+    // Observation only. The outbox-emitter must not perform a second HTTP
+    // delivery in external mode; the durable handoff queue owns that path.
     this.broker.emit(
       REMOTE_DELIVERY_PLANNED_EVENT,
       {
@@ -125,7 +141,8 @@ function createOutboxPostHandler(nativePostHandler, { buildDeliveryPlan = buildD
         remoteRecipients: remoteRecipientUris,
         localRecipients: localRecipientUris,
         suppressedNativeRemotePostCount: capturedRemotePosts.length,
-        deliveryMode: 'external'
+        deliveryMode: 'external',
+        durableHandoffQueued: true
       },
       { meta: { webId: null } }
     );
@@ -140,8 +157,12 @@ function createOutboxServiceSchema({
   queueServiceUrl,
   remoteDeliveryMode,
   allowExternalDeliveryPreview,
+  deliveryHandoffUrl,
+  deliveryHandoffToken,
+  deliveryHandoffTimeoutMs,
   internals,
-  buildDeliveryPlan
+  buildDeliveryPlan,
+  enqueueHandoff
 }) {
   const { OutboxService, FakeQueueMixin } = internals;
   const queueMixin = queueServiceUrl ? QueueMixin(queueServiceUrl) : FakeQueueMixin;
@@ -151,11 +172,23 @@ function createOutboxServiceSchema({
     settings: {
       baseUri,
       podProvider,
+      queueServiceUrl,
       remoteDeliveryMode,
-      allowExternalDeliveryPreview
+      allowExternalDeliveryPreview,
+      deliveryHandoffUrl,
+      deliveryHandoffToken,
+      deliveryHandoffTimeoutMs
     },
     actions: {
-      post: createOutboxPostHandler(OutboxService.actions.post, { buildDeliveryPlan })
+      post: createOutboxPostHandler(OutboxService.actions.post, { buildDeliveryPlan, enqueueHandoff })
+    },
+    queues: {
+      [DELIVERY_HANDOFF_QUEUE]: {
+        name: '*',
+        async process(job) {
+          return processDeliveryHandoffJob(this, job);
+        }
+      }
     }
   };
 }
@@ -165,7 +198,8 @@ function createActivityPubServiceWithDeliveryStrategy({
   allowExternalDeliveryPreview = false,
   settings = {},
   internals,
-  buildDeliveryPlan
+  buildDeliveryPlan,
+  enqueueHandoff
 } = {}) {
   assertSupportedSemappsVersion();
   const normalizedRemoteDeliveryMode = normalizeRemoteDeliveryMode(remoteDeliveryMode);
@@ -181,6 +215,9 @@ function createActivityPubServiceWithDeliveryStrategy({
       activateTombstones: true,
       selectActorData: null,
       queueServiceUrl: null,
+      deliveryHandoffUrl: null,
+      deliveryHandoffToken: '',
+      deliveryHandoffTimeoutMs: 5000,
       ...settings,
       remoteDeliveryMode: normalizedRemoteDeliveryMode,
       allowExternalDeliveryPreview: Boolean(allowExternalDeliveryPreview)
@@ -196,7 +233,10 @@ function createActivityPubServiceWithDeliveryStrategy({
         queueServiceUrl,
         activateTombstones,
         remoteDeliveryMode: configuredRemoteDeliveryMode,
-        allowExternalDeliveryPreview: configuredExternalPreview
+        allowExternalDeliveryPreview: configuredExternalPreview,
+        deliveryHandoffUrl,
+        deliveryHandoffToken,
+        deliveryHandoffTimeoutMs
       } = this.settings;
       const {
         ActorService,
@@ -234,8 +274,12 @@ function createActivityPubServiceWithDeliveryStrategy({
           queueServiceUrl,
           remoteDeliveryMode: configuredRemoteDeliveryMode,
           allowExternalDeliveryPreview: configuredExternalPreview,
+          deliveryHandoffUrl,
+          deliveryHandoffToken,
+          deliveryHandoffTimeoutMs,
           internals: resolvedInternals,
-          buildDeliveryPlan
+          buildDeliveryPlan,
+          enqueueHandoff
         })
       );
     },
