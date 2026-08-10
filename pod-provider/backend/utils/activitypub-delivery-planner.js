@@ -11,6 +11,15 @@ function normalizeActorUri(value) {
   return null;
 }
 
+function isFollowersCollectionUri(value) {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  try {
+    return new URL(value).pathname.replace(/\/+$/u, '').endsWith('/followers');
+  } catch {
+    return false;
+  }
+}
+
 function determineVisibility(activity) {
   const publicAddress = 'https://www.w3.org/ns/activitystreams#Public';
   const to = Array.isArray(activity?.to) ? activity.to : [activity?.to];
@@ -97,6 +106,15 @@ async function resolveRemoteDeliveryTarget(ctx, actorUri) {
   };
 }
 
+function assertConcreteRecipientUris(recipientUris, classification) {
+  const followersCollection = recipientUris.find(isFollowersCollectionUri);
+  if (followersCollection) {
+    throw new Error(
+      `ActivityPub Delivery Plan received unresolved ${classification} followers collection ${followersCollection}`
+    );
+  }
+}
+
 async function buildDeliveryPlanV1(
   ctx,
   {
@@ -115,6 +133,8 @@ async function buildDeliveryPlanV1(
 
   const uniqueLocalUris = [...new Set(localRecipientUris.filter(value => typeof value === 'string'))];
   const uniqueRemoteUris = [...new Set(remoteRecipientUris.filter(value => typeof value === 'string'))];
+  assertConcreteRecipientUris(uniqueLocalUris, 'local');
+  assertConcreteRecipientUris(uniqueRemoteUris, 'remote');
 
   const [localRecipients, remoteRecipients] = await Promise.all([
     mapWithConcurrency(uniqueLocalUris, concurrency, actor => resolveLocalDeliveryTarget(ctx, actor, podProvider)),
@@ -150,9 +170,11 @@ async function buildDeliveryPlanV1(
 
 module.exports = {
   DEFAULT_TARGET_RESOLUTION_CONCURRENCY,
+  assertConcreteRecipientUris,
   buildDeliveryPlanV1,
   createDeliveryIntentId,
   determineVisibility,
+  isFollowersCollectionUri,
   mapWithConcurrency,
   normalizeActorUri,
   resolveLocalDeliveryTarget,
