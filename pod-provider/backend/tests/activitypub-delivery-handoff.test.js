@@ -1,0 +1,178 @@
+'use strict';
+
+const {
+  DELIVERY_HANDOFF_QUEUE,
+  assertDurableHandoffConfigured,
+  enqueueDeliveryHandoff,
+  processDeliveryHandoffJob,
+  toSidecarOutboxPayload
+} = require('../utils/activitypub-delivery-handoff');
+
+function createPlan() {
+  return {
+    schema: 'ap.delivery-plan.v1',
+    intentId: 'apdm-v1-test-intent',
+    activityId: 'https://pods.example/alice/activities/1',
+    actorUri: 'https://pods.example/alice',
+    activity: {
+      id: 'https://pods.example/alice/activities/1',
+      type: 'Create',
+      actor: 'https://pods.example/alice'
+    },
+    localRecipients: [],
+    remoteRecipients: [
+      {
+        actorUri: 'https://remote.example/users/bob',
+        inboxUrl: 'https://remote.example/users/bob/inbox',
+        sharedInboxUrl: 'https://remote.example/inbox',
+        targetDomain: 'remote.example'
+      }
+    ],
+    meta: { visibility: 'followers', isPublicActivity: false }
+  };
+}
+
+function createSettings() {
+  return {
+    queueServiceUrl: 'redis://queue.example:6379',
+    deliveryHandoffUrl: 'http://fedify-sidecar:8080/webhook/outbox',
+    deliveryHandoffToken: 'secret',
+    deliveryHandoffTimeoutMs: 1000
+  };
+}
+
+describe('APDM Phase 4 durable ActivityPub handoff', () => {
+  test('external durability fails closed without a real queue service URL', () => {
+    expect(() => assertDurableHandoffConfigured({ deliveryHandoffUrl: 'http://sidecar' })).toThrow(
+      /SEMAPPS_QUEUE_SERVICE_URL/u
+    );
+    expect(() => assertDurableHandoffConfigured({ queueServiceUrl: 'redis://queue' })).toThrow(
+      /sidecar durable outbox handoff URL/u
+    );
+  });
+
+  test('maps authoritative Delivery Plan targets onto the proven sidecar webhook contract', () => {
+    expect(toSidecarOutboxPayload(createPlan())).toEqual({
+      actorUri: 'https://pods.example/alice',
+      activityId: 'https://pods.example/alice/activities/1',
+      activity: expect.objectContaining({ type: 'Create' }),
+      remoteTargets: [
+        {
+          inboxUrl: 'https://remote.example/users/bob/inbox',
+          sharedInboxUrl: 'https://remote.example/inbox',
+          targetDomain: 'remote.example'
+        }
+      ],
+      meta: {
+        visibility: 'followers',
+        isPublicActivity: false,
+        deliveryPlanIntentId: 'apdm-v1-test-intent',
+        deliveryPlanSchema: 'ap.delivery-plan.v1'
+      }
+    });
+  });
+
+  test('awaits the Bull insertion promise and uses stable Delivery Plan intent ID as job ID', async () => {
+    const plan = createPlan();
+    let release;
+    const insertion = new Promise(resolve => {
+      release = resolve;
+    });
+    const createJob = jest.fn(() => insertion);
+    const service = { settings: createSettings(), createJob };
+
+    let settled = false;
+    const pending = enqueueDeliveryHandoff(service, plan).finally(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(createJob).toHaveBeenCalledWith(
+      DELIVERY_HANDOFF_QUEUE,
+      plan.intentId,
+      { deliveryPlan: plan },
+      expect.any(Object)
+    );
+
+    release({ id: plan.intentId });
+    await expect(pending).resolves.toBe(plan.intentId);
+  });
+
+  test('propagates Bull insertion failure so the outbox action cannot report success', async () => {
+    const service = {
+      settings: createSettings(),
+      createJob: jest.fn(() => Promise.reject(new Error('redis insertion failed')))
+    };
+    await expect(enqueueDeliveryHandoff(service, createPlan())).rejects.toThrow(/redis insertion failed/u);
+  });
+
+  test('worker treats sidecar 202 acknowledgement as durable acceptance', async () => {
+    const plan = createPlan();
+    const progress = jest.fn();
+    const fetchImpl = jest.fn(async (_url, options) => ({
+      ok: true,
+      status: 202,
+      async json() {
+        return { accepted: true, intentId: 'sidecar-intent-1', jobCount: 1 };
+      },
+      options
+    }));
+    const service = { settings: createSettings() };
+
+    const result = await processDeliveryHandoffJob(service, { data: { deliveryPlan: plan }, progress }, fetchImpl);
+
+    expect(result).toEqual({
+      status: 'accepted',
+      deliveryPlanIntentId: plan.intentId,
+      sidecarIntentId: 'sidecar-intent-1',
+      jobCount: 1
+    });
+    expect(progress).toHaveBeenCalledWith(100);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [, request] = fetchImpl.mock.calls[0];
+    expect(request.headers.Authorization).toBe('Bearer secret');
+    expect(request.headers['X-APDM-Intent-Id']).toBe(plan.intentId);
+    expect(JSON.parse(request.body).meta.deliveryPlanIntentId).toBe(plan.intentId);
+  });
+
+  test('worker throws on non-2xx so Bull retries instead of dropping the handoff', async () => {
+    const fetchImpl = jest.fn(async () => ({ ok: false, status: 503 }));
+    await expect(
+      processDeliveryHandoffJob(
+        { settings: createSettings() },
+        { data: { deliveryPlan: createPlan() }, progress: jest.fn() },
+        fetchImpl
+      )
+    ).rejects.toThrow(/returned 503/u);
+  });
+
+  test('worker throws when response is 2xx but does not prove Redis acceptance', async () => {
+    const fetchImpl = jest.fn(async () => ({
+      ok: true,
+      status: 202,
+      async json() {
+        return { accepted: false };
+      }
+    }));
+    await expect(
+      processDeliveryHandoffJob(
+        { settings: createSettings() },
+        { data: { deliveryPlan: createPlan() }, progress: jest.fn() },
+        fetchImpl
+      )
+    ).rejects.toThrow(/did not confirm Redis acceptance/u);
+  });
+
+  test('same Delivery Plan retry produces the same Bull job ID and same stable metadata ID', async () => {
+    const plan = createPlan();
+    const createJob = jest.fn(async () => ({ id: plan.intentId }));
+    const service = { settings: createSettings(), createJob };
+
+    await enqueueDeliveryHandoff(service, plan);
+    await enqueueDeliveryHandoff(service, plan);
+
+    expect(createJob).toHaveBeenCalledTimes(2);
+    expect(createJob.mock.calls.map(call => call[1])).toEqual([plan.intentId, plan.intentId]);
+    expect(toSidecarOutboxPayload(plan).meta.deliveryPlanIntentId).toBe(plan.intentId);
+  });
+});
