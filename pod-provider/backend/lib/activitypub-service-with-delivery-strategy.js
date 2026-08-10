@@ -12,7 +12,9 @@ const {
 
 const SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION = '1.1.4';
 const REMOTE_DELIVERY_MODES = new Set(['native', 'external']);
-const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.planned';
+// P4 event is observation-only. outbox-emitter intentionally listens to the
+// former P3 planned event name, so this cannot create a second sidecar HTTP path.
+const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.handoff-queued';
 const SEMAPPS_INTERNAL_PATHS = Object.freeze({
   ActorService: '@semapps/activitypub/services/activitypub/subservices/actor',
   ActivityService: '@semapps/activitypub/services/activitypub/subservices/activity',
@@ -131,8 +133,8 @@ function createOutboxPostHandler(
     // confirms the handoff retry job has been inserted in the configured queue.
     await enqueueHandoff(this, deliveryPlan);
 
-    // Observation only. The outbox-emitter must not perform a second HTTP
-    // delivery in external mode; the durable handoff queue owns that path.
+    // Observation only. There is deliberately no listener that performs HTTP
+    // delivery for this event; the durable Bull handoff processor owns it.
     this.broker.emit(
       REMOTE_DELIVERY_PLANNED_EVENT,
       {
