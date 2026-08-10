@@ -91,22 +91,13 @@ function createOutboxPostHandler(
   nativePostHandler,
   { buildDeliveryPlan = buildDeliveryPlanV1, enqueueHandoff = enqueueDeliveryHandoff } = {}
 ) {
-  if (typeof nativePostHandler !== 'function') {
-    throw new TypeError('SemApps outbox post handler must be a function');
-  }
-  if (typeof buildDeliveryPlan !== 'function') {
-    throw new TypeError('ActivityPub delivery plan builder must be a function');
-  }
-  if (typeof enqueueHandoff !== 'function') {
-    throw new TypeError('ActivityPub durable handoff enqueuer must be a function');
-  }
+  if (typeof nativePostHandler !== 'function') throw new TypeError('SemApps outbox post handler must be a function');
+  if (typeof buildDeliveryPlan !== 'function') throw new TypeError('ActivityPub delivery plan builder must be a function');
+  if (typeof enqueueHandoff !== 'function') throw new TypeError('ActivityPub durable handoff enqueuer must be a function');
 
   return async function postWithRemoteDeliveryStrategy(ctx) {
     const mode = normalizeRemoteDeliveryMode(this.settings.remoteDeliveryMode);
-
-    if (mode === 'native') {
-      return nativePostHandler.call(this, ctx);
-    }
+    if (mode === 'native') return nativePostHandler.call(this, ctx);
 
     assertExternalDeliveryConfiguration(this.settings);
 
@@ -149,12 +140,8 @@ function createOutboxPostHandler(
       podProvider: this.settings.podProvider
     });
 
-    // P4 durability boundary: do not return from the outbox action until Bull
-    // confirms the handoff retry job has been inserted in the configured queue.
     await enqueueHandoff(this, deliveryPlan);
 
-    // Observation only. There is deliberately no listener that performs HTTP
-    // delivery for this event; the durable Bull handoff processor owns it.
     this.broker.emit(
       REMOTE_DELIVERY_PLANNED_EVENT,
       {
@@ -204,7 +191,15 @@ function createOutboxServiceSchema({
     mixins: [OutboxService, queueMixin],
     settings,
     actions: {
-      post: createOutboxPostHandler(OutboxService.actions.post, { buildDeliveryPlan, enqueueHandoff })
+      post: createOutboxPostHandler(OutboxService.actions.post, { buildDeliveryPlan, enqueueHandoff }),
+      enqueueDeliveryHandoff: {
+        params: { deliveryPlan: { type: 'object' } },
+        async handler(ctx) {
+          assertExternalDeliveryConfiguration(this.settings);
+          const intentId = await enqueueDeliveryHandoff(this, ctx.params.deliveryPlan);
+          return { intentId };
+        }
+      }
     },
     queues: {
       [DELIVERY_HANDOFF_QUEUE]: {
