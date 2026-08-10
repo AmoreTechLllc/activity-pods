@@ -117,7 +117,7 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
 
     expect(result).toBe(activity);
     expect(createJob).toHaveBeenCalledTimes(1);
-    expect(createJob).toHaveBeenCalledWith('maintenance', 'keep-me', { reason: 'not-remote-delivery' });
+    expect(createJob).toHaveBeenCalledWith('maintenance', 'keep-me', { reason: 'not-remote-delivery' }, undefined);
     expect(createJob.mock.calls.some(([queueName]) => queueName === 'remotePost')).toBe(false);
     expect(broker.emit).toHaveBeenCalledWith(
       REMOTE_DELIVERY_PLANNED_EVENT,
