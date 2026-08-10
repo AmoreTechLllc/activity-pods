@@ -5,6 +5,7 @@ const schema = require('../contracts/ap.delivery-plan.v1.schema.json');
 const {
   DELIVERY_PLAN_SCHEMA,
   DELIVERY_PLAN_FIXTURE_SHA256,
+  DELIVERY_PLAN_JSON_SCHEMA_SHA256,
   deliveryPlanFingerprint,
   validateDeliveryPlanV1
 } = require('../utils/activitypub-delivery-plan');
@@ -16,6 +17,10 @@ describe('APDM delivery plan v1 producer contract', () => {
 
   test('fixture has the shared cross-repo fingerprint', () => {
     expect(deliveryPlanFingerprint(fixture)).toBe(DELIVERY_PLAN_FIXTURE_SHA256);
+  });
+
+  test('JSON schema has the shared cross-repo fingerprint', () => {
+    expect(deliveryPlanFingerprint(schema)).toBe(DELIVERY_PLAN_JSON_SCHEMA_SHA256);
   });
 
   test('schema and fixture agree on the version discriminator', () => {
