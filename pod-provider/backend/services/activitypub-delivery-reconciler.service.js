@@ -84,10 +84,11 @@ module.exports = {
         this.reconciliationStats.lastError = null;
 
         try {
-          const accounts = await ctx.call('auth.account.find', {});
+          const maxAccounts = Math.max(1, Math.floor(Number(this.settings.maxAccounts) || 1000));
+          const accounts = await ctx.call('auth.account.find', { limit: maxAccounts });
           const activeAccounts = (Array.isArray(accounts) ? accounts : [])
             .filter(account => account && !account.deletedAt && typeof account.webId === 'string' && typeof account.username === 'string')
-            .slice(0, Math.max(1, Math.floor(Number(this.settings.maxAccounts) || 1000)));
+            .slice(0, maxAccounts);
 
           const results = await mapWithConcurrency(
             activeAccounts,
@@ -147,16 +148,14 @@ module.exports = {
           return { activitiesScanned, handoffsRequeued, failures: failures + 1 };
         }
 
-        const sinceIso = new Date(Date.now() - Math.max(60000, Number(this.settings.lookbackMs) || 900000)).toISOString();
+        const cutoffMs = Date.now() - Math.max(60000, Number(this.settings.lookbackMs) || 900000);
         const maxActivities = Math.max(1, Math.min(1000, Math.floor(Number(this.settings.maxActivitiesPerAccount) || 50)));
         const queryBody = sanitizeSparqlQuery`
           PREFIX as: <https://www.w3.org/ns/activitystreams#>
-          PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
           SELECT ?activityUri ?published
           WHERE {
             <${outboxUri}> as:items ?activityUri .
             ?activityUri as:published ?published .
-            FILTER(?published >= "${sinceIso}"^^xsd:dateTime)
           }
           ORDER BY DESC(?published)
         `;
@@ -178,6 +177,9 @@ module.exports = {
               { resourceUri: activityUri, webId: 'system' },
               { meta: { dataset } }
             );
+            const publishedMs = Date.parse(activity?.published || row?.published?.value || '');
+            if (!Number.isFinite(publishedMs) || publishedMs < cutoffMs) continue;
+
             const recipients = await ctx.call('activitypub.activity.getRecipients', { activity });
             const localRecipientUris = [];
             const remoteRecipientUris = [];
