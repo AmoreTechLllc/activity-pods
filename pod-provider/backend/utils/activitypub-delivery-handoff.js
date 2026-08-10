@@ -16,8 +16,26 @@ function assertDurableHandoffConfigured(settings) {
     throw new Error('APDM external delivery requires SEMAPPS_QUEUE_SERVICE_URL for durable handoff');
   }
   if (typeof settings.deliveryHandoffUrl !== 'string' || settings.deliveryHandoffUrl.length === 0) {
-    throw new Error('APDM external delivery requires a sidecar Delivery Plan handoff URL');
+    throw new Error('APDM external delivery requires a sidecar durable outbox handoff URL');
   }
+}
+
+function toSidecarOutboxPayload(deliveryPlan) {
+  return {
+    actorUri: deliveryPlan.actorUri,
+    activityId: deliveryPlan.activityId,
+    activity: deliveryPlan.activity,
+    remoteTargets: deliveryPlan.remoteRecipients.map(target => ({
+      inboxUrl: target.inboxUrl,
+      ...(target.sharedInboxUrl ? { sharedInboxUrl: target.sharedInboxUrl } : {}),
+      targetDomain: target.targetDomain
+    })),
+    meta: {
+      ...deliveryPlan.meta,
+      deliveryPlanIntentId: deliveryPlan.intentId,
+      deliveryPlanSchema: deliveryPlan.schema
+    }
+  };
 }
 
 async function enqueueDeliveryHandoff(service, deliveryPlan) {
@@ -32,6 +50,8 @@ async function enqueueDeliveryHandoff(service, deliveryPlan) {
     { deliveryPlan },
     DELIVERY_HANDOFF_QUEUE_OPTIONS
   );
+  // moleculer-bull returns the queue insertion promise. Awaiting it is the
+  // producer-side durability boundary: do not return the outbox action first.
   await Promise.resolve(result);
   return deliveryPlan.intentId;
 }
@@ -55,31 +75,37 @@ async function processDeliveryHandoffJob(service, job, fetchImpl = fetch) {
   const response = await fetchImpl(service.settings.deliveryHandoffUrl, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ deliveryPlan }),
+    body: JSON.stringify(toSidecarOutboxPayload(deliveryPlan)),
     signal: AbortSignal.timeout(service.settings.deliveryHandoffTimeoutMs || 5000)
   });
 
   if (!response.ok) {
-    throw new Error(`Sidecar Delivery Plan handoff returned ${response.status}`);
+    throw new Error(`Sidecar durable outbox handoff returned ${response.status}`);
   }
 
   let acknowledgement;
   try {
     acknowledgement = await response.json();
   } catch {
-    throw new Error('Sidecar Delivery Plan handoff returned an invalid acknowledgement body');
+    throw new Error('Sidecar durable outbox handoff returned an invalid acknowledgement body');
   }
 
-  if (
-    !acknowledgement ||
-    acknowledgement.intentId !== intentId ||
-    (acknowledgement.status !== 'accepted' && acknowledgement.status !== 'duplicate')
-  ) {
-    throw new Error('Sidecar Delivery Plan handoff acknowledgement did not confirm durable acceptance');
+  // The existing sidecar endpoint generates its own queue-intent ID, but does
+  // not acknowledge until Redis Streams XADD has succeeded. The stable APDM
+  // plan ID is preserved in meta.deliveryPlanIntentId; outbound job IDs remain
+  // deterministic by activity + delivery URL and the worker applies its own
+  // idempotency guard on retries/duplicate accepted intents.
+  if (!acknowledgement || acknowledgement.accepted !== true || typeof acknowledgement.intentId !== 'string') {
+    throw new Error('Sidecar durable outbox handoff acknowledgement did not confirm Redis acceptance');
   }
 
   if (typeof job.progress === 'function') job.progress(100);
-  return acknowledgement;
+  return {
+    status: 'accepted',
+    deliveryPlanIntentId: intentId,
+    sidecarIntentId: acknowledgement.intentId,
+    jobCount: acknowledgement.jobCount
+  };
 }
 
 module.exports = {
@@ -87,5 +113,6 @@ module.exports = {
   DELIVERY_HANDOFF_QUEUE_OPTIONS,
   assertDurableHandoffConfigured,
   enqueueDeliveryHandoff,
-  processDeliveryHandoffJob
+  processDeliveryHandoffJob,
+  toSidecarOutboxPayload
 };
