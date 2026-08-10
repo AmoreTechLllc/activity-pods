@@ -47,8 +47,7 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
     expect(createJob).toHaveBeenCalledWith(
       'remotePost',
       'remote-1',
-      expect.objectContaining({ recipientUri: 'https://remote.example/users/bob' }),
-      undefined
+      expect.objectContaining({ recipientUri: 'https://remote.example/users/bob' })
     );
     expect(service.broker.emit).not.toHaveBeenCalled();
   });
@@ -80,13 +79,8 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
 
     expect(result).toBe(activity);
     expect(createJob).toHaveBeenCalledTimes(1);
-    expect(createJob).toHaveBeenCalledWith(
-      'maintenance',
-      'keep-me',
-      { reason: 'not-remote-delivery' },
-      undefined
-    );
-    expect(createJob).not.toHaveBeenCalledWith('remotePost', expect.anything(), expect.anything(), expect.anything());
+    expect(createJob).toHaveBeenCalledWith('maintenance', 'keep-me', { reason: 'not-remote-delivery' });
+    expect(createJob.mock.calls.some(([queueName]) => queueName === 'remotePost')).toBe(false);
     expect(broker.emit).toHaveBeenCalledWith(
       REMOTE_DELIVERY_PLANNED_EVENT,
       {
@@ -177,18 +171,16 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
   test('the ActivityPub service factory registers exactly one strategy-aware outbox service', () => {
     const serviceSchema = createActivityPubServiceWithDeliveryStrategy({
       remoteDeliveryMode: 'external',
-      allowExternalDeliveryPreview: true
+      allowExternalDeliveryPreview: true,
+      settings: {
+        baseUri: 'https://pods.example',
+        podProvider: true,
+        queueServiceUrl: null
+      }
     });
     const registered = [];
     const serviceContext = {
-      settings: {
-        ...serviceSchema.settings,
-        baseUri: 'https://pods.example',
-        podProvider: true,
-        queueServiceUrl: null,
-        remoteDeliveryMode: 'external',
-        allowExternalDeliveryPreview: true
-      },
+      settings: serviceSchema.settings,
       broker: {
         createService(schema) {
           registered.push(schema);
