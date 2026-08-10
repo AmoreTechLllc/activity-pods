@@ -2,19 +2,57 @@
 
 const {
   REMOTE_DELIVERY_PLANNED_EVENT,
+  SEMAPPS_INTERNAL_PATHS,
   SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION,
   assertSupportedSemappsVersion,
   createActivityPubServiceWithDeliveryStrategy,
   createOutboxPostHandler,
-  normalizeRemoteDeliveryMode
+  normalizeRemoteDeliveryMode,
+  resolveSemappsInternalPaths
 } = require('../lib/activitypub-service-with-delivery-strategy');
 
 const semappsActivityPubPackage = require('@semapps/activitypub/package.json');
+
+function createFakeInternals() {
+  const service = name => ({ name });
+  return {
+    ActorService: service('activitypub.actor'),
+    ActivityService: service('activitypub.activity'),
+    ApiService: service('activitypub.api'),
+    CollectionService: service('activitypub.collection'),
+    FollowService: service('activitypub.follow'),
+    InboxService: service('activitypub.inbox'),
+    LikeService: service('activitypub.like'),
+    ObjectService: service('activitypub.object'),
+    OutboxService: {
+      name: 'activitypub.outbox',
+      actions: {
+        async post() {
+          return { id: 'https://pods.example/as/activity/fake' };
+        }
+      }
+    },
+    CollectionsRegistryService: service('activitypub.collections-registry'),
+    ReplyService: service('activitypub.reply'),
+    ShareService: service('activitypub.share'),
+    SideEffectsService: service('activitypub.side-effects'),
+    FakeQueueMixin: {}
+  };
+}
 
 describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
   test('pins the adapter to the installed SemApps ActivityPub version', () => {
     expect(semappsActivityPubPackage.version).toBe(SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION);
     expect(() => assertSupportedSemappsVersion()).not.toThrow();
+  });
+
+  test('all pinned SemApps 1.1.4 internal module paths resolve from the installed package', () => {
+    const resolved = resolveSemappsInternalPaths();
+    expect(Object.keys(resolved).sort()).toEqual(Object.keys(SEMAPPS_INTERNAL_PATHS).sort());
+    for (const resolvedPath of Object.values(resolved)) {
+      expect(typeof resolvedPath).toBe('string');
+      expect(resolvedPath.length).toBeGreaterThan(0);
+    }
   });
 
   test('normalizes valid modes and rejects unknown modes', () => {
@@ -176,7 +214,8 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
         baseUri: 'https://pods.example',
         podProvider: true,
         queueServiceUrl: null
-      }
+      },
+      internals: createFakeInternals()
     });
     const registered = [];
     const serviceContext = {
