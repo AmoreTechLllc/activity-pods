@@ -4,6 +4,7 @@ const {
   REMOTE_DELIVERY_PLANNED_EVENT,
   SEMAPPS_INTERNAL_PATHS,
   SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION,
+  assertExternalDeliveryConfiguration,
   assertSupportedSemappsVersion,
   createActivityPubServiceWithDeliveryStrategy,
   createOutboxPostHandler,
@@ -37,6 +38,19 @@ function createFakeInternals() {
     ShareService: service('activitypub.share'),
     SideEffectsService: service('activitypub.side-effects'),
     FakeQueueMixin: {}
+  };
+}
+
+function externalSettings(overrides = {}) {
+  return {
+    remoteDeliveryMode: 'external',
+    allowExternalDeliveryPreview: true,
+    podProvider: true,
+    queueServiceUrl: 'redis://queue.example:6379',
+    deliveryHandoffUrl: 'http://fedify-sidecar:8080/webhook/outbox',
+    deliveryHandoffToken: 'secret',
+    deliveryHandoffTimeoutMs: 1000,
+    ...overrides
   };
 }
 
@@ -74,6 +88,26 @@ describe('APDM Phase 2-4 ActivityPub remote delivery strategy', () => {
     expect(normalizeRemoteDeliveryMode(' NATIVE ')).toBe('native');
     expect(normalizeRemoteDeliveryMode('external')).toBe('external');
     expect(() => normalizeRemoteDeliveryMode('sidecar-ish')).toThrow(/Unsupported ActivityPub remote delivery mode/u);
+  });
+
+  test('external configuration fails fast without preview guard, durable queue, handoff URL, or token', () => {
+    expect(() => assertExternalDeliveryConfiguration(externalSettings({ allowExternalDeliveryPreview: false }))).toThrow(
+      /explicit APDM preview guard/u
+    );
+    expect(() => assertExternalDeliveryConfiguration(externalSettings({ queueServiceUrl: null }))).toThrow(
+      /FakeQueueMixin is forbidden/u
+    );
+    expect(() => assertExternalDeliveryConfiguration(externalSettings({ deliveryHandoffUrl: '' }))).toThrow(
+      /handoff URL/u
+    );
+    expect(() => assertExternalDeliveryConfiguration(externalSettings({ deliveryHandoffUrl: 'ftp://sidecar/outbox' }))).toThrow(
+      /must use HTTP\(S\)/u
+    );
+    expect(() => assertExternalDeliveryConfiguration(externalSettings({ deliveryHandoffToken: '' }))).toThrow(
+      /SIDECAR_TOKEN/u
+    );
+    expect(() => assertExternalDeliveryConfiguration(externalSettings())).not.toThrow();
+    expect(() => assertExternalDeliveryConfiguration({ remoteDeliveryMode: 'native' })).not.toThrow();
   });
 
   test('native mode remains unchanged and never plans or enqueues APDM handoff', async () => {
@@ -121,7 +155,7 @@ describe('APDM Phase 2-4 ActivityPub remote delivery strategy', () => {
     const createJob = jest.fn();
     const broker = { emit: jest.fn() };
     const service = {
-      settings: { remoteDeliveryMode: 'external', allowExternalDeliveryPreview: true, podProvider: true },
+      settings: externalSettings(),
       createJob,
       localPost: nativeLocalPost,
       broker
@@ -163,7 +197,7 @@ describe('APDM Phase 2-4 ActivityPub remote delivery strategy', () => {
       enqueueHandoff
     });
     const service = {
-      settings: { remoteDeliveryMode: 'external', allowExternalDeliveryPreview: true, podProvider: true },
+      settings: externalSettings(),
       createJob: jest.fn(),
       broker: { emit: jest.fn() }
     };
@@ -191,7 +225,7 @@ describe('APDM Phase 2-4 ActivityPub remote delivery strategy', () => {
       }
     });
     const service = {
-      settings: { remoteDeliveryMode: 'external', allowExternalDeliveryPreview: true, podProvider: true },
+      settings: externalSettings(),
       createJob: jest.fn(),
       broker: { emit: jest.fn() }
     };
@@ -200,19 +234,19 @@ describe('APDM Phase 2-4 ActivityPub remote delivery strategy', () => {
     expect(service.broker.emit).not.toHaveBeenCalled();
   });
 
-  test('external mode still fails closed unless preview guard is enabled', async () => {
+  test('external mode fails before invoking native outbox when required durability config is absent', async () => {
     const nativeHandler = jest.fn();
     const wrapped = createOutboxPostHandler(nativeHandler, {
       buildDeliveryPlan: jest.fn(),
       enqueueHandoff: jest.fn()
     });
     const service = {
-      settings: { remoteDeliveryMode: 'external', allowExternalDeliveryPreview: false },
+      settings: externalSettings({ queueServiceUrl: null }),
       createJob: jest.fn(),
       broker: { emit: jest.fn() }
     };
 
-    await expect(wrapped.call(service, {})).rejects.toThrow(/not yet enabled for production/u);
+    await expect(wrapped.call(service, {})).rejects.toThrow(/FakeQueueMixin is forbidden/u);
     expect(nativeHandler).not.toHaveBeenCalled();
   });
 
@@ -245,7 +279,7 @@ describe('APDM Phase 2-4 ActivityPub remote delivery strategy', () => {
     const originalCreateJob = jest.fn();
     const originalLocalPost = jest.fn(async () => undefined);
     const service = {
-      settings: { remoteDeliveryMode: 'external', allowExternalDeliveryPreview: true, podProvider: true },
+      settings: externalSettings(),
       createJob: originalCreateJob,
       localPost: originalLocalPost,
       broker: { emit: jest.fn() }
@@ -274,15 +308,16 @@ describe('APDM Phase 2-4 ActivityPub remote delivery strategy', () => {
     expect(enqueueHandoff).toHaveBeenCalledTimes(2);
   });
 
-  test('factory registers exactly one strategy-aware outbox with durable handoff queue', () => {
+  test('factory registers exactly one strategy-aware outbox with durable handoff queue and internal enqueue action', () => {
     const serviceSchema = createActivityPubServiceWithDeliveryStrategy({
       remoteDeliveryMode: 'external',
       allowExternalDeliveryPreview: true,
       settings: {
         baseUri: 'https://pods.example',
         podProvider: true,
-        queueServiceUrl: null,
-        deliveryHandoffUrl: 'http://sidecar/webhook/outbox'
+        queueServiceUrl: 'redis://queue.example:6379',
+        deliveryHandoffUrl: 'http://sidecar/webhook/outbox',
+        deliveryHandoffToken: 'secret'
       },
       internals: createFakeInternals(),
       buildDeliveryPlan: jest.fn(),
@@ -301,5 +336,6 @@ describe('APDM Phase 2-4 ActivityPub remote delivery strategy', () => {
     expect(outbox.settings).toEqual(expect.objectContaining({ remoteDeliveryMode: 'external' }));
     expect(outbox.queues.deliveryHandoff).toEqual(expect.objectContaining({ name: '*' }));
     expect(typeof outbox.queues.deliveryHandoff.process).toBe('function');
+    expect(typeof outbox.actions.enqueueDeliveryHandoff.handler).toBe('function');
   });
 });
