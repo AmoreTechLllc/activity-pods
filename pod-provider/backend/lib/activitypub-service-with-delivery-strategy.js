@@ -25,9 +25,7 @@ const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.planne
 function normalizeRemoteDeliveryMode(value) {
   const normalized = String(value || 'native').trim().toLowerCase();
   if (!REMOTE_DELIVERY_MODES.has(normalized)) {
-    throw new Error(
-      `Unsupported ActivityPub remote delivery mode '${value}'. Expected one of: native, external.`
-    );
+    throw new Error(`Unsupported ActivityPub remote delivery mode '${value}'. Expected one of: native, external.`);
   }
   return normalized;
 }
@@ -117,7 +115,8 @@ function createOutboxServiceSchema({ baseUri, podProvider, queueServiceUrl, remo
 
 function createActivityPubServiceWithDeliveryStrategy({
   remoteDeliveryMode = 'native',
-  allowExternalDeliveryPreview = false
+  allowExternalDeliveryPreview = false,
+  settings = {}
 } = {}) {
   assertSupportedSemappsVersion();
   const normalizedRemoteDeliveryMode = normalizeRemoteDeliveryMode(remoteDeliveryMode);
@@ -132,6 +131,7 @@ function createActivityPubServiceWithDeliveryStrategy({
       activateTombstones: true,
       selectActorData: null,
       queueServiceUrl: null,
+      ...settings,
       remoteDeliveryMode: normalizedRemoteDeliveryMode,
       allowExternalDeliveryPreview: Boolean(allowExternalDeliveryPreview)
     },
@@ -149,43 +149,19 @@ function createActivityPubServiceWithDeliveryStrategy({
         allowExternalDeliveryPreview: configuredExternalPreview
       } = this.settings;
 
-      const queueMixin = queueServiceUrl ? QueueMixin(queueServiceUrl) : FakeQueueMixin;
+      const sideEffectsQueueMixin = queueServiceUrl ? QueueMixin(queueServiceUrl) : FakeQueueMixin;
 
       this.broker.createService({
-        mixins: [SideEffectsService, queueMixin],
+        mixins: [SideEffectsService, sideEffectsQueueMixin],
         settings: { podProvider }
       });
 
-      this.broker.createService({
-        mixins: [CollectionService],
-        settings: { podProvider, path: collectionsPath }
-      });
-
-      this.broker.createService({
-        mixins: [CollectionsRegistryService],
-        settings: { baseUri, podProvider }
-      });
-
-      this.broker.createService({
-        mixins: [ActorService],
-        settings: { baseUri, selectActorData, podProvider }
-      });
-
-      this.broker.createService({
-        mixins: [ApiService],
-        settings: { baseUri, podProvider }
-      });
-
-      this.broker.createService({
-        mixins: [ObjectService],
-        settings: { baseUri, podProvider, activateTombstones }
-      });
-
-      this.broker.createService({
-        mixins: [ActivityService],
-        settings: { baseUri, podProvider, path: activitiesPath }
-      });
-
+      this.broker.createService({ mixins: [CollectionService], settings: { podProvider, path: collectionsPath } });
+      this.broker.createService({ mixins: [CollectionsRegistryService], settings: { baseUri, podProvider } });
+      this.broker.createService({ mixins: [ActorService], settings: { baseUri, selectActorData, podProvider } });
+      this.broker.createService({ mixins: [ApiService], settings: { baseUri, podProvider } });
+      this.broker.createService({ mixins: [ObjectService], settings: { baseUri, podProvider, activateTombstones } });
+      this.broker.createService({ mixins: [ActivityService], settings: { baseUri, podProvider, path: activitiesPath } });
       this.broker.createService({ mixins: [FollowService], settings: { baseUri } });
       this.broker.createService({ mixins: [InboxService], settings: { podProvider } });
       this.broker.createService({ mixins: [LikeService], settings: { baseUri, podProvider } });
