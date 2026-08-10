@@ -4,6 +4,7 @@ const {
   buildDeliveryPlanV1,
   createDeliveryIntentId,
   determineVisibility,
+  isFollowersCollectionUri,
   mapWithConcurrency
 } = require('../utils/activitypub-delivery-planner');
 const { validateDeliveryPlanV1 } = require('../utils/activitypub-delivery-plan');
@@ -28,18 +29,30 @@ function createActivity(overrides = {}) {
   };
 }
 
+function createRemoteOnlyContext() {
+  return {
+    async call(action, params) {
+      if (action === 'activitypub.actor.get') {
+        const url = new URL(params.actorUri);
+        return {
+          id: params.actorUri,
+          inbox: `${url.origin}${url.pathname}/inbox`,
+          endpoints: { sharedInbox: `${url.origin}/inbox` }
+        };
+      }
+      throw new Error(`Unexpected call ${action}`);
+    }
+  };
+}
+
 describe('APDM Phase 3 authoritative delivery planner', () => {
   test('builds concrete local and remote targets from the already-expanded SemApps partition', async () => {
     const calls = [];
     const ctx = {
       async call(action, params, options) {
         calls.push({ action, params, options });
-        if (action === 'auth.account.findByWebId') {
-          return { username: 'bob' };
-        }
-        if (action === 'activitypub.actor.getCollectionUri') {
-          return 'https://pods.example/bob/inbox';
-        }
+        if (action === 'auth.account.findByWebId') return { username: 'bob' };
+        if (action === 'activitypub.actor.getCollectionUri') return 'https://pods.example/bob/inbox';
         if (action === 'activitypub.actor.get') {
           return {
             id: params.actorUri,
@@ -82,19 +95,108 @@ describe('APDM Phase 3 authoritative delivery planner', () => {
     });
   });
 
-  test('deduplicates expanded recipient URIs without collapsing distinct actors that share an inbox', async () => {
-    const ctx = {
-      async call(action, params) {
-        if (action === 'activitypub.actor.get') {
-          return {
-            inbox: `${params.actorUri}/inbox`,
-            endpoints: { sharedInbox: 'https://remote.example/inbox' }
-          };
-        }
-        throw new Error(`Unexpected call ${action}`);
+  test('followers-only addressing produces concrete remote follower targets, never the collection URI', async () => {
+    const remoteFollower = 'https://remote.example/users/follower';
+    const activity = createActivity({
+      id: 'https://pods.example/alice/activities/followers-only',
+      to: [`${ACTOR}/followers`],
+      cc: []
+    });
+
+    const plan = await buildDeliveryPlanV1(createRemoteOnlyContext(), {
+      activity,
+      remoteRecipientUris: [remoteFollower]
+    });
+
+    expect(plan.meta).toEqual({ visibility: 'followers', isPublicActivity: false });
+    expect(plan.remoteRecipients).toHaveLength(1);
+    expect(plan.remoteRecipients[0]).toEqual(
+      expect.objectContaining({
+        actorUri: remoteFollower,
+        inboxUrl: `${remoteFollower}/inbox`,
+        sharedInboxUrl: 'https://remote.example/inbox',
+        targetDomain: 'remote.example'
+      })
+    );
+    expect(plan.remoteRecipients.some(target => isFollowersCollectionUri(target.actorUri))).toBe(false);
+  });
+
+  test('refuses an unresolved followers collection before attempting actor resolution', async () => {
+    const ctx = { call: jest.fn() };
+
+    await expect(
+      buildDeliveryPlanV1(ctx, {
+        activity: createActivity({ to: [`${ACTOR}/followers`], cc: [] }),
+        remoteRecipientUris: [`${ACTOR}/followers`]
+      })
+    ).rejects.toThrow(/unresolved remote followers collection/u);
+
+    expect(ctx.call).not.toHaveBeenCalled();
+  });
+
+  test('direct mention addressing remains a concrete direct plan', async () => {
+    const recipient = 'https://remote.example/users/direct';
+    const plan = await buildDeliveryPlanV1(createRemoteOnlyContext(), {
+      activity: createActivity({
+        id: 'https://pods.example/alice/activities/direct',
+        to: [recipient],
+        cc: []
+      }),
+      remoteRecipientUris: [recipient]
+    });
+
+    expect(plan.meta.visibility).toBe('direct');
+    expect(plan.remoteRecipients.map(target => target.actorUri)).toEqual([recipient]);
+  });
+
+  test('reply addressing preserves the concrete addressed actor', async () => {
+    const recipient = 'https://remote.example/users/replied-to';
+    const activity = createActivity({
+      id: 'https://pods.example/alice/activities/reply',
+      to: [recipient],
+      cc: [],
+      object: {
+        id: 'https://pods.example/alice/objects/reply',
+        type: 'Note',
+        attributedTo: ACTOR,
+        inReplyTo: 'https://remote.example/objects/original',
+        content: 'reply'
       }
+    });
+
+    const plan = await buildDeliveryPlanV1(createRemoteOnlyContext(), {
+      activity,
+      remoteRecipientUris: [recipient]
+    });
+
+    expect(plan.meta.visibility).toBe('direct');
+    expect(plan.remoteRecipients[0].actorUri).toBe(recipient);
+    expect(plan.activity.object.inReplyTo).toBe('https://remote.example/objects/original');
+  });
+
+  test('Follow addressing resolves the Follow object actor as a concrete remote target', async () => {
+    const followee = 'https://remote.example/users/followee';
+    const activity = {
+      id: 'https://pods.example/alice/activities/follow',
+      type: 'Follow',
+      actor: ACTOR,
+      object: followee,
+      to: [followee],
+      cc: []
     };
 
+    const plan = await buildDeliveryPlanV1(createRemoteOnlyContext(), {
+      activity,
+      remoteRecipientUris: [followee]
+    });
+
+    expect(validateDeliveryPlanV1(plan)).toBe(true);
+    expect(plan.meta.visibility).toBe('direct');
+    expect(plan.remoteRecipients[0].actorUri).toBe(followee);
+  });
+
+  test('deduplicates expanded recipient URIs without collapsing distinct actors that share an inbox', async () => {
+    const ctx = createRemoteOnlyContext();
     const plan = await buildDeliveryPlanV1(ctx, {
       activity: createActivity(),
       remoteRecipientUris: [
@@ -190,17 +292,7 @@ describe('APDM Phase 3 authoritative delivery planner', () => {
         cc: ['https://www.w3.org/ns/activitystreams#Public']
       }))
     ).toBe('unlisted');
-    expect(
-      determineVisibility(createActivity({
-        to: [`${ACTOR}/followers`],
-        cc: []
-      }))
-    ).toBe('followers');
-    expect(
-      determineVisibility(createActivity({
-        to: ['https://remote.example/users/a'],
-        cc: []
-      }))
-    ).toBe('direct');
+    expect(determineVisibility(createActivity({ to: [`${ACTOR}/followers`], cc: [] }))).toBe('followers');
+    expect(determineVisibility(createActivity({ to: ['https://remote.example/users/a'], cc: [] }))).toBe('direct');
   });
 });
