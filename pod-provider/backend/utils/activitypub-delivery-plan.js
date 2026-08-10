@@ -4,6 +4,7 @@ const crypto = require('crypto');
 
 const DELIVERY_PLAN_SCHEMA = 'ap.delivery-plan.v1';
 const DELIVERY_PLAN_FIXTURE_SHA256 = '8a772d3c6d0555c9419ecf62f06e970ca0f82440f00db0c75b645f47fcaa27d7';
+const DELIVERY_PLAN_JSON_SCHEMA_SHA256 = 'ca5fa95a87f00ebb1514d63272d90c39d3cd668d4d342759565e11a7253ca2e5';
 const VISIBILITIES = new Set(['public', 'unlisted', 'followers', 'direct']);
 
 function isNonEmptyString(value) {
@@ -72,13 +73,14 @@ function canonicalize(value) {
   return JSON.stringify(value);
 }
 
-function deliveryPlanFingerprint(plan) {
-  return crypto.createHash('sha256').update(canonicalize(plan)).digest('hex');
+function deliveryPlanFingerprint(value) {
+  return crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
 }
 
 module.exports = {
   DELIVERY_PLAN_SCHEMA,
   DELIVERY_PLAN_FIXTURE_SHA256,
+  DELIVERY_PLAN_JSON_SCHEMA_SHA256,
   canonicalize,
   deliveryPlanFingerprint,
   validateDeliveryPlanV1
