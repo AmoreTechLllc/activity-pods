@@ -40,7 +40,28 @@ function createFakeInternals() {
   };
 }
 
-describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
+function createStubPlan(activity, localRecipientUris, remoteRecipientUris) {
+  return {
+    schema: 'ap.delivery-plan.v1',
+    intentId: `intent-${activity.id}`,
+    activityId: activity.id,
+    actorUri: activity.actor || 'https://pods.example/alice',
+    activity,
+    localRecipients: localRecipientUris.map((actorUri, index) => ({
+      actorUri,
+      dataset: `local-${index}`,
+      inboxUri: `${actorUri}/inbox`
+    })),
+    remoteRecipients: remoteRecipientUris.map(actorUri => ({
+      actorUri,
+      inboxUrl: `${actorUri}/inbox`,
+      targetDomain: new URL(actorUri).hostname
+    })),
+    meta: { visibility: 'direct', isPublicActivity: false }
+  };
+}
+
+describe('APDM Phase 2/3 ActivityPub remote delivery strategy', () => {
   test('pins the adapter to the installed SemApps ActivityPub version', () => {
     expect(semappsActivityPubPackage.version).toBe(SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION);
     expect(() => assertSupportedSemappsVersion()).not.toThrow();
@@ -62,7 +83,7 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
     expect(() => normalizeRemoteDeliveryMode('sidecar-ish')).toThrow(/Unsupported ActivityPub remote delivery mode/u);
   });
 
-  test('native mode delegates unchanged to the SemApps-style handler', async () => {
+  test('native mode delegates unchanged and never invokes the APDM planner', async () => {
     const nativeHandler = jest.fn(async function nativePost() {
       this.createJob('remotePost', 'remote-1', {
         recipientUri: 'https://remote.example/users/bob',
@@ -70,7 +91,8 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
       });
       return { id: 'https://pods.example/as/activity/1' };
     });
-    const wrapped = createOutboxPostHandler(nativeHandler);
+    const buildDeliveryPlan = jest.fn();
+    const wrapped = createOutboxPostHandler(nativeHandler, { buildDeliveryPlan });
     const createJob = jest.fn();
     const service = {
       settings: { remoteDeliveryMode: 'native', allowExternalDeliveryPreview: false },
@@ -87,11 +109,16 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
       'remote-1',
       expect.objectContaining({ recipientUri: 'https://remote.example/users/bob' })
     );
+    expect(buildDeliveryPlan).not.toHaveBeenCalled();
     expect(service.broker.emit).not.toHaveBeenCalled();
   });
 
-  test('external preview suppresses native remotePost jobs but delegates unrelated queues', async () => {
-    const activity = { id: 'https://pods.example/as/activity/2' };
+  test('external preview captures the exact local and remote SemApps partition and suppresses only remotePost jobs', async () => {
+    const activity = {
+      id: 'https://pods.example/as/activity/2',
+      actor: 'https://pods.example/alice'
+    };
+    const nativeLocalPost = jest.fn(async () => undefined);
     const nativeHandler = async function nativePost() {
       this.createJob('remotePost', 'bob', {
         recipientUri: 'https://remote.example/users/bob',
@@ -102,31 +129,55 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
         activity
       });
       this.createJob('maintenance', 'keep-me', { reason: 'not-remote-delivery' });
+      this.localPost(
+        ['https://pods.example/bob', 'https://pods.example/bob', 'https://pods.example/dan'],
+        activity
+      );
       return activity;
     };
-    const wrapped = createOutboxPostHandler(nativeHandler);
+    const buildDeliveryPlan = jest.fn(async (_ctx, input) =>
+      createStubPlan(activity, input.localRecipientUris, input.remoteRecipientUris)
+    );
+    const wrapped = createOutboxPostHandler(nativeHandler, { buildDeliveryPlan });
     const createJob = jest.fn();
     const broker = { emit: jest.fn() };
     const service = {
-      settings: { remoteDeliveryMode: 'external', allowExternalDeliveryPreview: true },
+      settings: { remoteDeliveryMode: 'external', allowExternalDeliveryPreview: true, podProvider: true },
       createJob,
+      localPost: nativeLocalPost,
       broker
     };
 
-    const result = await wrapped.call(service, {});
+    const result = await wrapped.call(service, { requestId: 'ctx-1' });
 
     expect(result).toBe(activity);
     expect(createJob).toHaveBeenCalledTimes(1);
     expect(createJob).toHaveBeenCalledWith('maintenance', 'keep-me', { reason: 'not-remote-delivery' }, undefined);
     expect(createJob.mock.calls.some(([queueName]) => queueName === 'remotePost')).toBe(false);
+    expect(nativeLocalPost).toHaveBeenCalledWith(
+      ['https://pods.example/bob', 'https://pods.example/bob', 'https://pods.example/dan'],
+      activity
+    );
+    expect(buildDeliveryPlan).toHaveBeenCalledWith(
+      { requestId: 'ctx-1' },
+      {
+        activity,
+        localRecipientUris: ['https://pods.example/bob', 'https://pods.example/dan'],
+        remoteRecipientUris: ['https://remote.example/users/bob', 'https://remote.example/users/carol'],
+        podProvider: true
+      }
+    );
+
+    const plan = buildDeliveryPlan.mock.results[0].value;
+    expect(plan).toBeInstanceOf(Promise);
+    const resolvedPlan = await plan;
     expect(broker.emit).toHaveBeenCalledWith(
       REMOTE_DELIVERY_PLANNED_EVENT,
       {
         activity,
-        remoteRecipients: [
-          'https://remote.example/users/bob',
-          'https://remote.example/users/carol'
-        ],
+        deliveryPlan: resolvedPlan,
+        remoteRecipients: ['https://remote.example/users/bob', 'https://remote.example/users/carol'],
+        localRecipients: ['https://pods.example/bob', 'https://pods.example/dan'],
         suppressedNativeRemotePostCount: 2,
         deliveryMode: 'external'
       },
@@ -136,7 +187,8 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
 
   test('external mode fails closed unless the explicit preview guard is enabled', async () => {
     const nativeHandler = jest.fn();
-    const wrapped = createOutboxPostHandler(nativeHandler);
+    const buildDeliveryPlan = jest.fn();
+    const wrapped = createOutboxPostHandler(nativeHandler, { buildDeliveryPlan });
     const service = {
       settings: { remoteDeliveryMode: 'external', allowExternalDeliveryPreview: false },
       createJob: jest.fn(),
@@ -145,9 +197,35 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
 
     await expect(wrapped.call(service, {})).rejects.toThrow(/not yet enabled for production/u);
     expect(nativeHandler).not.toHaveBeenCalled();
+    expect(buildDeliveryPlan).not.toHaveBeenCalled();
   });
 
-  test('does not mutate the shared service createJob function in external mode', async () => {
+  test('fails closed when authoritative plan construction fails after native remotePost suppression', async () => {
+    const activity = { id: 'https://pods.example/as/activity/fail', actor: 'https://pods.example/alice' };
+    const nativeHandler = async function nativePost() {
+      this.createJob('remotePost', 'remote', {
+        recipientUri: 'https://remote.example/users/fail',
+        activity
+      });
+      return activity;
+    };
+    const buildDeliveryPlan = jest.fn(async () => {
+      throw new Error('remote inbox unavailable');
+    });
+    const wrapped = createOutboxPostHandler(nativeHandler, { buildDeliveryPlan });
+    const broker = { emit: jest.fn() };
+    const service = {
+      settings: { remoteDeliveryMode: 'external', allowExternalDeliveryPreview: true, podProvider: true },
+      createJob: jest.fn(),
+      broker
+    };
+
+    await expect(wrapped.call(service, {})).rejects.toThrow(/remote inbox unavailable/u);
+    expect(service.createJob).not.toHaveBeenCalled();
+    expect(broker.emit).not.toHaveBeenCalled();
+  });
+
+  test('does not mutate shared createJob/localPost functions across concurrent external requests', async () => {
     let releaseFirst;
     const firstBarrier = new Promise(resolve => {
       releaseFirst = resolve;
@@ -160,26 +238,33 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
     const nativeHandler = async function nativePost(ctx) {
       this.createJob('remotePost', ctx.recipient, {
         recipientUri: ctx.recipient,
-        activity: { id: ctx.activityId }
+        activity: { id: ctx.activityId, actor: 'https://pods.example/alice' }
       });
+      this.localPost([ctx.localRecipient], { id: ctx.activityId });
       if (ctx.wait) {
         firstEntered();
         await firstBarrier;
       }
-      return { id: ctx.activityId };
+      return { id: ctx.activityId, actor: 'https://pods.example/alice' };
     };
 
-    const wrapped = createOutboxPostHandler(nativeHandler);
+    const buildDeliveryPlan = jest.fn(async (_ctx, input) =>
+      createStubPlan(input.activity, input.localRecipientUris, input.remoteRecipientUris)
+    );
+    const wrapped = createOutboxPostHandler(nativeHandler, { buildDeliveryPlan });
     const originalCreateJob = jest.fn();
+    const originalLocalPost = jest.fn(async () => undefined);
     const broker = { emit: jest.fn() };
     const service = {
-      settings: { remoteDeliveryMode: 'external', allowExternalDeliveryPreview: true },
+      settings: { remoteDeliveryMode: 'external', allowExternalDeliveryPreview: true, podProvider: true },
       createJob: originalCreateJob,
+      localPost: originalLocalPost,
       broker
     };
 
     const first = wrapped.call(service, {
       recipient: 'https://one.example/users/a',
+      localRecipient: 'https://pods.example/a',
       activityId: 'https://pods.example/as/activity/a',
       wait: true
     });
@@ -187,21 +272,30 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
 
     const second = wrapped.call(service, {
       recipient: 'https://two.example/users/b',
+      localRecipient: 'https://pods.example/b',
       activityId: 'https://pods.example/as/activity/b',
       wait: false
     });
 
     expect(service.createJob).toBe(originalCreateJob);
+    expect(service.localPost).toBe(originalLocalPost);
     releaseFirst();
     await Promise.all([first, second]);
 
     expect(originalCreateJob).not.toHaveBeenCalled();
+    expect(originalLocalPost).toHaveBeenCalledTimes(2);
     const plannedEvents = broker.emit.mock.calls.filter(([eventName]) => eventName === REMOTE_DELIVERY_PLANNED_EVENT);
     expect(plannedEvents).toHaveLength(2);
     expect(plannedEvents.map(([, payload]) => payload.remoteRecipients)).toEqual(
       expect.arrayContaining([
         ['https://one.example/users/a'],
         ['https://two.example/users/b']
+      ])
+    );
+    expect(plannedEvents.map(([, payload]) => payload.localRecipients)).toEqual(
+      expect.arrayContaining([
+        ['https://pods.example/a'],
+        ['https://pods.example/b']
       ])
     );
   });
@@ -215,7 +309,8 @@ describe('APDM Phase 2 ActivityPub remote delivery strategy', () => {
         podProvider: true,
         queueServiceUrl: null
       },
-      internals: createFakeInternals()
+      internals: createFakeInternals(),
+      buildDeliveryPlan: jest.fn()
     });
     const registered = [];
     const serviceContext = {
