@@ -49,9 +49,12 @@ module.exports = {
 
   started() {
     if (!this.settings.enabled) return;
+    if (typeof this.settings.baseUri !== 'string' || this.settings.baseUri.length === 0) {
+      throw new Error('ActivityPub delivery reconciliation requires a configured provider base URI');
+    }
+
     const intervalMs = Math.max(10000, Number(this.settings.intervalMs) || 60000);
     const initialDelayMs = Math.max(1000, Number(this.settings.initialDelayMs) || 15000);
-
     const run = () => {
       this.broker.call('activitypub-delivery-reconciler.run', {}, { meta: { webId: 'system' } }).catch(error => {
         this.logger.error('ActivityPub delivery reconciliation run failed', { error: error.message });
@@ -84,11 +87,11 @@ module.exports = {
           const accounts = await ctx.call('auth.account.find', {});
           const activeAccounts = (Array.isArray(accounts) ? accounts : [])
             .filter(account => account && !account.deletedAt && typeof account.webId === 'string' && typeof account.username === 'string')
-            .slice(0, Math.max(1, Number(this.settings.maxAccounts) || 1000));
+            .slice(0, Math.max(1, Math.floor(Number(this.settings.maxAccounts) || 1000)));
 
           const results = await mapWithConcurrency(
             activeAccounts,
-            Math.max(1, Number(this.settings.concurrency) || 4),
+            Math.max(1, Math.floor(Number(this.settings.concurrency) || 4)),
             account => this.reconcileAccount(ctx, account)
           );
 
@@ -145,20 +148,20 @@ module.exports = {
         }
 
         const sinceIso = new Date(Date.now() - Math.max(60000, Number(this.settings.lookbackMs) || 900000)).toISOString();
-        const maxActivities = Math.max(1, Math.floor(Number(this.settings.maxActivitiesPerAccount) || 50));
+        const maxActivities = Math.max(1, Math.min(1000, Math.floor(Number(this.settings.maxActivitiesPerAccount) || 50)));
+        const queryBody = sanitizeSparqlQuery`
+          PREFIX as: <https://www.w3.org/ns/activitystreams#>
+          PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+          SELECT ?activityUri ?published
+          WHERE {
+            <${outboxUri}> as:items ?activityUri .
+            ?activityUri as:published ?published .
+            FILTER(?published >= "${sinceIso}"^^xsd:dateTime)
+          }
+          ORDER BY DESC(?published)
+        `;
         const rows = await ctx.call('triplestore.query', {
-          query: sanitizeSparqlQuery`
-            PREFIX as: <https://www.w3.org/ns/activitystreams#>
-            PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-            SELECT ?activityUri ?published
-            WHERE {
-              <${outboxUri}> as:items ?activityUri .
-              ?activityUri as:published ?published .
-              FILTER(?published >= "${sinceIso}"^^xsd:dateTime)
-            }
-            ORDER BY DESC(?published)
-            LIMIT ${maxActivities}
-          `,
+          query: `${queryBody}\nLIMIT ${maxActivities}`,
           accept: MIME_TYPES.JSON,
           dataset,
           webId: 'system'
