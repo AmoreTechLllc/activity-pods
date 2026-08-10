@@ -23,10 +23,3 @@ module.exports = createActivityPubServiceWithDeliveryStrategy({
     queueServiceUrl: CONFIG.QUEUE_SERVICE_URL
   }
 });
-
-module.exports.settings = {
-  ...module.exports.settings,
-  baseUri: CONFIG.BASE_URL,
-  podProvider: true,
-  queueServiceUrl: CONFIG.QUEUE_SERVICE_URL
-};
