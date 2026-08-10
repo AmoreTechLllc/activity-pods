@@ -4,11 +4,19 @@ const crypto = require('crypto');
 
 const DELIVERY_PLAN_SCHEMA = 'ap.delivery-plan.v1';
 const DELIVERY_PLAN_FIXTURE_SHA256 = '8a772d3c6d0555c9419ecf62f06e970ca0f82440f00db0c75b645f47fcaa27d7';
-const DELIVERY_PLAN_JSON_SCHEMA_SHA256 = 'ca5fa95a87f00ebb1514d63272d90c39d3cd668d4d342759565e11a7253ca2e5';
+const DELIVERY_PLAN_JSON_SCHEMA_SHA256 = '555094968f8372e2e2438bf1dc6eae69d2f2541231d3a4aa7ce7efee8f5fcd9f';
 const VISIBILITIES = new Set(['public', 'unlisted', 'followers', 'direct']);
+const PLAN_KEYS = new Set(['schema', 'intentId', 'activityId', 'actorUri', 'activity', 'localRecipients', 'remoteRecipients', 'meta']);
+const LOCAL_TARGET_KEYS = new Set(['actorUri', 'dataset', 'inboxUri']);
+const REMOTE_TARGET_KEYS = new Set(['actorUri', 'inboxUrl', 'sharedInboxUrl', 'targetDomain']);
+const META_KEYS = new Set(['visibility', 'isPublicActivity', 'isPublicIndexable', 'searchConsent']);
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.length > 0;
+}
+
+function hasOnlyKeys(value, allowed) {
+  return Object.keys(value).every(key => allowed.has(key));
 }
 
 function isHttpUrl(value) {
@@ -26,6 +34,7 @@ function validateLocalRecipient(target) {
     target &&
       typeof target === 'object' &&
       !Array.isArray(target) &&
+      hasOnlyKeys(target, LOCAL_TARGET_KEYS) &&
       isHttpUrl(target.actorUri) &&
       isNonEmptyString(target.dataset) &&
       isHttpUrl(target.inboxUri)
@@ -37,6 +46,7 @@ function validateRemoteRecipient(target) {
     target &&
       typeof target === 'object' &&
       !Array.isArray(target) &&
+      hasOnlyKeys(target, REMOTE_TARGET_KEYS) &&
       isHttpUrl(target.actorUri) &&
       isHttpUrl(target.inboxUrl) &&
       (target.sharedInboxUrl === undefined || isHttpUrl(target.sharedInboxUrl)) &&
@@ -46,6 +56,7 @@ function validateRemoteRecipient(target) {
 
 function validateDeliveryPlanV1(plan) {
   if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return false;
+  if (!hasOnlyKeys(plan, PLAN_KEYS)) return false;
   if (plan.schema !== DELIVERY_PLAN_SCHEMA) return false;
   if (!isNonEmptyString(plan.intentId)) return false;
   if (!isHttpUrl(plan.activityId) || !isHttpUrl(plan.actorUri)) return false;
@@ -53,6 +64,7 @@ function validateDeliveryPlanV1(plan) {
   if (!Array.isArray(plan.localRecipients) || !plan.localRecipients.every(validateLocalRecipient)) return false;
   if (!Array.isArray(plan.remoteRecipients) || !plan.remoteRecipients.every(validateRemoteRecipient)) return false;
   if (!plan.meta || typeof plan.meta !== 'object' || Array.isArray(plan.meta)) return false;
+  if (!hasOnlyKeys(plan.meta, META_KEYS)) return false;
   if (!VISIBILITIES.has(plan.meta.visibility)) return false;
   if (typeof plan.meta.isPublicActivity !== 'boolean') return false;
   if (plan.meta.isPublicIndexable !== undefined && typeof plan.meta.isPublicIndexable !== 'boolean') return false;
