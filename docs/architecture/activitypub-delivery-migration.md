@@ -8,7 +8,7 @@ ActivityPods does not maintain an independent phase numbering scheme. ActivityPo
 
 ## Why this repo is involved
 
-The current ActivityPods backend pins `@semapps/activitypub` 1.1.4 and configures `ActivityPubService` with `podProvider: true`. Ordinary ActivityPub recipient expansion, local fan-out and SemApps native remote dispatch therefore execute inside Tier 1 before the custom Fedify-facing `outbox-emitter` observes `activitypub.outbox.posted`.
+The current ActivityPods backend pins `@semapps/activitypub` 1.1.4 and configures ActivityPub with `podProvider: true`. Ordinary ActivityPub recipient expansion, local fan-out and SemApps native remote dispatch therefore execute inside Tier 1 before the custom Fedify-facing `outbox-emitter` observes `activitypub.outbox.posted`.
 
 The migration must change this repo at the delivery-planning boundary. A sidecar-only change cannot safely suppress native SemApps delivery because native jobs are created first.
 
@@ -72,9 +72,7 @@ For 200 local recipients, the source-counted visible model is approximately `2 +
 
 These are source-counted orchestration calls, not a claim that total nested operations equal those numbers. The historical ~8,000-operation estimate for ~200 recipients remains a measurement question scheduled for APDM-P8.
 
-## Fork-specific state
-
-The ActivityPods wrapper in `pod-provider/backend/services/core/activitypub.js` mixes `ActivityPubService` and supplies `baseUri`, `podProvider: true`, and `queueServiceUrl`. It does not redefine the SemApps outbox/localPost/remotePost algorithms.
+## Fork-specific state before cutover
 
 The custom `pod-provider/backend/services/outbox-emitter.service.js` runs downstream of `activitypub.outbox.posted`. It:
 
@@ -115,9 +113,9 @@ Those belong to `outlaw-dame/mastopod-federation-architecture` / Fedify sidecar.
 
 ## ActivityPods phase slices
 
-- `APDM-P0-A` — baseline and ownership documentation only.
-- `APDM-P1-A` — Delivery Plan v1 producer contract and fixtures.
-- `APDM-P2-A` — pre-`remotePost` native/external strategy seam.
+- `APDM-P0-A` — baseline and ownership documentation only. **Complete.**
+- `APDM-P1-A` — Delivery Plan v1 producer contract and fixtures. **Complete.**
+- `APDM-P2-A` — pre-`remotePost` native/external strategy seam. **In progress.**
 - `APDM-P3-A` — authoritative expanded local/remote target planning.
 - `APDM-P4-A` — durable/idempotent handoff producer.
 - `APDM-P5-A` — guarded external-authority cutover and rollback proof.
@@ -132,6 +130,104 @@ Those belong to `outlaw-dame/mastopod-federation-architecture` / Fedify sidecar.
 - `APDM-P15-A` — end-to-end load/fault/interoperability proof.
 - `APDM-P16-A` — migration cleanup, compatibility docs and rollback stabilization.
 
+## Phase 2 implementation — pre-`remotePost` strategy seam
+
+Phase 2 introduces an ActivityPods-owned adapter at `pod-provider/backend/lib/activitypub-service-with-delivery-strategy.js`.
+
+### Why an adapter is required
+
+SemApps 1.1.4 does not expose a configuration flag or public delivery-strategy extension point before `remotePost` job creation. Its top-level ActivityPub service dynamically registers the outbox subservice and mixes the queue implementation directly into it.
+
+ActivityPods therefore recreates only that top-level service-registration layer using the exact SemApps 1.1.4 subservices, while leaving the upstream `OutboxService.actions.post` algorithm itself intact. The ActivityPods adapter replaces only the root `post` action with a strategy wrapper.
+
+This is intentionally narrower than copying or forking the entire SemApps outbox algorithm.
+
+### Exact-version guard
+
+The adapter is pinned to `@semapps/activitypub` 1.1.4. Backend startup/tests fail if a different version is installed.
+
+This protects against a silent SemApps upgrade changing:
+
+- service-registration internals;
+- the outbox action;
+- queue names or payloads;
+- recipient ordering/classification;
+- local delivery semantics.
+
+A SemApps upgrade therefore requires explicit review of this adapter rather than silently inheriting an incompatible deep import.
+
+### Delivery modes
+
+`SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE` accepts:
+
+- `native` — default. Exact SemApps remote job creation continues unchanged.
+- `external` — Phase 2 preview only.
+
+`external` is rejected unless `SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=true` is also set. That second flag is deliberately awkward: it prevents an operator from interpreting Phase 2 as the production cutover.
+
+### How external preview suppresses native jobs
+
+The wrapper invokes the exact SemApps outbox `post` handler with an isolated execution context created per request.
+
+Only that request-local context overrides `createJob`:
+
+- `remotePost` jobs are captured instead of enqueued;
+- any non-`remotePost` job is delegated to the real queue implementation;
+- the shared Moleculer service instance is never mutated.
+
+This matters for concurrency: simultaneous posts cannot accidentally borrow one another's temporary queue interception.
+
+After the SemApps handler returns, the adapter emits `activitypub.outbox.remote-delivery.planned` containing:
+
+- the resulting Activity;
+- the de-duplicated remote actor URIs captured from the would-have-been native jobs;
+- `suppressedNativeRemotePostCount`;
+- `deliveryMode: external`.
+
+This event is a **Phase 2 proof surface only**. It is not the final durable cross-repo handoff and it must not be treated as acknowledgement that remote federation has been durably accepted.
+
+### What Phase 2 deliberately does not change
+
+Phase 2 does not:
+
+- make Fedify authoritative in production;
+- disable native delivery by default;
+- make `activitypub.outbox.posted` authoritative for routing;
+- solve the raw `/followers` gap in the current `outbox-emitter`;
+- create the durable `OutboxIntent` handoff;
+- optimize local delivery;
+- remove the existing sidecar emitter.
+
+Those changes belong to later gated phases.
+
+### Phase 2 rollback
+
+Rollback is configuration-level while the adapter remains installed:
+
+```text
+SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=native
+```
+
+Native is also the default when the variable is absent.
+
+If the adapter itself must be removed, `services/core/activitypub.js` can return to the stock `ActivityPubService` mixin because Phase 2 has not changed persisted Activity data or queue schemas.
+
+### Phase 2 exit criteria
+
+`APDM-P2-A` is complete only when all of the following are verified:
+
+1. native mode delegates to SemApps and creates native `remotePost` work as before;
+2. external preview mode creates **zero** native `remotePost` jobs;
+3. unrelated queue work still delegates normally;
+4. local delivery remains the exact SemApps local path;
+5. simultaneous external-preview requests do not mutate/share queue interception state;
+6. external mode fails closed without the explicit preview guard;
+7. SemApps package drift from 1.1.4 fails fast;
+8. backend CI and relevant tests pass;
+9. no substantive review comments remain.
+
+Phase 3 must not begin before this gate is closed.
+
 ## Non-negotiable local-delivery rule
 
 The Fedify sidecar is not a replacement for local Pod delivery. Optimizing local fan-out must preserve local trust, dataset, WebACL/LDP and ActivityPods ownership semantics inside Tier 1.
@@ -145,10 +241,3 @@ The preferred sequence is:
 5. batch persistence only after proving semantic equivalence;
 6. add durable per-recipient recovery/idempotency;
 7. converge internal bridge workflows on the same local delivery primitive.
-
-## Phase 0 exit criteria for this repo
-
-- this companion accurately records the exact 1.1.4 baseline;
-- no runtime behavior is changed;
-- the authoritative cross-repo program owns phase numbering and gates;
-- Phase 1 does not begin until the paired Phase 0 documentation has been reviewed/merged in both repositories.
