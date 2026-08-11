@@ -15,6 +15,12 @@ const SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION = '1.1.4';
 const REMOTE_DELIVERY_MODES = new Set(['native', 'external']);
 const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.handoff-queued';
 const PUBLIC_ADDRESSES = new Set(['https://www.w3.org/ns/activitystreams#Public', 'as:Public', 'Public']);
+const ACTIVITY_TYPE_NAMES = new Set([
+  'Accept', 'Add', 'Announce', 'Arrive', 'Block', 'Create', 'Delete', 'Dislike', 'Flag', 'Follow', 'Ignore', 'Invite',
+  'Join', 'Leave', 'Like', 'Listen', 'Move', 'Offer', 'Question', 'Reject', 'Read', 'Remove', 'TentativeReject',
+  'TentativeAccept', 'Travel', 'Undo', 'Update', 'View'
+]);
+const ACTIVITYSTREAMS_NAMESPACE = 'https://www.w3.org/ns/activitystreams#';
 const SEMAPPS_INTERNAL_PATHS = Object.freeze({
   ActorService: '@semapps/activitypub/services/activitypub/subservices/actor',
   ActivityService: '@semapps/activitypub/services/activitypub/subservices/activity',
@@ -98,6 +104,17 @@ function normalizeEntityId(value) {
 function normalizeAddressValues(value) {
   const values = Array.isArray(value) ? value : [value];
   return values.map(normalizeEntityId).filter(item => typeof item === 'string' && item.length > 0);
+}
+
+function normalizeTypeValues(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values.filter(item => typeof item === 'string' && item.length > 0).map(item =>
+    item.startsWith(ACTIVITYSTREAMS_NAMESPACE) ? item.slice(ACTIVITYSTREAMS_NAMESPACE.length) : item
+  );
+}
+
+function isPostedActivity(params) {
+  return normalizeTypeValues(params?.type ?? params?.['@type']).some(type => ACTIVITY_TYPE_NAMES.has(type));
 }
 
 function isActorFollowersAddress(value, actorUri) {
@@ -204,25 +221,22 @@ function hasBlindRecipients({ bto, bcc }) {
   return bto !== undefined || bcc !== undefined;
 }
 
-function createPrivacySafeOutboxContext(ctx) {
+function createPrivacySafeOutboxContext(ctx, { persistBlindSnapshot = false } = {}) {
   if (!ctx || typeof ctx !== 'object' || Array.isArray(ctx)) {
     throw new TypeError('ActivityPub outbox context must be an object.');
   }
 
-  // Unit-level strategy tests and compatibility callers may use a lightweight
-  // context with no request params at all. There is nothing to sanitize in
-  // that case; real Moleculer outbox actions always provide ctx.params.
   if (ctx.params === undefined || ctx.params === null) return ctx;
   if (typeof ctx.params !== 'object' || Array.isArray(ctx.params)) {
     throw new TypeError('ActivityPub outbox context params must be an object.');
   }
 
-  assertSupportedAudienceAddressing(ctx.params);
+  const postedActivity = isPostedActivity(ctx.params);
+  if (postedActivity) assertSupportedAudienceAddressing(ctx.params);
 
-  const blindRecipients = {
-    bto: ctx.params.bto,
-    bcc: ctx.params.bcc
-  };
+  const blindRecipients = postedActivity
+    ? { bto: ctx.params.bto, bcc: ctx.params.bcc }
+    : { bto: undefined, bcc: undefined };
   const wrappedCtx = Object.create(ctx);
   wrappedCtx.params = sanitizeDeliveryActivity(ctx.params);
 
@@ -235,6 +249,25 @@ function createPrivacySafeOutboxContext(ctx) {
 
   const nativeCall = ctx.call.bind(ctx);
   wrappedCtx.call = async (action, params, options) => {
+    if (
+      action === 'activitypub.activity.post' &&
+      persistBlindSnapshot &&
+      hasBlindRecipients(blindRecipients)
+    ) {
+      if (!params?.resource || typeof params.resource !== 'object' || Array.isArray(params.resource)) {
+        throw new Error('APDM blind-address recovery snapshot requires the finalized Activity resource before persistence.');
+      }
+      await nativeCall(
+        'activitypub-delivery-reconciler.storeBlindRecipientSnapshot',
+        {
+          activity: params.resource,
+          ...(blindRecipients.bto !== undefined ? { bto: blindRecipients.bto } : {}),
+          ...(blindRecipients.bcc !== undefined ? { bcc: blindRecipients.bcc } : {})
+        },
+        options
+      );
+    }
+
     if (action !== 'activitypub.activity.getRecipients' || !hasBlindRecipients(blindRecipients)) {
       return nativeCall(action, params, options);
     }
@@ -324,7 +357,7 @@ function createOutboxPostHandler(
     const mode = normalizeRemoteDeliveryMode(this.settings.remoteDeliveryMode);
     if (mode === 'external') assertExternalDeliveryConfiguration(this.settings);
 
-    const privacySafeCtx = createPrivacySafeOutboxContext(ctx);
+    const privacySafeCtx = createPrivacySafeOutboxContext(ctx, { persistBlindSnapshot: mode === 'external' });
     if (mode === 'native') return nativePostHandler.call(this, privacySafeCtx);
 
     const capturedRemotePosts = [];
@@ -562,6 +595,7 @@ module.exports = {
   createOutboxPostHandler,
   createOutboxServiceSchema,
   createPrivacySafeOutboxContext,
+  isPostedActivity,
   loadSemappsActivityPubInternals,
   normalizeRemoteDeliveryMode,
   resolveSemappsInternalPaths,
