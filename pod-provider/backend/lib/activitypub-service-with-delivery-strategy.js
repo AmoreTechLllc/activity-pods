@@ -275,8 +275,11 @@ function assertExternalDeliveryConfiguration(settings) {
   if (typeof settings.deliveryHandoffUrl !== 'string' || settings.deliveryHandoffUrl.trim().length === 0) {
     throw new Error('ActivityPub external remote delivery requires a sidecar Delivery Plan handoff URL.');
   }
-  if (settings.deliveryHandoffUrl !== settings.deliveryHandoffUrl.trim() || settings.deliveryHandoffUrl.includes('#')) {
-    throw new Error('ActivityPub external remote delivery handoff URL must not contain whitespace padding or a URL fragment.');
+  if (settings.deliveryHandoffUrl !== settings.deliveryHandoffUrl.trim()) {
+    throw new Error('ActivityPub external remote delivery handoff URL must not contain whitespace padding.');
+  }
+  if (settings.deliveryHandoffUrl.includes('#')) {
+    throw new Error('ActivityPub external remote delivery handoff URL must not contain a URL fragment.');
   }
   const handoffUrl = parseSafeHttpUrl(settings.deliveryHandoffUrl);
   if (!handoffUrl) {
