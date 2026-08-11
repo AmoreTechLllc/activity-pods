@@ -3,6 +3,7 @@
 const {
   DELIVERY_PLAN_SCHEMA,
   computeDeliveryPlanIntentId,
+  determineActivityVisibility,
   normalizeDeliveryTargetDomain,
   parseDeliveryEndpointUrl,
   validateDeliveryPlanV1
@@ -37,18 +38,7 @@ function isFollowersCollectionUri(value) {
 }
 
 function determineVisibility(activity) {
-  const publicAddresses = new Set([
-    'https://www.w3.org/ns/activitystreams#Public',
-    'as:Public',
-    'Public'
-  ]);
-  const to = addressValues(activity?.to);
-  const cc = addressValues(activity?.cc);
-
-  if (to.some(value => publicAddresses.has(value))) return 'public';
-  if (cc.some(value => publicAddresses.has(value))) return 'unlisted';
-  if (to.some(isFollowersCollectionUri)) return 'followers';
-  return 'direct';
+  return determineActivityVisibility(activity);
 }
 
 async function mapWithConcurrency(items, concurrency, mapper) {
