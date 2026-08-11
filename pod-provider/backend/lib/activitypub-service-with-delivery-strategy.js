@@ -12,8 +12,6 @@ const {
 
 const SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION = '1.1.4';
 const REMOTE_DELIVERY_MODES = new Set(['native', 'external']);
-// Observation only. The legacy P3 routing event is deliberately not emitted in
-// P4 external mode; the durable Bull handoff processor is the sole sidecar HTTP path.
 const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.handoff-queued';
 const SEMAPPS_INTERNAL_PATHS = Object.freeze({
   ActorService: '@semapps/activitypub/services/activitypub/subservices/actor',
@@ -31,9 +29,15 @@ const SEMAPPS_INTERNAL_PATHS = Object.freeze({
   SideEffectsService: '@semapps/activitypub/services/activitypub/subservices/side-effects',
   FakeQueueMixin: '@semapps/activitypub/mixins/fake-queue'
 });
+const SEMAPPS_OUTBOX_INTERCEPTION_MARKERS = Object.freeze([
+  'activitypub.activity.getRecipients',
+  "this.createJob('remotePost'",
+  'activitypub.outbox.posted',
+  'this.localPost(localRecipients, activity)'
+]);
 
 function normalizeRemoteDeliveryMode(value) {
-  const normalized = String(value || 'native').trim().toLowerCase();
+  const normalized = value === undefined || value === null ? 'native' : String(value).trim().toLowerCase();
   if (!REMOTE_DELIVERY_MODES.has(normalized)) {
     throw new Error(`Unsupported ActivityPub remote delivery mode '${value}'. Expected one of: native, external.`);
   }
@@ -49,9 +53,109 @@ function assertSupportedSemappsVersion() {
   }
 }
 
+function assertSupportedSemappsOutboxShape(OutboxService) {
+  const post = OutboxService?.actions?.post;
+  const localPost = OutboxService?.methods?.localPost;
+  const remotePostProcessor = OutboxService?.queues?.remotePost?.process;
+  if (typeof post !== 'function' || typeof localPost !== 'function' || typeof remotePostProcessor !== 'function') {
+    throw new Error(
+      'APDM delivery strategy requires the SemApps 1.1.4 outbox post/localPost/remotePost shape. ' +
+        'Review the installed outbox implementation before enabling the adapter.'
+    );
+  }
+
+  const source = Function.prototype.toString.call(post);
+  const indexes = SEMAPPS_OUTBOX_INTERCEPTION_MARKERS.map(marker => source.indexOf(marker));
+  if (indexes.some(index => index < 0) || indexes.some((index, position) => position > 0 && index <= indexes[position - 1])) {
+    throw new Error(
+      'APDM delivery strategy detected incompatible SemApps outbox ordering. Expected getRecipients -> remotePost -> ' +
+        'activitypub.outbox.posted -> localPost before intercepting remote delivery.'
+    );
+  }
+}
+
+function parseSafeHttpUrl(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  try {
+    const parsed = new URL(value);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeEntityId(value) {
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value.id || value['@id'] || null;
+  }
+  return null;
+}
+
+function activityIdentity(activity) {
+  if (!activity || typeof activity !== 'object' || Array.isArray(activity)) return { id: null, actor: null };
+  return {
+    id: normalizeEntityId(activity.id || activity['@id']),
+    actor: normalizeEntityId(activity.actor)
+  };
+}
+
+function assertMatchingActivityIdentity(expectedActivity, observedActivity, label) {
+  const expected = activityIdentity(expectedActivity);
+  const observed = activityIdentity(observedActivity);
+  if (!expected.id || observed.id !== expected.id) {
+    throw new Error(`APDM intercepted ${label} with an Activity that does not match the outbox result.`);
+  }
+  if (expected.actor && observed.actor !== expected.actor) {
+    throw new Error(`APDM intercepted ${label} with an actor that does not match the outbox result.`);
+  }
+}
+
+function assertCapturedRemotePostStructure(job) {
+  const recipientUri = job?.recipientUri;
+  if (!parseSafeHttpUrl(recipientUri)) {
+    throw new Error('APDM intercepted a remotePost job without a safe concrete HTTP(S) recipientUri.');
+  }
+  if (job.jobId !== recipientUri) {
+    throw new Error('APDM intercepted an incompatible remotePost job: SemApps 1.1.4 requires jobId === recipientUri.');
+  }
+  const identity = activityIdentity(job.activity);
+  if (!identity.id || !identity.actor) {
+    throw new Error('APDM intercepted a remotePost job without a concrete Activity id and actor.');
+  }
+}
+
+function validateCapturedRemotePosts(capturedRemotePosts, activity) {
+  const recipients = [];
+  for (const job of capturedRemotePosts) {
+    assertCapturedRemotePostStructure(job);
+    assertMatchingActivityIdentity(activity, job.activity, 'remotePost job');
+    recipients.push(job.recipientUri);
+  }
+  return [...new Set(recipients)];
+}
+
+function validateCapturedLocalPosts(capturedLocalPosts, activity) {
+  const recipients = [];
+  for (const post of capturedLocalPosts) {
+    if (!Array.isArray(post.recipients)) {
+      throw new Error('APDM intercepted localPost with a non-array recipient list.');
+    }
+    assertMatchingActivityIdentity(activity, post.activity, 'localPost call');
+    for (const recipientUri of post.recipients) {
+      if (!parseSafeHttpUrl(recipientUri)) {
+        throw new Error('APDM intercepted localPost without a safe concrete HTTP(S) recipientUri.');
+      }
+      recipients.push(recipientUri);
+    }
+  }
+  return [...new Set(recipients)];
+}
+
 function assertExternalDeliveryConfiguration(settings) {
   if (normalizeRemoteDeliveryMode(settings?.remoteDeliveryMode) !== 'external') return;
-  if (!settings.allowExternalDeliveryPreview) {
+  if (settings.allowExternalDeliveryPreview !== true) {
     throw new Error('ActivityPub external remote delivery requires the explicit APDM preview guard until Phase 5 cutover.');
   }
   if (typeof settings.queueServiceUrl !== 'string' || settings.queueServiceUrl.trim().length === 0) {
@@ -60,17 +164,22 @@ function assertExternalDeliveryConfiguration(settings) {
   if (typeof settings.deliveryHandoffUrl !== 'string' || settings.deliveryHandoffUrl.trim().length === 0) {
     throw new Error('ActivityPub external remote delivery requires a sidecar Delivery Plan handoff URL.');
   }
-  let handoffUrl;
-  try {
-    handoffUrl = new URL(settings.deliveryHandoffUrl);
-  } catch {
-    throw new Error('ActivityPub external remote delivery handoff URL must be a valid HTTP(S) URL.');
+  const handoffUrl = parseSafeHttpUrl(settings.deliveryHandoffUrl);
+  if (!handoffUrl) {
+    throw new Error('ActivityPub external remote delivery handoff URL must be a valid credential-free HTTP(S) URL.');
   }
-  if (!['http:', 'https:'].includes(handoffUrl.protocol)) {
-    throw new Error('ActivityPub external remote delivery handoff URL must use HTTP(S).');
+  if (handoffUrl.hash) {
+    throw new Error('ActivityPub external remote delivery handoff URL must not contain a URL fragment.');
   }
-  if (typeof settings.deliveryHandoffToken !== 'string' || settings.deliveryHandoffToken.length === 0) {
+  if (typeof settings.deliveryHandoffToken !== 'string' || settings.deliveryHandoffToken.trim().length === 0) {
     throw new Error('ActivityPub external remote delivery requires SIDECAR_TOKEN for authenticated durable handoff.');
+  }
+  if (
+    !Number.isInteger(settings.deliveryHandoffTimeoutMs) ||
+    settings.deliveryHandoffTimeoutMs < 100 ||
+    settings.deliveryHandoffTimeoutMs > 60000
+  ) {
+    throw new Error('ActivityPub external remote delivery handoff timeout must be an integer between 100 and 60000 milliseconds.');
   }
 }
 
@@ -82,9 +191,11 @@ function resolveSemappsInternalPaths() {
 
 function loadSemappsActivityPubInternals() {
   assertSupportedSemappsVersion();
-  return Object.fromEntries(
+  const internals = Object.fromEntries(
     Object.entries(SEMAPPS_INTERNAL_PATHS).map(([name, modulePath]) => [name, require(modulePath)])
   );
+  assertSupportedSemappsOutboxShape(internals.OutboxService);
+  return internals;
 }
 
 function createOutboxPostHandler(
@@ -102,36 +213,43 @@ function createOutboxPostHandler(
     assertExternalDeliveryConfiguration(this.settings);
 
     const capturedRemotePosts = [];
-    let capturedLocalRecipients = [];
+    const capturedLocalPosts = [];
     const executionContext = Object.create(this);
     const nativeCreateJob = this.createJob.bind(this);
     const nativeLocalPost = typeof this.localPost === 'function' ? this.localPost.bind(this) : null;
 
     executionContext.createJob = (queueName, jobId, payload, options) => {
       if (queueName === 'remotePost') {
-        capturedRemotePosts.push({
+        const capturedJob = {
           jobId,
           recipientUri: payload && payload.recipientUri,
           activity: payload && payload.activity,
           options
-        });
+        };
+        assertCapturedRemotePostStructure(capturedJob);
+        capturedRemotePosts.push(capturedJob);
         return undefined;
       }
       return nativeCreateJob(queueName, jobId, payload, options);
     };
 
     if (nativeLocalPost) {
-      executionContext.localPost = (recipients, activity) => {
-        capturedLocalRecipients = Array.isArray(recipients) ? [...recipients] : [];
-        return nativeLocalPost(recipients, activity);
+      executionContext.localPost = (recipients, localActivity) => {
+        capturedLocalPosts.push({
+          recipients: Array.isArray(recipients) ? [...recipients] : recipients,
+          activity: localActivity
+        });
+        return nativeLocalPost(recipients, localActivity);
       };
     }
 
     const activity = await nativePostHandler.call(executionContext, ctx);
-    const remoteRecipientUris = [
-      ...new Set(capturedRemotePosts.map(job => job.recipientUri).filter(recipientUri => typeof recipientUri === 'string'))
-    ];
-    const localRecipientUris = [...new Set(capturedLocalRecipients.filter(recipientUri => typeof recipientUri === 'string'))];
+    if (!activityIdentity(activity).id) {
+      throw new Error('APDM external delivery requires the SemApps outbox handler to return an Activity with a concrete id.');
+    }
+
+    const remoteRecipientUris = validateCapturedRemotePosts(capturedRemotePosts, activity);
+    const localRecipientUris = validateCapturedLocalPosts(capturedLocalPosts, activity);
 
     const deliveryPlan = await buildDeliveryPlan(ctx, {
       activity,
@@ -221,6 +339,9 @@ function createActivityPubServiceWithDeliveryStrategy({
   enqueueHandoff
 } = {}) {
   assertSupportedSemappsVersion();
+  if (typeof allowExternalDeliveryPreview !== 'boolean') {
+    throw new TypeError('ActivityPub external delivery preview guard must be a boolean.');
+  }
   const normalizedRemoteDeliveryMode = normalizeRemoteDeliveryMode(remoteDeliveryMode);
   const resolvedInternals = internals || loadSemappsActivityPubInternals();
   const serviceSettings = {
@@ -236,7 +357,7 @@ function createActivityPubServiceWithDeliveryStrategy({
     deliveryHandoffTimeoutMs: 5000,
     ...settings,
     remoteDeliveryMode: normalizedRemoteDeliveryMode,
-    allowExternalDeliveryPreview: Boolean(allowExternalDeliveryPreview)
+    allowExternalDeliveryPreview
   };
   assertExternalDeliveryConfiguration(serviceSettings);
 
@@ -315,13 +436,18 @@ function createActivityPubServiceWithDeliveryStrategy({
 module.exports = {
   REMOTE_DELIVERY_PLANNED_EVENT,
   SEMAPPS_INTERNAL_PATHS,
+  SEMAPPS_OUTBOX_INTERCEPTION_MARKERS,
   SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION,
+  assertCapturedRemotePostStructure,
   assertExternalDeliveryConfiguration,
+  assertSupportedSemappsOutboxShape,
   assertSupportedSemappsVersion,
   createActivityPubServiceWithDeliveryStrategy,
   createOutboxPostHandler,
   createOutboxServiceSchema,
   loadSemappsActivityPubInternals,
   normalizeRemoteDeliveryMode,
-  resolveSemappsInternalPaths
+  resolveSemappsInternalPaths,
+  validateCapturedLocalPosts,
+  validateCapturedRemotePosts
 };

@@ -101,7 +101,7 @@ describe('APDM Phase 2-4 ActivityPub remote delivery strategy', () => {
       /handoff URL/u
     );
     expect(() => assertExternalDeliveryConfiguration(externalSettings({ deliveryHandoffUrl: 'ftp://sidecar/outbox' }))).toThrow(
-      /must use HTTP\(S\)/u
+      /credential-free HTTP\(S\)/u
     );
     expect(() => assertExternalDeliveryConfiguration(externalSettings({ deliveryHandoffToken: '' }))).toThrow(
       /SIDECAR_TOKEN/u
@@ -138,8 +138,8 @@ describe('APDM Phase 2-4 ActivityPub remote delivery strategy', () => {
     const activity = { id: 'https://pods.example/as/activity/2', actor: 'https://pods.example/alice' };
     const nativeLocalPost = jest.fn(async () => undefined);
     const nativeHandler = async function nativePost() {
-      this.createJob('remotePost', 'bob', { recipientUri: 'https://remote.example/users/bob', activity });
-      this.createJob('remotePost', 'carol', { recipientUri: 'https://remote.example/users/carol', activity });
+      this.createJob('remotePost', 'https://remote.example/users/bob', { recipientUri: 'https://remote.example/users/bob', activity });
+      this.createJob('remotePost', 'https://remote.example/users/carol', { recipientUri: 'https://remote.example/users/carol', activity });
       this.createJob('maintenance', 'keep-me', { reason: 'not-remote-delivery' });
       this.localPost(['https://pods.example/bob', 'https://pods.example/dan'], activity);
       return activity;
@@ -260,16 +260,17 @@ describe('APDM Phase 2-4 ActivityPub remote delivery strategy', () => {
       enteredFirst = resolve;
     });
     const nativeHandler = async function nativePost(ctx) {
+      const activity = { id: ctx.activityId, actor: 'https://pods.example/alice' };
       this.createJob('remotePost', ctx.recipient, {
         recipientUri: ctx.recipient,
-        activity: { id: ctx.activityId, actor: 'https://pods.example/alice' }
+        activity
       });
-      this.localPost([ctx.localRecipient], { id: ctx.activityId });
+      this.localPost([ctx.localRecipient], activity);
       if (ctx.wait) {
         enteredFirst();
         await barrier;
       }
-      return { id: ctx.activityId, actor: 'https://pods.example/alice' };
+      return activity;
     };
     const buildDeliveryPlan = jest.fn(async (_ctx, input) =>
       createStubPlan(input.activity, input.localRecipientUris, input.remoteRecipientUris)
