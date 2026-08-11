@@ -5,7 +5,10 @@ const {
   canonicalize,
   validateDeliveryPlanV1
 } = require('../utils/activitypub-delivery-plan');
-const { resolveRemoteDeliveryTarget } = require('../utils/activitypub-delivery-planner');
+const {
+  determineVisibility,
+  resolveRemoteDeliveryTarget
+} = require('../utils/activitypub-delivery-planner');
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -28,7 +31,7 @@ describe('APDM Phase 1 contract hardening', () => {
     expect(validateDeliveryPlanV1(padded)).toBe(false);
   });
 
-  test('local dataset authority rejects surrounding whitespace/control-character ambiguity', () => {
+  test('local dataset authority rejects whitespace/control-character ambiguity', () => {
     const padded = clone(fixture);
     padded.localRecipients[0].dataset = ' bob ';
     expect(validateDeliveryPlanV1(padded)).toBe(false);
@@ -65,6 +68,16 @@ describe('APDM Phase 1 contract hardening', () => {
     const target = await resolveRemoteDeliveryTarget(ctx, 'https://remote.example/users/carol');
     expect(target.targetDomain).toBe('remote.example');
     expect(target.sharedInboxUrl).toBe('https://remote.example./inbox');
+  });
+
+  test('only the sender own followers collection is classified as followers visibility', () => {
+    const actor = 'https://pods.example/alice';
+    expect(determineVisibility({ actor, to: [`${actor}/followers`], cc: [] })).toBe('followers');
+    expect(determineVisibility({
+      actor,
+      to: ['https://remote.example/users/followers'],
+      cc: []
+    })).toBe('direct');
   });
 
   test('contract fingerprint canonicalization rejects non-JSON values instead of creating ambiguous hashes', () => {
