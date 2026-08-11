@@ -1746,9 +1746,9 @@ canonicalize@^1.0.1:
   resolved "https://registry.npmjs.org/canonicalize/-/canonicalize-1.0.8.tgz"
   integrity sha512-0CNTVCLZggSh7bc5VkX5WWPWO+cyZbNd07IHIsSXLia/eAq+r836hgk+8BKoEh7949Mda87VUOitx5OddVj64A==
 
-"cas@git+https://github.com/joshchan/node-cas.git":
+"cas@https://github.com/joshchan/node-cas":
   version "0.0.5"
-  resolved "git+https://github.com/joshchan/node-cas.git#ea512be2afd7d0b63de512a974705883b7d7070a"
+  resolved "https://github.com/joshchan/node-cas#ea512be2afd7d0b63de512a974705883b7d7070a"
   dependencies:
     cheerio "1.2.0"
 
