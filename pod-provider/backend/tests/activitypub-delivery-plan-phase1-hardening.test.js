@@ -36,10 +36,14 @@ describe('APDM Phase 1 contract hardening', () => {
     expect(validateDeliveryPlanV1(plan)).toBe(false);
   });
 
-  test('delivery endpoints reject fragments and normalization whitespace', () => {
+  test('delivery endpoints reject fragments including a bare empty fragment and normalization whitespace', () => {
     const fragmented = clone(fixture);
     fragmented.remoteRecipients[0].sharedInboxUrl = 'https://remote.example/inbox#fragment';
     expect(validateDeliveryPlanV1(fragmented)).toBe(false);
+
+    const emptyFragment = clone(fixture);
+    emptyFragment.remoteRecipients[0].sharedInboxUrl = 'https://remote.example/inbox#';
+    expect(validateDeliveryPlanV1(emptyFragment)).toBe(false);
 
     const padded = clone(fixture);
     padded.remoteRecipients[0].sharedInboxUrl = ' https://remote.example/inbox';
@@ -178,9 +182,10 @@ describe('APDM Phase 1 contract hardening', () => {
     })).rejects.toThrow(/authoritative audience expansion/u);
   });
 
-  test('contract fingerprint canonicalization rejects non-JSON values instead of creating ambiguous hashes', () => {
+  test('contract fingerprint canonicalization rejects non-JSON and sparse-array values', () => {
     expect(() => canonicalize([undefined])).toThrow(/unsupported undefined/u);
     expect(() => canonicalize({ value: Number.NaN })).toThrow(/non-finite/u);
     expect(() => canonicalize(new Date())).toThrow(/non-JSON object/u);
+    expect(() => canonicalize(new Array(1))).toThrow(/sparse array/u);
   });
 });
