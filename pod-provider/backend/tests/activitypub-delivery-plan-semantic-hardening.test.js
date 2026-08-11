@@ -53,9 +53,10 @@ describe('APDM Phase 3 semantic hardening', () => {
     expect(validateDeliveryPlanV1(plan)).toBe(false);
   });
 
-  test('validator rejects activity/plan identity mismatches and inconsistent public metadata', () => {
+  test('validator rejects activity/plan identity and visibility mismatches', () => {
+    const activityId = 'https://pods.example/alice/activities/1';
     const id = createDeliveryIntentId({
-      activityId: 'https://pods.example/alice/activities/1',
+      activityId,
       actorUri: ACTOR,
       localRecipientUris: [],
       remoteRecipientUris: []
@@ -63,7 +64,7 @@ describe('APDM Phase 3 semantic hardening', () => {
     const base = {
       schema: 'ap.delivery-plan.v1',
       intentId: id,
-      activityId: 'https://pods.example/alice/activities/1',
+      activityId,
       actorUri: ACTOR,
       activity: {
         id: 'https://pods.example/alice/activities/other',
@@ -77,8 +78,8 @@ describe('APDM Phase 3 semantic hardening', () => {
     expect(validateDeliveryPlanV1(base)).toBe(false);
     expect(validateDeliveryPlanV1({
       ...base,
-      activity: { ...base.activity, id: base.activityId },
-      meta: { visibility: 'followers', isPublicActivity: true }
+      activity: { ...base.activity, id: activityId, to: [`${ACTOR}/followers`] },
+      meta: { visibility: 'direct', isPublicActivity: false }
     })).toBe(false);
   });
 
@@ -106,6 +107,37 @@ describe('APDM Phase 3 semantic hardening', () => {
       meta: { visibility: 'direct', isPublicActivity: false }
     };
     expect(validateDeliveryPlanV1(plan)).toBe(false);
+  });
+
+  test('planner rejects credential-bearing remote inbox and sharedInbox URLs', async () => {
+    const ctx = {
+      async call(action, params) {
+        if (action !== 'activitypub.actor.get') throw new Error(`Unexpected ${action}`);
+        return {
+          id: params.actorUri,
+          inbox: 'https://user:password@remote.example/users/bob/inbox'
+        };
+      }
+    };
+    await expect(buildDeliveryPlanV1(ctx, {
+      activity: activity({ to: ['https://remote.example/users/bob'], cc: [] }),
+      remoteRecipientUris: ['https://remote.example/users/bob']
+    })).rejects.toThrow(/invalid remote inbox URL/u);
+
+    const sharedInboxCtx = {
+      async call(action, params) {
+        if (action !== 'activitypub.actor.get') throw new Error(`Unexpected ${action}`);
+        return {
+          id: params.actorUri,
+          inbox: 'https://remote.example/users/bob/inbox',
+          endpoints: { sharedInbox: 'https://user:password@remote.example/inbox' }
+        };
+      }
+    };
+    await expect(buildDeliveryPlanV1(sharedInboxCtx, {
+      activity: activity({ to: ['https://remote.example/users/bob'], cc: [] }),
+      remoteRecipientUris: ['https://remote.example/users/bob']
+    })).rejects.toThrow(/invalid remote shared inbox URL/u);
   });
 
   test('planner enforces one global resolution concurrency budget across local and remote targets', async () => {
