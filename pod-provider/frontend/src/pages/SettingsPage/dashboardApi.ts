@@ -7,7 +7,6 @@ const BASE = urlJoin(CONFIG.BACKEND_URL, '/api/dashboard');
 type UnknownRecord = Record<string, unknown>;
 // Settings pages consume heterogeneous API payloads and refine types at call sites.
 // Keep this transport layer permissive to avoid forcing brittle unions here.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type JsonObject = any;
 
 const asRecord = (value: unknown): UnknownRecord | null =>
