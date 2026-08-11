@@ -1,6 +1,7 @@
 'use strict';
 
 const emitterSchema = require('../services/outbox-emitter.service');
+const { createDeliveryIntentId } = require('../utils/activitypub-delivery-planner');
 
 function createActivity() {
   return {
@@ -19,22 +20,29 @@ function createActivity() {
 }
 
 function createPlan(activity) {
+  const localRecipientUris = ['https://pods.example/bob'];
+  const remoteRecipientUris = ['https://remote.example/users/carol'];
   return {
     schema: 'ap.delivery-plan.v1',
-    intentId: 'apdm-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    intentId: createDeliveryIntentId({
+      activityId: activity.id,
+      actorUri: activity.actor,
+      localRecipientUris,
+      remoteRecipientUris
+    }),
     activityId: activity.id,
     actorUri: activity.actor,
     activity,
     localRecipients: [
       {
-        actorUri: 'https://pods.example/bob',
+        actorUri: localRecipientUris[0],
         dataset: 'bob',
         inboxUri: 'https://pods.example/bob/inbox'
       }
     ],
     remoteRecipients: [
       {
-        actorUri: 'https://remote.example/users/carol',
+        actorUri: remoteRecipientUris[0],
         inboxUrl: 'https://remote.example/users/carol/inbox',
         sharedInboxUrl: 'https://remote.example/inbox',
         targetDomain: 'remote.example'
@@ -192,12 +200,13 @@ describe('APDM Phase 3 outbox emitter Delivery Plan authority', () => {
   test('planned event rejects activity identity mismatches', async () => {
     const service = createService('external');
     const activity = createActivity();
-    const deliveryPlan = {
-      ...createPlan(activity),
-      activityId: 'https://pods.example/alice/activities/other'
+    const deliveryPlan = createPlan(activity);
+    const otherActivity = {
+      ...activity,
+      id: 'https://pods.example/alice/activities/other'
     };
     const ctx = {
-      params: { activity, deliveryPlan },
+      params: { activity: otherActivity, deliveryPlan },
       emit: jest.fn()
     };
 
