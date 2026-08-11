@@ -1,6 +1,7 @@
 'use strict';
 
 const {
+  assertExternalDeliveryConfiguration,
   createOutboxPostHandler,
   createPrivacySafeOutboxContext
 } = require('../lib/activitypub-service-with-delivery-strategy');
@@ -134,5 +135,56 @@ describe('APDM blind-address privacy boundary', () => {
     });
 
     expect(recipients).toEqual([recipient]);
+  });
+
+  test('unsupported unique audience addressing fails before the native outbox handler can persist anything', async () => {
+    const audienceRecipient = 'https://remote.example/users/audience-only';
+    const nativePost = jest.fn();
+    const handler = createOutboxPostHandler(nativePost);
+    const service = { settings: { remoteDeliveryMode: 'native' } };
+
+    await expect(handler.call(service, {
+      params: {
+        actor: 'https://pods.example/alice',
+        type: 'Create',
+        to: [],
+        audience: [audienceRecipient]
+      }
+    })).rejects.toThrow(/must also appear in to\/bto\/cc\/bcc/u);
+
+    expect(nativePost).not.toHaveBeenCalled();
+  });
+
+  test('audience duplicated in normal addressing is accepted but sender-followers audience fails pre-persistence', () => {
+    const actor = 'https://pods.example/alice';
+    const recipient = 'https://remote.example/users/carol';
+
+    expect(() => createPrivacySafeOutboxContext({
+      params: { actor, to: [recipient], audience: [recipient] }
+    })).not.toThrow();
+
+    expect(() => createPrivacySafeOutboxContext({
+      params: { actor, to: [`${actor}/followers`], audience: [`${actor}/followers`] }
+    })).toThrow(/sender-followers audience is unsupported/u);
+  });
+
+  test('external handoff config rejects an empty URL fragment and whitespace-normalized URL', () => {
+    const base = {
+      remoteDeliveryMode: 'external',
+      allowExternalDeliveryPreview: true,
+      queueServiceUrl: 'redis://queue.example:6379',
+      deliveryHandoffToken: 'secret',
+      deliveryHandoffTimeoutMs: 5000
+    };
+
+    expect(() => assertExternalDeliveryConfiguration({
+      ...base,
+      deliveryHandoffUrl: 'https://sidecar.example/webhook/outbox#'
+    })).toThrow(/URL fragment/u);
+
+    expect(() => assertExternalDeliveryConfiguration({
+      ...base,
+      deliveryHandoffUrl: ' https://sidecar.example/webhook/outbox'
+    })).toThrow(/whitespace padding/u);
   });
 });
