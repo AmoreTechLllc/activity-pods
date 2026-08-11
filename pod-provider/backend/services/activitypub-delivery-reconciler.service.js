@@ -9,6 +9,8 @@ const { buildDeliveryPlanV1, mapWithConcurrency } = require('../utils/activitypu
 
 const ACCOUNT_CURSOR_KEY = 'apdm:delivery-reconciliation:account-offset:v1';
 const RECONCILIATION_LOCK_KEY = 'apdm:delivery-reconciliation:lock:v1';
+const BLIND_SNAPSHOT_PREFIX = 'apdm:delivery-reconciliation:blind:v1:';
+const BLIND_SNAPSHOT_TTL_SECONDS = 259200;
 
 function isExternalMode() {
   return String(CONFIG.ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native').trim().toLowerCase() === 'external';
@@ -16,6 +18,54 @@ function isExternalMode() {
 
 function actorUriOf(activity) {
   return typeof activity?.actor === 'string' ? activity.actor : activity?.actor?.id || activity?.actor?.['@id'] || null;
+}
+
+function entityId(value) {
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value.id || value['@id'] || null;
+  return null;
+}
+
+function normalizedStrings(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values.map(entityId).filter(item => typeof item === 'string' && item.length > 0).sort();
+}
+
+function activityTypeValues(activity) {
+  const raw = activity?.type ?? activity?.['@type'];
+  return normalizedStrings(raw);
+}
+
+function blindSnapshotIdentity(activity) {
+  if (!activity || typeof activity !== 'object' || Array.isArray(activity)) {
+    throw new TypeError('Blind recipient snapshot requires an Activity object');
+  }
+  const actor = actorUriOf(activity);
+  const published = typeof activity.published === 'string' ? activity.published : null;
+  const object = entityId(activity.object);
+  const types = activityTypeValues(activity);
+  if (!actor || !published || types.length === 0) {
+    throw new Error('Blind recipient snapshot requires actor, published, and type');
+  }
+  const material = JSON.stringify({
+    actor,
+    published,
+    object,
+    types,
+    to: normalizedStrings(activity.to),
+    cc: normalizedStrings(activity.cc),
+    audience: normalizedStrings(activity.audience)
+  });
+  return crypto.createHash('sha256').update(material).digest('hex');
+}
+
+function sanitizeBlindSnapshot({ bto, bcc }) {
+  const snapshot = {};
+  const normalizedBto = normalizedStrings(bto);
+  const normalizedBcc = normalizedStrings(bcc);
+  if (normalizedBto.length > 0) snapshot.bto = normalizedBto;
+  if (normalizedBcc.length > 0) snapshot.bcc = normalizedBcc;
+  return snapshot;
 }
 
 function collectionItemUris(collection) {
@@ -48,7 +98,9 @@ module.exports = {
     maxActivitiesPerAccount: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_MAX_ACTIVITIES_PER_ACCOUNT,
     concurrency: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_CONCURRENCY,
     accountCursorKey: ACCOUNT_CURSOR_KEY,
-    reconciliationLockKey: RECONCILIATION_LOCK_KEY
+    reconciliationLockKey: RECONCILIATION_LOCK_KEY,
+    blindSnapshotPrefix: BLIND_SNAPSHOT_PREFIX,
+    blindSnapshotTtlSeconds: BLIND_SNAPSHOT_TTL_SECONDS
   },
 
   created() {
@@ -114,6 +166,29 @@ module.exports = {
   },
 
   actions: {
+    storeBlindRecipientSnapshot: {
+      params: {
+        activity: { type: 'object' },
+        bto: { type: 'any', optional: true },
+        bcc: { type: 'any', optional: true }
+      },
+      async handler(ctx) {
+        if (!this.settings.enabled) throw new Error('Blind recipient snapshots require external delivery mode');
+        if (!this.reconciliationRedis) throw new Error('ActivityPub reconciliation Redis is not initialized');
+        const snapshot = sanitizeBlindSnapshot(ctx.params);
+        if (Object.keys(snapshot).length === 0) return { stored: false };
+        const identity = blindSnapshotIdentity(ctx.params.activity);
+        const key = `${this.settings.blindSnapshotPrefix}${identity}`;
+        await this.reconciliationRedis.set(
+          key,
+          JSON.stringify(snapshot),
+          'EX',
+          Math.max(60, Number(this.settings.blindSnapshotTtlSeconds) || BLIND_SNAPSHOT_TTL_SECONDS)
+        );
+        return { stored: true, identity };
+      }
+    },
+
     run: {
       async handler(ctx) {
         if (!this.settings.enabled) return { skipped: true, reason: 'external delivery disabled' };
@@ -194,6 +269,26 @@ module.exports = {
   },
 
   methods: {
+    blindSnapshotIdentity,
+
+    async loadBlindRecipientSnapshot(activity) {
+      if (!this.reconciliationRedis) return null;
+      let identity;
+      try {
+        identity = blindSnapshotIdentity(activity);
+      } catch {
+        return null;
+      }
+      const raw = await this.reconciliationRedis.get(`${this.settings.blindSnapshotPrefix}${identity}`);
+      if (!raw) return null;
+      try {
+        const parsed = JSON.parse(raw);
+        return sanitizeBlindSnapshot(parsed);
+      } catch {
+        return null;
+      }
+    },
+
     async acquireDistributedLease() {
       if (!this.reconciliationRedis) throw new Error('ActivityPub reconciliation Redis is not initialized');
       const token = crypto.randomUUID();
@@ -260,8 +355,12 @@ module.exports = {
     },
 
     async reconcileActivity(ctx, activity, dataset) {
-      const recipients = await ctx.call('activitypub.activity.getRecipients', { activity });
-      const concreteRecipients = await this.expandConcreteRecipients(ctx, activity, recipients, dataset);
+      const blindSnapshot = typeof this.loadBlindRecipientSnapshot === 'function'
+        ? await this.loadBlindRecipientSnapshot(activity)
+        : null;
+      const routingActivity = blindSnapshot ? { ...activity, ...blindSnapshot } : activity;
+      const recipients = await ctx.call('activitypub.activity.getRecipients', { activity: routingActivity });
+      const concreteRecipients = await this.expandConcreteRecipients(ctx, routingActivity, recipients, dataset);
       const localRecipientUris = [];
       const remoteRecipientUris = [];
 

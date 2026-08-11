@@ -4,6 +4,7 @@ const QueueMixin = require('moleculer-bull');
 const { as, sec } = require('@semapps/ontologies');
 const semappsActivityPubPackage = require('@semapps/activitypub/package.json');
 const { buildDeliveryPlanV1 } = require('../utils/activitypub-delivery-planner');
+const { sanitizeDeliveryActivity } = require('../utils/activitypub-delivery-plan');
 const {
   DELIVERY_HANDOFF_QUEUE,
   enqueueDeliveryHandoff,
@@ -13,6 +14,13 @@ const {
 const SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION = '1.1.4';
 const REMOTE_DELIVERY_MODES = new Set(['native', 'external']);
 const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.handoff-queued';
+const PUBLIC_ADDRESSES = new Set(['https://www.w3.org/ns/activitystreams#Public', 'as:Public', 'Public']);
+const ACTIVITY_TYPE_NAMES = new Set([
+  'Accept', 'Add', 'Announce', 'Arrive', 'Block', 'Create', 'Delete', 'Dislike', 'Flag', 'Follow', 'Ignore', 'Invite',
+  'Join', 'Leave', 'Like', 'Listen', 'Move', 'Offer', 'Question', 'Reject', 'Read', 'Remove', 'TentativeReject',
+  'TentativeAccept', 'Travel', 'Undo', 'Update', 'View'
+]);
+const ACTIVITYSTREAMS_NAMESPACE = 'https://www.w3.org/ns/activitystreams#';
 const SEMAPPS_INTERNAL_PATHS = Object.freeze({
   ActorService: '@semapps/activitypub/services/activitypub/subservices/actor',
   ActivityService: '@semapps/activitypub/services/activitypub/subservices/activity',
@@ -93,6 +101,62 @@ function normalizeEntityId(value) {
   return null;
 }
 
+function normalizeAddressValues(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values.map(normalizeEntityId).filter(item => typeof item === 'string' && item.length > 0);
+}
+
+function normalizeTypeValues(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values.filter(item => typeof item === 'string' && item.length > 0).map(item =>
+    item.startsWith(ACTIVITYSTREAMS_NAMESPACE) ? item.slice(ACTIVITYSTREAMS_NAMESPACE.length) : item
+  );
+}
+
+function isPostedActivity(params) {
+  return normalizeTypeValues(params?.type ?? params?.['@type']).some(type => ACTIVITY_TYPE_NAMES.has(type));
+}
+
+function isActorFollowersAddress(value, actorUri) {
+  if (typeof value !== 'string' || typeof actorUri !== 'string') return false;
+  try {
+    const address = new URL(value);
+    const actor = new URL(actorUri);
+    if (actor.search || actor.hash || address.search || address.hash) return false;
+    if (address.origin !== actor.origin) return false;
+    const actorPath = actor.pathname.replace(/\/+$/u, '');
+    const addressPath = address.pathname.replace(/\/+$/u, '');
+    return addressPath === `${actorPath}/followers`;
+  } catch {
+    return false;
+  }
+}
+
+function assertSupportedAudienceAddressing(params) {
+  const audience = normalizeAddressValues(params?.audience);
+  if (audience.length === 0) return;
+
+  const actorUri = normalizeEntityId(params?.actor || params?.attributedTo);
+  const standardAddresses = new Set(
+    ['to', 'bto', 'cc', 'bcc'].flatMap(key => normalizeAddressValues(params?.[key]))
+  );
+
+  for (const recipient of audience) {
+    if (PUBLIC_ADDRESSES.has(recipient)) continue;
+    if (actorUri && isActorFollowersAddress(recipient, actorUri)) {
+      throw new Error(
+        'ActivityPub sender-followers audience is unsupported by SemApps 1.1.4 recipient discovery; ' +
+          'duplicate the followers collection in to/cc only after an explicit compatibility decision.'
+      );
+    }
+    if (!standardAddresses.has(recipient)) {
+      throw new Error(
+        `ActivityPub audience recipient ${recipient} must also appear in to/bto/cc/bcc until authoritative audience expansion is implemented.`
+      );
+    }
+  }
+}
+
 function activityIdentity(activity) {
   if (!activity || typeof activity !== 'object' || Array.isArray(activity)) return { id: null, actor: null };
   return {
@@ -153,6 +217,86 @@ function validateCapturedLocalPosts(capturedLocalPosts, activity) {
   return [...new Set(recipients)];
 }
 
+function hasBlindRecipients({ bto, bcc }) {
+  return bto !== undefined || bcc !== undefined;
+}
+
+function createPrivacySafeOutboxContext(ctx, { persistBlindSnapshot = false } = {}) {
+  if (!ctx || typeof ctx !== 'object' || Array.isArray(ctx)) {
+    throw new TypeError('ActivityPub outbox context must be an object.');
+  }
+
+  if (ctx.params === undefined || ctx.params === null) return ctx;
+  if (typeof ctx.params !== 'object' || Array.isArray(ctx.params)) {
+    throw new TypeError('ActivityPub outbox context params must be an object.');
+  }
+
+  const postedActivity = isPostedActivity(ctx.params);
+  if (postedActivity) assertSupportedAudienceAddressing(ctx.params);
+
+  const blindRecipients = postedActivity
+    ? { bto: ctx.params.bto, bcc: ctx.params.bcc }
+    : { bto: undefined, bcc: undefined };
+  const wrappedCtx = Object.create(ctx);
+  wrappedCtx.params = sanitizeDeliveryActivity(ctx.params);
+
+  if (typeof ctx.call !== 'function') {
+    if (hasBlindRecipients(blindRecipients)) {
+      throw new TypeError('ActivityPub blind-address routing requires a context call function.');
+    }
+    return wrappedCtx;
+  }
+
+  const nativeCall = ctx.call.bind(ctx);
+  wrappedCtx.call = async (action, params, options) => {
+    if (
+      action === 'activitypub.activity.post' &&
+      persistBlindSnapshot &&
+      hasBlindRecipients(blindRecipients)
+    ) {
+      if (!params?.resource || typeof params.resource !== 'object' || Array.isArray(params.resource)) {
+        throw new Error('APDM blind-address recovery snapshot requires the finalized Activity resource before persistence.');
+      }
+      await nativeCall(
+        'activitypub-delivery-reconciler.storeBlindRecipientSnapshot',
+        {
+          activity: params.resource,
+          ...(blindRecipients.bto !== undefined ? { bto: blindRecipients.bto } : {}),
+          ...(blindRecipients.bcc !== undefined ? { bcc: blindRecipients.bcc } : {})
+        },
+        options
+      );
+    }
+
+    if (action !== 'activitypub.activity.getRecipients' || !hasBlindRecipients(blindRecipients)) {
+      return nativeCall(action, params, options);
+    }
+
+    const baseRecipients = await nativeCall(action, params, options);
+    const activity = params?.activity;
+    const actor = activity && activity.actor;
+    if (!actor) {
+      throw new Error('APDM blind-address recipient recovery requires a concrete Activity actor.');
+    }
+
+    const blindRecipientsOnly = await nativeCall(
+      action,
+      {
+        activity: {
+          actor,
+          ...(blindRecipients.bto !== undefined ? { bto: blindRecipients.bto } : {}),
+          ...(blindRecipients.bcc !== undefined ? { bcc: blindRecipients.bcc } : {})
+        }
+      },
+      options
+    );
+
+    return [...new Set([...(baseRecipients || []), ...(blindRecipientsOnly || [])])];
+  };
+
+  return wrappedCtx;
+}
+
 function assertExternalDeliveryConfiguration(settings) {
   if (normalizeRemoteDeliveryMode(settings?.remoteDeliveryMode) !== 'external') return;
   if (settings.allowExternalDeliveryPreview !== true) {
@@ -164,12 +308,15 @@ function assertExternalDeliveryConfiguration(settings) {
   if (typeof settings.deliveryHandoffUrl !== 'string' || settings.deliveryHandoffUrl.trim().length === 0) {
     throw new Error('ActivityPub external remote delivery requires a sidecar Delivery Plan handoff URL.');
   }
+  if (settings.deliveryHandoffUrl !== settings.deliveryHandoffUrl.trim()) {
+    throw new Error('ActivityPub external remote delivery handoff URL must not contain whitespace padding.');
+  }
+  if (settings.deliveryHandoffUrl.includes('#')) {
+    throw new Error('ActivityPub external remote delivery handoff URL must not contain a URL fragment.');
+  }
   const handoffUrl = parseSafeHttpUrl(settings.deliveryHandoffUrl);
   if (!handoffUrl) {
     throw new Error('ActivityPub external remote delivery handoff URL must be a valid credential-free HTTP(S) URL.');
-  }
-  if (handoffUrl.hash) {
-    throw new Error('ActivityPub external remote delivery handoff URL must not contain a URL fragment.');
   }
   if (typeof settings.deliveryHandoffToken !== 'string' || settings.deliveryHandoffToken.trim().length === 0) {
     throw new Error('ActivityPub external remote delivery requires SIDECAR_TOKEN for authenticated durable handoff.');
@@ -208,9 +355,10 @@ function createOutboxPostHandler(
 
   return async function postWithRemoteDeliveryStrategy(ctx) {
     const mode = normalizeRemoteDeliveryMode(this.settings.remoteDeliveryMode);
-    if (mode === 'native') return nativePostHandler.call(this, ctx);
+    if (mode === 'external') assertExternalDeliveryConfiguration(this.settings);
 
-    assertExternalDeliveryConfiguration(this.settings);
+    const privacySafeCtx = createPrivacySafeOutboxContext(ctx, { persistBlindSnapshot: mode === 'external' });
+    if (mode === 'native') return nativePostHandler.call(this, privacySafeCtx);
 
     const capturedRemotePosts = [];
     const capturedLocalPosts = [];
@@ -243,7 +391,7 @@ function createOutboxPostHandler(
       };
     }
 
-    const activity = await nativePostHandler.call(executionContext, ctx);
+    const activity = await nativePostHandler.call(executionContext, privacySafeCtx);
     if (!activityIdentity(activity).id) {
       throw new Error('APDM external delivery requires the SemApps outbox handler to return an Activity with a concrete id.');
     }
@@ -440,11 +588,14 @@ module.exports = {
   SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION,
   assertCapturedRemotePostStructure,
   assertExternalDeliveryConfiguration,
+  assertSupportedAudienceAddressing,
   assertSupportedSemappsOutboxShape,
   assertSupportedSemappsVersion,
   createActivityPubServiceWithDeliveryStrategy,
   createOutboxPostHandler,
   createOutboxServiceSchema,
+  createPrivacySafeOutboxContext,
+  isPostedActivity,
   loadSemappsActivityPubInternals,
   normalizeRemoteDeliveryMode,
   resolveSemappsInternalPaths,

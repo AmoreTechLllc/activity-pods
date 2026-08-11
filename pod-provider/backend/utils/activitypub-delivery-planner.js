@@ -3,6 +3,13 @@
 const {
   DELIVERY_PLAN_SCHEMA,
   computeDeliveryPlanIntentId,
+  determineActivityVisibility,
+  getExplicitConcreteRecipientUris,
+  hasSenderFollowersAudience,
+  isActorFollowersAddress,
+  normalizeDeliveryTargetDomain,
+  parseDeliveryEndpointUrl,
+  sanitizeDeliveryActivity,
   validateDeliveryPlanV1
 } = require('./activitypub-delivery-plan');
 
@@ -35,18 +42,7 @@ function isFollowersCollectionUri(value) {
 }
 
 function determineVisibility(activity) {
-  const publicAddresses = new Set([
-    'https://www.w3.org/ns/activitystreams#Public',
-    'as:Public',
-    'Public'
-  ]);
-  const to = addressValues(activity?.to);
-  const cc = addressValues(activity?.cc);
-
-  if (to.some(value => publicAddresses.has(value))) return 'public';
-  if (cc.some(value => publicAddresses.has(value))) return 'unlisted';
-  if (to.some(isFollowersCollectionUri)) return 'followers';
-  return 'direct';
+  return determineActivityVisibility(activity);
 }
 
 async function mapWithConcurrency(items, concurrency, mapper) {
@@ -86,8 +82,8 @@ async function resolveLocalDeliveryTarget(ctx, actorUri, podProvider) {
     { actorUri, predicate: 'inbox', webId: 'system' },
     { meta: { dataset } }
   );
-  if (typeof inboxUri !== 'string' || inboxUri.length === 0) {
-    throw new Error(`Unable to resolve local inbox for ${actorUri}`);
+  if (!parseDeliveryEndpointUrl(inboxUri)) {
+    throw new Error(`Unable to resolve safe local inbox for ${actorUri}`);
   }
 
   return { actorUri, dataset, inboxUri };
@@ -97,15 +93,11 @@ function parseRemoteDeliveryUrl(value, actorUri, label) {
   if (typeof value !== 'string' || value.length === 0) {
     throw new Error(`Unable to resolve remote ${label} for ${actorUri}`);
   }
-  try {
-    const parsed = new URL(value);
-    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
-      throw new Error('unsafe protocol or credentials');
-    }
-    return parsed;
-  } catch {
+  const parsed = parseDeliveryEndpointUrl(value);
+  if (!parsed) {
     throw new Error(`Resolved invalid remote ${label} URL for ${actorUri}`);
   }
+  return parsed;
 }
 
 async function resolveRemoteDeliveryTarget(ctx, actorUri) {
@@ -122,20 +114,39 @@ async function resolveRemoteDeliveryTarget(ctx, actorUri) {
     deliveryUrl = sharedInbox;
   }
 
+  const targetDomain = normalizeDeliveryTargetDomain(deliveryUrl.hostname);
+  if (!targetDomain) {
+    throw new Error(`Resolved invalid remote delivery hostname for ${actorUri}`);
+  }
+
   return {
     actorUri,
     inboxUrl: inbox.toString(),
     ...(sharedInboxUrl ? { sharedInboxUrl } : {}),
-    targetDomain: deliveryUrl.hostname.toLowerCase()
+    targetDomain
   };
 }
 
-function assertConcreteRecipientUris(recipientUris, classification) {
-  const followersCollection = recipientUris.find(isFollowersCollectionUri);
+function assertConcreteRecipientUris(recipientUris, classification, actorUri) {
+  const followersCollection = recipientUris.find(uri => isActorFollowersAddress(uri, actorUri));
   if (followersCollection) {
     throw new Error(
       `ActivityPub Delivery Plan received unresolved ${classification} followers collection ${followersCollection}`
     );
+  }
+}
+
+function assertSourceRecipientCoverage(activity, localRecipientUris, remoteRecipientUris) {
+  if (hasSenderFollowersAudience(activity)) {
+    throw new Error(
+      'ActivityPub Delivery Plan cannot safely infer sender followers from the audience field; authoritative audience expansion is required before external delivery'
+    );
+  }
+
+  const plannedRecipients = new Set([...localRecipientUris, ...remoteRecipientUris]);
+  const omittedRecipient = getExplicitConcreteRecipientUris(activity).find(uri => !plannedRecipients.has(uri));
+  if (omittedRecipient) {
+    throw new Error(`ActivityPub Delivery Plan omitted explicitly addressed recipient ${omittedRecipient}`);
   }
 }
 
@@ -157,14 +168,15 @@ async function buildDeliveryPlanV1(
 
   const uniqueLocalUris = [...new Set(localRecipientUris.filter(value => typeof value === 'string'))];
   const uniqueRemoteUris = [...new Set(remoteRecipientUris.filter(value => typeof value === 'string'))];
-  assertConcreteRecipientUris(uniqueLocalUris, 'local');
-  assertConcreteRecipientUris(uniqueRemoteUris, 'remote');
+  assertConcreteRecipientUris(uniqueLocalUris, 'local', actorUri);
+  assertConcreteRecipientUris(uniqueRemoteUris, 'remote', actorUri);
 
   const localSet = new Set(uniqueLocalUris);
   const overlappingRecipient = uniqueRemoteUris.find(uri => localSet.has(uri));
   if (overlappingRecipient) {
     throw new Error(`ActivityPub Delivery Plan recipient cannot be both local and remote: ${overlappingRecipient}`);
   }
+  assertSourceRecipientCoverage(activity, uniqueLocalUris, uniqueRemoteUris);
 
   const taggedTargets = [
     ...uniqueLocalUris.map(actor => ({ classification: 'local', actor })),
@@ -184,6 +196,7 @@ async function buildDeliveryPlanV1(
     .map(target => target.value);
 
   const visibility = determineVisibility(activity);
+  const deliveryActivity = sanitizeDeliveryActivity(activity);
   const plan = {
     schema: DELIVERY_PLAN_SCHEMA,
     intentId: createDeliveryIntentId({
@@ -194,7 +207,7 @@ async function buildDeliveryPlanV1(
     }),
     activityId,
     actorUri,
-    activity,
+    activity: deliveryActivity,
     localRecipients,
     remoteRecipients,
     meta: {
@@ -214,6 +227,7 @@ module.exports = {
   DEFAULT_TARGET_RESOLUTION_CONCURRENCY,
   addressValues,
   assertConcreteRecipientUris,
+  assertSourceRecipientCoverage,
   buildDeliveryPlanV1,
   createDeliveryIntentId,
   determineVisibility,
