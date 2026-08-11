@@ -4,9 +4,12 @@ const {
   DELIVERY_PLAN_SCHEMA,
   computeDeliveryPlanIntentId,
   determineActivityVisibility,
+  getExplicitConcreteRecipientUris,
+  hasSenderFollowersAudience,
   isActorFollowersAddress,
   normalizeDeliveryTargetDomain,
   parseDeliveryEndpointUrl,
+  sanitizeDeliveryActivity,
   validateDeliveryPlanV1
 } = require('./activitypub-delivery-plan');
 
@@ -133,6 +136,20 @@ function assertConcreteRecipientUris(recipientUris, classification, actorUri) {
   }
 }
 
+function assertSourceRecipientCoverage(activity, localRecipientUris, remoteRecipientUris) {
+  if (hasSenderFollowersAudience(activity)) {
+    throw new Error(
+      'ActivityPub Delivery Plan cannot safely infer sender followers from the audience field; authoritative audience expansion is required before external delivery'
+    );
+  }
+
+  const plannedRecipients = new Set([...localRecipientUris, ...remoteRecipientUris]);
+  const omittedRecipient = getExplicitConcreteRecipientUris(activity).find(uri => !plannedRecipients.has(uri));
+  if (omittedRecipient) {
+    throw new Error(`ActivityPub Delivery Plan omitted explicitly addressed recipient ${omittedRecipient}`);
+  }
+}
+
 async function buildDeliveryPlanV1(
   ctx,
   {
@@ -159,6 +176,7 @@ async function buildDeliveryPlanV1(
   if (overlappingRecipient) {
     throw new Error(`ActivityPub Delivery Plan recipient cannot be both local and remote: ${overlappingRecipient}`);
   }
+  assertSourceRecipientCoverage(activity, uniqueLocalUris, uniqueRemoteUris);
 
   const taggedTargets = [
     ...uniqueLocalUris.map(actor => ({ classification: 'local', actor })),
@@ -178,6 +196,7 @@ async function buildDeliveryPlanV1(
     .map(target => target.value);
 
   const visibility = determineVisibility(activity);
+  const deliveryActivity = sanitizeDeliveryActivity(activity);
   const plan = {
     schema: DELIVERY_PLAN_SCHEMA,
     intentId: createDeliveryIntentId({
@@ -188,7 +207,7 @@ async function buildDeliveryPlanV1(
     }),
     activityId,
     actorUri,
-    activity,
+    activity: deliveryActivity,
     localRecipients,
     remoteRecipients,
     meta: {
@@ -208,6 +227,7 @@ module.exports = {
   DEFAULT_TARGET_RESOLUTION_CONCURRENCY,
   addressValues,
   assertConcreteRecipientUris,
+  assertSourceRecipientCoverage,
   buildDeliveryPlanV1,
   createDeliveryIntentId,
   determineVisibility,
