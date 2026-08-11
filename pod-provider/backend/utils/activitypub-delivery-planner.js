@@ -87,6 +87,9 @@ async function resolveLocalDeliveryTarget(ctx, actorUri, podProvider) {
 }
 
 function parseRemoteDeliveryUrl(value, actorUri, label) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`Unable to resolve remote ${label} for ${actorUri}`);
+  }
   const parsed = parseDeliveryEndpointUrl(value);
   if (!parsed) {
     throw new Error(`Resolved invalid remote ${label} URL for ${actorUri}`);
