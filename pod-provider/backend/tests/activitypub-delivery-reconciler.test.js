@@ -1,5 +1,8 @@
 'use strict';
 
+process.env.SEMAPPS_AVAILABLE_LOCALES ||= 'en';
+process.env.SEMAPPS_AUTH_RESERVED_USER_NAMES ||= 'admin';
+
 const service = require('../services/activitypub-delivery-reconciler.service');
 
 function createServiceContext(overrides = {}) {
