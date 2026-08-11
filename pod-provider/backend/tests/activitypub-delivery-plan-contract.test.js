@@ -11,7 +11,7 @@ const {
   validateDeliveryPlanV1
 } = require('../utils/activitypub-delivery-plan');
 
-const FOLLOWERS_ONLY_FIXTURE_SHA256 = 'e166848b9d82e369fa6bace448dbd8ca42949aae9bdbba3b4034f0749d3d087c';
+const FOLLOWERS_ONLY_FIXTURE_SHA256 = '833658699fad1a73a688591789adfadcadf62e324607ed8fdf75a04b4227310d';
 
 describe('APDM delivery plan v1 producer contract', () => {
   test('fixture validates against the producer contract helper', () => {
