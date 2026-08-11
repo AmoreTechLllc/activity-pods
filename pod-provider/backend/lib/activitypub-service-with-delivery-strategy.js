@@ -4,6 +4,7 @@ const QueueMixin = require('moleculer-bull');
 const { as, sec } = require('@semapps/ontologies');
 const semappsActivityPubPackage = require('@semapps/activitypub/package.json');
 const { buildDeliveryPlanV1 } = require('../utils/activitypub-delivery-planner');
+const { sanitizeDeliveryActivity } = require('../utils/activitypub-delivery-plan');
 const {
   DELIVERY_HANDOFF_QUEUE,
   enqueueDeliveryHandoff,
@@ -153,6 +154,53 @@ function validateCapturedLocalPosts(capturedLocalPosts, activity) {
   return [...new Set(recipients)];
 }
 
+function hasBlindRecipients({ bto, bcc }) {
+  return bto !== undefined || bcc !== undefined;
+}
+
+function createPrivacySafeOutboxContext(ctx) {
+  if (!ctx || !ctx.params || typeof ctx.params !== 'object' || Array.isArray(ctx.params)) {
+    throw new TypeError('ActivityPub outbox context must contain object params.');
+  }
+
+  const blindRecipients = {
+    bto: ctx.params.bto,
+    bcc: ctx.params.bcc
+  };
+  const wrappedCtx = Object.create(ctx);
+  wrappedCtx.params = sanitizeDeliveryActivity(ctx.params);
+
+  const nativeCall = ctx.call.bind(ctx);
+  wrappedCtx.call = async (action, params, options) => {
+    if (action !== 'activitypub.activity.getRecipients' || !hasBlindRecipients(blindRecipients)) {
+      return nativeCall(action, params, options);
+    }
+
+    const baseRecipients = await nativeCall(action, params, options);
+    const activity = params?.activity;
+    const actor = activity && activity.actor;
+    if (!actor) {
+      throw new Error('APDM blind-address recipient recovery requires a concrete Activity actor.');
+    }
+
+    const blindRecipientsOnly = await nativeCall(
+      action,
+      {
+        activity: {
+          actor,
+          ...(blindRecipients.bto !== undefined ? { bto: blindRecipients.bto } : {}),
+          ...(blindRecipients.bcc !== undefined ? { bcc: blindRecipients.bcc } : {})
+        }
+      },
+      options
+    );
+
+    return [...new Set([...(baseRecipients || []), ...(blindRecipientsOnly || [])])];
+  };
+
+  return wrappedCtx;
+}
+
 function assertExternalDeliveryConfiguration(settings) {
   if (normalizeRemoteDeliveryMode(settings?.remoteDeliveryMode) !== 'external') return;
   if (settings.allowExternalDeliveryPreview !== true) {
@@ -207,8 +255,9 @@ function createOutboxPostHandler(
   if (typeof enqueueHandoff !== 'function') throw new TypeError('ActivityPub durable handoff enqueuer must be a function');
 
   return async function postWithRemoteDeliveryStrategy(ctx) {
+    const privacySafeCtx = createPrivacySafeOutboxContext(ctx);
     const mode = normalizeRemoteDeliveryMode(this.settings.remoteDeliveryMode);
-    if (mode === 'native') return nativePostHandler.call(this, ctx);
+    if (mode === 'native') return nativePostHandler.call(this, privacySafeCtx);
 
     assertExternalDeliveryConfiguration(this.settings);
 
@@ -243,7 +292,7 @@ function createOutboxPostHandler(
       };
     }
 
-    const activity = await nativePostHandler.call(executionContext, ctx);
+    const activity = await nativePostHandler.call(executionContext, privacySafeCtx);
     if (!activityIdentity(activity).id) {
       throw new Error('APDM external delivery requires the SemApps outbox handler to return an Activity with a concrete id.');
     }
@@ -445,6 +494,7 @@ module.exports = {
   createActivityPubServiceWithDeliveryStrategy,
   createOutboxPostHandler,
   createOutboxServiceSchema,
+  createPrivacySafeOutboxContext,
   loadSemappsActivityPubInternals,
   normalizeRemoteDeliveryMode,
   resolveSemappsInternalPaths,
