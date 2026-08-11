@@ -16,6 +16,8 @@ function createServiceContext(overrides = {}) {
     },
     logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
     reconcileAccount: service.methods.reconcileAccount,
+    acquireDistributedLease: jest.fn(async () => 'lease-token'),
+    releaseDistributedLease: jest.fn(async () => true),
     getAccountOffset: jest.fn(async () => accountOffset),
     setAccountOffset: jest.fn(async next => {
       accountOffset = next;
@@ -28,6 +30,7 @@ function createServiceContext(overrides = {}) {
       handoffsRequeued: 0,
       failures: 0,
       accountOffset: 0,
+      distributedLockSkips: 0,
       lastRunStartedAt: null,
       lastRunCompletedAt: null,
       lastError: null
@@ -145,16 +148,28 @@ describe('APDM Phase 4 delivery reconciliation', () => {
     expect(enqueuedPlans).toHaveLength(0);
   });
 
-  test('run skips overlapping reconciliation rather than scanning twice', async () => {
+  test('run skips overlapping reconciliation in the same process', async () => {
     const context = createServiceContext();
     context.reconciliationRunning = true;
 
     const result = await service.actions.run.handler.call(context, { call: jest.fn() });
 
     expect(result).toEqual({ skipped: true, reason: 'reconciliation already running' });
+    expect(context.acquireDistributedLease).not.toHaveBeenCalled();
   });
 
-  test('run filters tombstones, advances the durable account cursor, and aggregates counters', async () => {
+  test('run skips when another provider process owns the distributed reconciliation lease', async () => {
+    const context = createServiceContext();
+    context.acquireDistributedLease = jest.fn(async () => null);
+
+    const result = await service.actions.run.handler.call(context, { call: jest.fn() });
+
+    expect(result).toEqual({ skipped: true, reason: 'reconciliation active on another provider process' });
+    expect(context.reconciliationStats.distributedLockSkips).toBe(1);
+    expect(context.reconciliationStats.runs).toBe(0);
+  });
+
+  test('run filters tombstones, advances the durable account cursor, and releases its lease', async () => {
     const context = createServiceContext({ accountBatchSize: 2 });
     context.reconcileAccount = jest.fn(async () => ({ activitiesScanned: 1, handoffsRequeued: 1, failures: 0 }));
     const ctx = {
@@ -174,6 +189,7 @@ describe('APDM Phase 4 delivery reconciliation', () => {
 
     expect(context.reconcileAccount).toHaveBeenCalledTimes(1);
     expect(context.setAccountOffset).toHaveBeenCalledWith(2);
+    expect(context.releaseDistributedLease).toHaveBeenCalledWith('lease-token');
     expect(result).toEqual({
       accountsScanned: 1,
       activitiesScanned: 1,
@@ -187,7 +203,8 @@ describe('APDM Phase 4 delivery reconciliation', () => {
       activitiesScanned: 1,
       handoffsRequeued: 1,
       failures: 0,
-      accountOffset: 2
+      accountOffset: 2,
+      distributedLockSkips: 0
     }));
   });
 
@@ -209,6 +226,7 @@ describe('APDM Phase 4 delivery reconciliation', () => {
 
     expect(calls).toEqual([{ limit: 2, offset: 10 }, { limit: 2, offset: 0 }]);
     expect(context.setAccountOffset).toHaveBeenCalledWith(0);
+    expect(context.releaseDistributedLease).toHaveBeenCalledWith('lease-token');
     expect(result.nextAccountOffset).toBe(0);
   });
 });
