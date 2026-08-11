@@ -1,0 +1,62 @@
+name: Reconcile backend yarn.lock
+
+on:
+  push:
+    branches:
+      - maintenance/backend-yarn-lock-reconcile
+
+permissions:
+  contents: write
+
+jobs:
+  reconcile:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: maintenance/backend-yarn-lock-reconcile
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+          cache-dependency-path: pod-provider/backend/yarn.lock
+
+      - name: Enforce HTTPS for public Git dependencies
+        run: |
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      - name: Normalize legacy SSH Git URLs
+        working-directory: pod-provider/backend
+        run: |
+          sed -i 's#ssh://git@github.com/#https://github.com/#g' yarn.lock
+          sed -i 's#git+ssh://git@github.com/#git+https://github.com/#g' yarn.lock
+          sed -i 's#git@github.com:#https://github.com/#g' yarn.lock
+
+      - name: Regenerate backend lockfile
+        working-directory: pod-provider/backend
+        run: yarn install
+
+      - name: Verify generated lockfile is stable
+        working-directory: pod-provider/backend
+        run: |
+          cp yarn.lock /tmp/yarn.lock.generated
+          yarn install
+          cmp -s yarn.lock /tmp/yarn.lock.generated
+
+      - name: Commit generated lockfile
+        run: |
+          if git diff --quiet -- pod-provider/backend/yarn.lock; then
+            echo "Backend yarn.lock is already reconciled"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pod-provider/backend/yarn.lock
+          git commit -m "chore: reconcile backend yarn.lock"
+          git push origin HEAD:maintenance/backend-yarn-lock-reconcile
