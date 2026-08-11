@@ -159,8 +159,16 @@ function hasBlindRecipients({ bto, bcc }) {
 }
 
 function createPrivacySafeOutboxContext(ctx) {
-  if (!ctx || !ctx.params || typeof ctx.params !== 'object' || Array.isArray(ctx.params)) {
-    throw new TypeError('ActivityPub outbox context must contain object params.');
+  if (!ctx || typeof ctx !== 'object' || Array.isArray(ctx)) {
+    throw new TypeError('ActivityPub outbox context must be an object.');
+  }
+
+  // Unit-level strategy tests and compatibility callers may use a lightweight
+  // context with no request params at all. There is nothing to sanitize in
+  // that case; real Moleculer outbox actions always provide ctx.params.
+  if (ctx.params === undefined || ctx.params === null) return ctx;
+  if (typeof ctx.params !== 'object' || Array.isArray(ctx.params)) {
+    throw new TypeError('ActivityPub outbox context params must be an object.');
   }
 
   const blindRecipients = {
@@ -169,6 +177,13 @@ function createPrivacySafeOutboxContext(ctx) {
   };
   const wrappedCtx = Object.create(ctx);
   wrappedCtx.params = sanitizeDeliveryActivity(ctx.params);
+
+  if (typeof ctx.call !== 'function') {
+    if (hasBlindRecipients(blindRecipients)) {
+      throw new TypeError('ActivityPub blind-address routing requires a context call function.');
+    }
+    return wrappedCtx;
+  }
 
   const nativeCall = ctx.call.bind(ctx);
   wrappedCtx.call = async (action, params, options) => {
@@ -255,11 +270,11 @@ function createOutboxPostHandler(
   if (typeof enqueueHandoff !== 'function') throw new TypeError('ActivityPub durable handoff enqueuer must be a function');
 
   return async function postWithRemoteDeliveryStrategy(ctx) {
-    const privacySafeCtx = createPrivacySafeOutboxContext(ctx);
     const mode = normalizeRemoteDeliveryMode(this.settings.remoteDeliveryMode);
-    if (mode === 'native') return nativePostHandler.call(this, privacySafeCtx);
+    if (mode === 'external') assertExternalDeliveryConfiguration(this.settings);
 
-    assertExternalDeliveryConfiguration(this.settings);
+    const privacySafeCtx = createPrivacySafeOutboxContext(ctx);
+    if (mode === 'native') return nativePostHandler.call(this, privacySafeCtx);
 
     const capturedRemotePosts = [];
     const capturedLocalPosts = [];
