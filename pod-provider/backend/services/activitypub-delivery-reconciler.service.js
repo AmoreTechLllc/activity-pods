@@ -355,7 +355,9 @@ module.exports = {
     },
 
     async reconcileActivity(ctx, activity, dataset) {
-      const blindSnapshot = await this.loadBlindRecipientSnapshot(activity);
+      const blindSnapshot = typeof this.loadBlindRecipientSnapshot === 'function'
+        ? await this.loadBlindRecipientSnapshot(activity)
+        : null;
       const routingActivity = blindSnapshot ? { ...activity, ...blindSnapshot } : activity;
       const recipients = await ctx.call('activitypub.activity.getRecipients', { activity: routingActivity });
       const concreteRecipients = await this.expandConcreteRecipients(ctx, routingActivity, recipients, dataset);
