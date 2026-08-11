@@ -4,9 +4,9 @@
  *
  * Publishes Activity Intent link templates in the WebFinger response and
  * exposes the matching home-server intent endpoints. All endpoints are
- * GET-only and never mutate state (CSRF safe per §6.1); they redirect the
- * user to the frontend authorization workflow which performs the activity
- * after confirmation.
+ * GET-only and never mutate state; they redirect the authenticated user to a
+ * frontend confirmation workflow. The frontend performs any Activity only
+ * after explicit confirmation.
  */
 
 const CONFIG = require('../../config/config');
@@ -17,7 +17,24 @@ const INTENT_DEFINITIONS = [
   { type: 'Follow', frontendPath: '/i/follow', params: ['object'] },
   { type: 'Like', frontendPath: '/i/like', params: ['object'] },
   { type: 'Announce', frontendPath: '/i/announce', params: ['object'] },
-  { type: 'Create', frontendPath: '/i/create', params: ['type', 'name', 'summary', 'content', 'inReplyTo', 'attachment', 'tag'] },
+  {
+    type: 'Create',
+    frontendPath: '/i/create',
+    params: [
+      'type',
+      'name',
+      'summary',
+      'content',
+      'inReplyTo',
+      'attachment',
+      'tag',
+      'startTime',
+      'endTime',
+      'describes',
+      'audience',
+      'context'
+    ]
+  },
   { type: 'Flag', frontendPath: '/i/flag', params: ['object'] },
   { type: 'Block', frontendPath: '/i/block', params: ['object'] },
   { type: 'Object', frontendPath: '/i/object', params: ['object'], hasWorkflow: false }
@@ -28,10 +45,7 @@ const CLOSE_TOKEN = '(close)';
 const MAX_PARAM_LENGTH = 4096;
 const SAFE_PARAM_KEYS = new Set([
   ...INTENT_DEFINITIONS.flatMap(d => d.params),
-  ...WORKFLOW_PARAMS,
-  'startTime',
-  'endTime',
-  'describes'
+  ...WORKFLOW_PARAMS
 ]);
 
 module.exports = {
@@ -137,7 +151,7 @@ module.exports = {
     },
 
     validateParams(params, intent) {
-      const urlParams = ['object', 'target', 'origin', 'location', 'inReplyTo', 'attachment', 'tag'];
+      const urlParams = ['object', 'inReplyTo', 'attachment', 'tag', 'describes', 'audience', 'context'];
       for (const key of urlParams) {
         if (params[key] !== undefined && !isAbsoluteHttpUrl(params[key])) {
           return { ok: false, error: `Invalid URL for parameter "${key}"` };
