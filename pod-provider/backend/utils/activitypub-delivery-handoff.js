@@ -1,6 +1,7 @@
 'use strict';
 
 const DELIVERY_HANDOFF_QUEUE = 'deliveryHandoff';
+const DELIVERY_HANDOFF_JOB_NAME = 'apdm-delivery-handoff-v1';
 
 const DELIVERY_HANDOFF_QUEUE_OPTIONS =
   process.env.NODE_ENV === 'test'
@@ -56,11 +57,18 @@ async function enqueueDeliveryHandoff(service, deliveryPlan) {
     throw new Error('Durable ActivityPub handoff requires a Delivery Plan intentId');
   }
 
+  // moleculer-bull createJob(queue, name, data, opts) passes the second
+  // argument to Bull as the job *name*. Dedupe/uniqueness is controlled by
+  // opts.jobId, so the deterministic Delivery Plan ID must live there.
+  const options = {
+    ...DELIVERY_HANDOFF_QUEUE_OPTIONS,
+    jobId: deliveryPlan.intentId
+  };
   const result = service.createJob(
     DELIVERY_HANDOFF_QUEUE,
-    deliveryPlan.intentId,
+    DELIVERY_HANDOFF_JOB_NAME,
     { deliveryPlan },
-    DELIVERY_HANDOFF_QUEUE_OPTIONS
+    options
   );
   await Promise.resolve(result);
   return deliveryPlan.intentId;
@@ -85,8 +93,6 @@ async function processDeliveryHandoffJob(service, job, fetchImpl = fetch) {
     signal: AbortSignal.timeout(service.settings.deliveryHandoffTimeoutMs || 5000)
   });
 
-  // /webhook/outbox uses 202 specifically after its Redis Streams XADD succeeds.
-  // Any other status is not proof that the durable sidecar acceptance boundary was crossed.
   if (response.status !== 202) {
     throw new Error(`Sidecar durable outbox handoff returned ${response.status}; expected durable 202 acceptance`);
   }
@@ -112,6 +118,7 @@ async function processDeliveryHandoffJob(service, job, fetchImpl = fetch) {
 }
 
 module.exports = {
+  DELIVERY_HANDOFF_JOB_NAME,
   DELIVERY_HANDOFF_QUEUE,
   DELIVERY_HANDOFF_QUEUE_OPTIONS,
   assertDurableHandoffConfigured,
