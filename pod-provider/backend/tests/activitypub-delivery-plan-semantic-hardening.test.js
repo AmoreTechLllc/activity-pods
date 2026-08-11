@@ -83,6 +83,26 @@ describe('APDM Phase 3 semantic hardening', () => {
     })).toBe(false);
   });
 
+  test('validator rejects private/followers plans marked public-indexable', () => {
+    const activityId = 'https://pods.example/alice/activities/private';
+    const id = createDeliveryIntentId({
+      activityId,
+      actorUri: ACTOR,
+      localRecipientUris: [],
+      remoteRecipientUris: []
+    });
+    expect(validateDeliveryPlanV1({
+      schema: 'ap.delivery-plan.v1',
+      intentId: id,
+      activityId,
+      actorUri: ACTOR,
+      activity: { id: activityId, actor: ACTOR, type: 'Create', to: [`${ACTOR}/followers`], cc: [] },
+      localRecipients: [],
+      remoteRecipients: [],
+      meta: { visibility: 'followers', isPublicActivity: false, isPublicIndexable: true }
+    })).toBe(false);
+  });
+
   test('validator rejects duplicate/overlapping recipient actors and mismatched target domains', () => {
     const activityId = 'https://pods.example/alice/activities/1';
     const remoteActor = 'https://remote.example/users/bob';
