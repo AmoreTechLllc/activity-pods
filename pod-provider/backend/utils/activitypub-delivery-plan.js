@@ -4,7 +4,7 @@ const crypto = require('crypto');
 
 const DELIVERY_PLAN_SCHEMA = 'ap.delivery-plan.v1';
 const DELIVERY_PLAN_FIXTURE_SHA256 = '0d38040d212f781deb71fc8a62c9f4a6bef60ef977414369e9b8a41df0d1b09a';
-const DELIVERY_PLAN_JSON_SCHEMA_SHA256 = '737f98bbda5c34fb26803c21abad1049c47b62643bcd4e162e017625ba380a9d';
+const DELIVERY_PLAN_JSON_SCHEMA_SHA256 = '90067ea8c3d309bccb70420920bdc976a59413ba88f477712dca9c77799dcfbe';
 const VISIBILITIES = new Set(['public', 'unlisted', 'followers', 'direct']);
 const PLAN_KEYS = new Set(['schema', 'intentId', 'activityId', 'actorUri', 'activity', 'localRecipients', 'remoteRecipients', 'meta']);
 const LOCAL_TARGET_KEYS = new Set(['actorUri', 'dataset', 'inboxUri']);
@@ -12,9 +12,14 @@ const REMOTE_TARGET_KEYS = new Set(['actorUri', 'inboxUrl', 'sharedInboxUrl', 't
 const META_KEYS = new Set(['visibility', 'isPublicActivity', 'isPublicIndexable', 'searchConsent']);
 const APDM_INTENT_ID_PATTERN = /^apdm-v1-[a-f0-9]{64}$/u;
 const PUBLIC_ADDRESSES = new Set(['https://www.w3.org/ns/activitystreams#Public', 'as:Public', 'Public']);
+const ASCII_CONTROL_PATTERN = /[\u0000-\u001f\u007f]/u;
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.length > 0;
+}
+
+function isCleanString(value) {
+  return isNonEmptyString(value) && value === value.trim() && !ASCII_CONTROL_PATTERN.test(value);
 }
 
 function hasOnlyKeys(value, allowed) {
@@ -22,7 +27,7 @@ function hasOnlyKeys(value, allowed) {
 }
 
 function parseHttpUrl(value) {
-  if (!isNonEmptyString(value)) return null;
+  if (!isCleanString(value)) return null;
   try {
     const parsed = new URL(value);
     if (!['http:', 'https:'].includes(parsed.protocol)) return null;
@@ -31,6 +36,18 @@ function parseHttpUrl(value) {
   } catch {
     return null;
   }
+}
+
+function parseDeliveryEndpointUrl(value) {
+  const parsed = parseHttpUrl(value);
+  if (!parsed || parsed.hash) return null;
+  return normalizeDeliveryTargetDomain(parsed.hostname) ? parsed : null;
+}
+
+function normalizeDeliveryTargetDomain(value) {
+  if (!isCleanString(value)) return null;
+  const normalized = value.toLowerCase().replace(/\.+$/u, '');
+  return normalized.length > 0 ? normalized : null;
 }
 
 function isHttpUrl(value) {
@@ -73,8 +90,8 @@ function validateLocalRecipient(target) {
       !Array.isArray(target) &&
       hasOnlyKeys(target, LOCAL_TARGET_KEYS) &&
       isHttpUrl(target.actorUri) &&
-      isNonEmptyString(target.dataset) &&
-      isHttpUrl(target.inboxUri)
+      isCleanString(target.dataset) &&
+      parseDeliveryEndpointUrl(target.inboxUri)
   );
 }
 
@@ -85,25 +102,41 @@ function validateRemoteRecipient(target) {
     !Array.isArray(target) &&
     hasOnlyKeys(target, REMOTE_TARGET_KEYS) &&
     isHttpUrl(target.actorUri) &&
-    isHttpUrl(target.inboxUrl) &&
-    (target.sharedInboxUrl === undefined || isHttpUrl(target.sharedInboxUrl)) &&
-    isNonEmptyString(target.targetDomain)
+    parseDeliveryEndpointUrl(target.inboxUrl) &&
+    (target.sharedInboxUrl === undefined || parseDeliveryEndpointUrl(target.sharedInboxUrl)) &&
+    isCleanString(target.targetDomain)
   )) return false;
 
   const deliveryUrl = target.sharedInboxUrl || target.inboxUrl;
-  const parsed = parseHttpUrl(deliveryUrl);
-  return Boolean(parsed && target.targetDomain === parsed.hostname.toLowerCase());
+  const parsed = parseDeliveryEndpointUrl(deliveryUrl);
+  const expectedDomain = parsed && normalizeDeliveryTargetDomain(parsed.hostname);
+  return Boolean(expectedDomain && target.targetDomain === expectedDomain);
 }
 
 function canonicalize(value) {
+  if (value === null) return 'null';
   if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `{${Object.keys(value)
-      .sort()
-      .map(key => `${JSON.stringify(key)}:${canonicalize(value[key])}`)
-      .join(',')}}`;
+
+  switch (typeof value) {
+    case 'string':
+    case 'boolean':
+      return JSON.stringify(value);
+    case 'number':
+      if (!Number.isFinite(value)) throw new TypeError('Cannot canonicalize non-finite number');
+      return JSON.stringify(value);
+    case 'object': {
+      const prototype = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) {
+        throw new TypeError('Cannot canonicalize non-JSON object');
+      }
+      return `{${Object.keys(value)
+        .sort()
+        .map(key => `${JSON.stringify(key)}:${canonicalize(value[key])}`)
+        .join(',')}}`;
+    }
+    default:
+      throw new TypeError(`Cannot canonicalize unsupported ${typeof value} value`);
   }
-  return JSON.stringify(value);
 }
 
 function computeDeliveryPlanIntentId({ activityId, actorUri, localRecipientUris = [], remoteRecipientUris = [] }) {
@@ -161,7 +194,11 @@ function validateDeliveryPlanV1(plan) {
   if (!VISIBILITIES.has(plan.meta.visibility)) return false;
   if (typeof plan.meta.isPublicActivity !== 'boolean') return false;
   if (plan.meta.isPublicIndexable !== undefined && typeof plan.meta.isPublicIndexable !== 'boolean') return false;
-  if (plan.meta.searchConsent !== undefined && plan.meta.searchConsent !== null && typeof plan.meta.searchConsent !== 'object') {
+  if (
+    plan.meta.searchConsent !== undefined &&
+    plan.meta.searchConsent !== null &&
+    (typeof plan.meta.searchConsent !== 'object' || Array.isArray(plan.meta.searchConsent))
+  ) {
     return false;
   }
   return validateSemanticInvariants(plan);
@@ -180,5 +217,7 @@ module.exports = {
   computeDeliveryPlanIntentId,
   deliveryPlanFingerprint,
   determineActivityVisibility,
+  normalizeDeliveryTargetDomain,
+  parseDeliveryEndpointUrl,
   validateDeliveryPlanV1
 };
