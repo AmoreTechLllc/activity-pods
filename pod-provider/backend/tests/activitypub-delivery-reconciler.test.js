@@ -3,18 +3,23 @@
 const service = require('../services/activitypub-delivery-reconciler.service');
 
 function createServiceContext(overrides = {}) {
+  let accountOffset = 0;
   return {
     settings: {
       enabled: true,
       baseUri: 'https://pods.example',
       lookbackMs: 900000,
-      maxAccounts: 100,
+      accountBatchSize: 100,
       maxActivitiesPerAccount: 50,
       concurrency: 2,
       ...overrides
     },
     logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
     reconcileAccount: service.methods.reconcileAccount,
+    getAccountOffset: jest.fn(async () => accountOffset),
+    setAccountOffset: jest.fn(async next => {
+      accountOffset = next;
+    }),
     reconciliationRunning: false,
     reconciliationStats: {
       runs: 0,
@@ -22,6 +27,7 @@ function createServiceContext(overrides = {}) {
       activitiesScanned: 0,
       handoffsRequeued: 0,
       failures: 0,
+      accountOffset: 0,
       lastRunStartedAt: null,
       lastRunCompletedAt: null,
       lastError: null
@@ -148,12 +154,13 @@ describe('APDM Phase 4 delivery reconciliation', () => {
     expect(result).toEqual({ skipped: true, reason: 'reconciliation already running' });
   });
 
-  test('run filters tombstoned accounts and aggregates observable counters', async () => {
-    const context = createServiceContext();
+  test('run filters tombstones, advances the durable account cursor, and aggregates counters', async () => {
+    const context = createServiceContext({ accountBatchSize: 2 });
     context.reconcileAccount = jest.fn(async () => ({ activitiesScanned: 1, handoffsRequeued: 1, failures: 0 }));
     const ctx = {
-      call: jest.fn(async action => {
+      call: jest.fn(async (action, params) => {
         if (action === 'auth.account.find') {
+          expect(params).toEqual({ limit: 2, offset: 0 });
           return [
             { webId: 'https://pods.example/alice', username: 'alice' },
             { webId: 'https://pods.example/deleted', username: 'deleted', deletedAt: new Date().toISOString() }
@@ -166,13 +173,42 @@ describe('APDM Phase 4 delivery reconciliation', () => {
     const result = await service.actions.run.handler.call(context, ctx);
 
     expect(context.reconcileAccount).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ accountsScanned: 1, activitiesScanned: 1, handoffsRequeued: 1, failures: 0 });
+    expect(context.setAccountOffset).toHaveBeenCalledWith(2);
+    expect(result).toEqual({
+      accountsScanned: 1,
+      activitiesScanned: 1,
+      handoffsRequeued: 1,
+      failures: 0,
+      nextAccountOffset: 2
+    });
     expect(context.reconciliationStats).toEqual(expect.objectContaining({
       runs: 1,
       accountsScanned: 1,
       activitiesScanned: 1,
       handoffsRequeued: 1,
-      failures: 0
+      failures: 0,
+      accountOffset: 2
     }));
+  });
+
+  test('run wraps a persisted cursor when it reaches the end of the account table', async () => {
+    const context = createServiceContext({ accountBatchSize: 2 });
+    context.getAccountOffset = jest.fn(async () => 10);
+    context.reconcileAccount = jest.fn(async () => ({ activitiesScanned: 0, handoffsRequeued: 0, failures: 0 }));
+    const calls = [];
+    const ctx = {
+      async call(action, params) {
+        if (action !== 'auth.account.find') throw new Error(`Unexpected call ${action}`);
+        calls.push(params);
+        if (params.offset === 10) return [];
+        return [{ webId: 'https://pods.example/alice', username: 'alice' }];
+      }
+    };
+
+    const result = await service.actions.run.handler.call(context, ctx);
+
+    expect(calls).toEqual([{ limit: 2, offset: 10 }, { limit: 2, offset: 0 }]);
+    expect(context.setAccountOffset).toHaveBeenCalledWith(0);
+    expect(result.nextAccountOffset).toBe(0);
   });
 });
