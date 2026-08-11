@@ -11,6 +11,7 @@ const LOCAL_TARGET_KEYS = new Set(['actorUri', 'dataset', 'inboxUri']);
 const REMOTE_TARGET_KEYS = new Set(['actorUri', 'inboxUrl', 'sharedInboxUrl', 'targetDomain']);
 const META_KEYS = new Set(['visibility', 'isPublicActivity', 'isPublicIndexable', 'searchConsent']);
 const APDM_INTENT_ID_PATTERN = /^apdm-v1-[a-f0-9]{64}$/u;
+const PUBLIC_ADDRESSES = new Set(['https://www.w3.org/ns/activitystreams#Public', 'as:Public', 'Public']);
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.length > 0;
@@ -40,6 +41,29 @@ function normalizeId(value) {
   if (typeof value === 'string') return value;
   if (value && typeof value === 'object' && !Array.isArray(value)) return value.id || value['@id'] || null;
   return null;
+}
+
+function normalizeAddresses(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values.map(normalizeId).filter(item => typeof item === 'string');
+}
+
+function isFollowersAddress(value) {
+  if (typeof value !== 'string') return false;
+  try {
+    return new URL(value).pathname.replace(/\/+$/u, '').endsWith('/followers');
+  } catch {
+    return false;
+  }
+}
+
+function determineActivityVisibility(activity) {
+  const to = normalizeAddresses(activity?.to);
+  const cc = normalizeAddresses(activity?.cc);
+  if (to.some(value => PUBLIC_ADDRESSES.has(value))) return 'public';
+  if (cc.some(value => PUBLIC_ADDRESSES.has(value))) return 'unlisted';
+  if (to.some(isFollowersAddress)) return 'followers';
+  return 'direct';
 }
 
 function validateLocalRecipient(target) {
@@ -102,7 +126,9 @@ function validateSemanticInvariants(plan) {
   const embeddedActorUri = normalizeId(plan.activity.actor);
   if (embeddedActivityId !== plan.activityId || embeddedActorUri !== plan.actorUri) return false;
 
-  const expectedPublic = plan.meta.visibility === 'public' || plan.meta.visibility === 'unlisted';
+  const expectedVisibility = determineActivityVisibility(plan.activity);
+  if (plan.meta.visibility !== expectedVisibility) return false;
+  const expectedPublic = expectedVisibility === 'public' || expectedVisibility === 'unlisted';
   if (plan.meta.isPublicActivity !== expectedPublic) return false;
 
   const localUris = plan.localRecipients.map(target => target.actorUri);
@@ -152,5 +178,6 @@ module.exports = {
   canonicalize,
   computeDeliveryPlanIntentId,
   deliveryPlanFingerprint,
+  determineActivityVisibility,
   validateDeliveryPlanV1
 };
