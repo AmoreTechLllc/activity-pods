@@ -1,5 +1,8 @@
 'use strict';
 
+process.env.SEMAPPS_AVAILABLE_LOCALES ||= 'en';
+process.env.SEMAPPS_AUTH_RESERVED_USER_NAMES ||= 'admin';
+
 const service = require('../services/activitypub-delivery-reconciler.service');
 
 test('APDM P4 reconciler skips persisted activities outside the lookback window', async () => {
@@ -35,6 +38,8 @@ test('APDM P4 reconciler skips persisted activities outside the lookback window'
       lookbackMs: 15 * 60 * 1000,
       maxActivitiesPerAccount: 50
     },
+    reconcileActivity: service.methods.reconcileActivity,
+    expandConcreteRecipients: service.methods.expandConcreteRecipients,
     logger: { warn: jest.fn() }
   };
 
