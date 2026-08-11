@@ -167,11 +167,11 @@ function assertExternalDeliveryConfiguration(settings) {
     throw new Error('ActivityPub external remote delivery requires SIDECAR_TOKEN for authenticated durable handoff.');
   }
   if (
-    !Number.isFinite(settings.deliveryHandoffTimeoutMs) ||
+    !Number.isInteger(settings.deliveryHandoffTimeoutMs) ||
     settings.deliveryHandoffTimeoutMs < 100 ||
     settings.deliveryHandoffTimeoutMs > 60000
   ) {
-    throw new Error('ActivityPub external remote delivery handoff timeout must be between 100 and 60000 milliseconds.');
+    throw new Error('ActivityPub external remote delivery handoff timeout must be an integer between 100 and 60000 milliseconds.');
   }
 }
 
