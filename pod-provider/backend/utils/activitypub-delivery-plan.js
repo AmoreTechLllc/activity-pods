@@ -130,6 +130,7 @@ function validateSemanticInvariants(plan) {
   if (plan.meta.visibility !== expectedVisibility) return false;
   const expectedPublic = expectedVisibility === 'public' || expectedVisibility === 'unlisted';
   if (plan.meta.isPublicActivity !== expectedPublic) return false;
+  if (plan.meta.isPublicIndexable === true && !expectedPublic) return false;
 
   const localUris = plan.localRecipients.map(target => target.actorUri);
   const remoteUris = plan.remoteRecipients.map(target => target.actorUri);
