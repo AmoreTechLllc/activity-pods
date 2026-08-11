@@ -13,6 +13,7 @@ const META_KEYS = new Set(['visibility', 'isPublicActivity', 'isPublicIndexable'
 const APDM_INTENT_ID_PATTERN = /^apdm-v1-[a-f0-9]{64}$/u;
 const PUBLIC_ADDRESSES = new Set(['https://www.w3.org/ns/activitystreams#Public', 'as:Public', 'Public']);
 const UNSAFE_TOKEN_PATTERN = /[\s\u0000-\u001f\u007f]/u;
+const BLIND_AUDIENCE_KEYS = new Set(['bto', 'bcc']);
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.length > 0;
@@ -90,14 +91,67 @@ function determineActivityVisibility(activity) {
   return 'direct';
 }
 
+function hasSenderFollowersAudience(activity) {
+  const actorUri = normalizeId(activity?.actor);
+  return Boolean(
+    actorUri && normalizeAddresses(activity?.audience).some(value => isActorFollowersAddress(value, actorUri))
+  );
+}
+
 function getExplicitConcreteRecipientUris(activity) {
   const actorUri = normalizeId(activity?.actor);
-  const addresses = ['to', 'bto', 'cc', 'bcc'].flatMap(key => normalizeAddresses(activity?.[key]));
+  const addresses = ['to', 'bto', 'cc', 'bcc', 'audience'].flatMap(key => normalizeAddresses(activity?.[key]));
   return [...new Set(addresses.filter(value => {
     if (PUBLIC_ADDRESSES.has(value)) return false;
     if (actorUri && isActorFollowersAddress(value, actorUri)) return false;
     return true;
   }))];
+}
+
+function containsBlindAudienceFields(value, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object') return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some(item => containsBlindAudienceFields(item, seen));
+  if (Object.keys(value).some(key => BLIND_AUDIENCE_KEYS.has(key))) return true;
+  return Object.values(value).some(item => containsBlindAudienceFields(item, seen));
+}
+
+function sanitizeDeliveryActivity(value, seen = new WeakSet()) {
+  if (value === null) return null;
+  if (Array.isArray(value)) {
+    if (seen.has(value)) throw new TypeError('Cannot sanitize cyclic ActivityPub delivery payload');
+    seen.add(value);
+    const output = value.map(item => sanitizeDeliveryActivity(item, seen));
+    seen.delete(value);
+    return output;
+  }
+
+  switch (typeof value) {
+    case 'string':
+    case 'boolean':
+      return value;
+    case 'number':
+      if (!Number.isFinite(value)) throw new TypeError('Cannot sanitize non-finite ActivityPub delivery value');
+      return value;
+    case 'object': {
+      const prototype = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) {
+        throw new TypeError('Cannot sanitize non-JSON ActivityPub delivery object');
+      }
+      if (seen.has(value)) throw new TypeError('Cannot sanitize cyclic ActivityPub delivery payload');
+      seen.add(value);
+      const output = {};
+      for (const [key, item] of Object.entries(value)) {
+        if (BLIND_AUDIENCE_KEYS.has(key)) continue;
+        output[key] = sanitizeDeliveryActivity(item, seen);
+      }
+      seen.delete(value);
+      return output;
+    }
+    default:
+      throw new TypeError(`Cannot sanitize unsupported ${typeof value} ActivityPub delivery value`);
+  }
 }
 
 function validateLocalRecipient(target) {
@@ -175,6 +229,8 @@ function validateSemanticInvariants(plan) {
   const embeddedActivityId = normalizeId(plan.activity.id || plan.activity['@id']);
   const embeddedActorUri = normalizeId(plan.activity.actor);
   if (embeddedActivityId !== plan.activityId || embeddedActorUri !== plan.actorUri) return false;
+  if (containsBlindAudienceFields(plan.activity)) return false;
+  if (hasSenderFollowersAudience(plan.activity)) return false;
 
   const expectedVisibility = determineActivityVisibility(plan.activity);
   if (plan.meta.visibility !== expectedVisibility) return false;
@@ -236,11 +292,14 @@ module.exports = {
   DELIVERY_PLAN_JSON_SCHEMA_SHA256,
   canonicalize,
   computeDeliveryPlanIntentId,
+  containsBlindAudienceFields,
   deliveryPlanFingerprint,
   determineActivityVisibility,
   getExplicitConcreteRecipientUris,
+  hasSenderFollowersAudience,
   isActorFollowersAddress,
   normalizeDeliveryTargetDomain,
   parseDeliveryEndpointUrl,
+  sanitizeDeliveryActivity,
   validateDeliveryPlanV1
 };
