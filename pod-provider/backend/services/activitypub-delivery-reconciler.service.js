@@ -14,6 +14,17 @@ function isExternalMode() {
   return String(CONFIG.ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native').trim().toLowerCase() === 'external';
 }
 
+function actorUriOf(activity) {
+  return typeof activity?.actor === 'string' ? activity.actor : activity?.actor?.id || activity?.actor?.['@id'] || null;
+}
+
+function collectionItemUris(collection) {
+  const items = collection?.items || collection?.orderedItems || [];
+  return (Array.isArray(items) ? items : [items])
+    .map(item => (typeof item === 'string' ? item : item?.id || item?.['@id']))
+    .filter(uri => typeof uri === 'string' && uri.length > 0);
+}
+
 module.exports = {
   name: 'activitypub-delivery-reconciler',
 
@@ -21,6 +32,7 @@ module.exports = {
     'auth.account',
     'activitypub.actor',
     'activitypub.activity',
+    'activitypub.collection',
     'activitypub.outbox',
     'triplestore'
   ],
@@ -123,8 +135,6 @@ module.exports = {
           let offset = await this.getAccountOffset();
           let accounts = await ctx.call('auth.account.find', { limit: batchSize, offset });
 
-          // Wrap after reaching the end. The cursor lives in Redis so large
-          // providers eventually scan every account across runs and restarts.
           if ((!Array.isArray(accounts) || accounts.length === 0) && offset > 0) {
             offset = 0;
             accounts = await ctx.call('auth.account.find', { limit: batchSize, offset: 0 });
@@ -187,8 +197,6 @@ module.exports = {
     async acquireDistributedLease() {
       if (!this.reconciliationRedis) throw new Error('ActivityPub reconciliation Redis is not initialized');
       const token = crypto.randomUUID();
-      // The lease exceeds the normal run interval, but expires automatically if
-      // a provider process crashes. Repeated delivery reconstruction is safe.
       const ttlMs = Math.max(120000, Number(this.settings.intervalMs) * 2 || 120000);
       const result = await this.reconciliationRedis.set(
         this.settings.reconciliationLockKey,
@@ -223,6 +231,59 @@ module.exports = {
       await this.reconciliationRedis.set(this.settings.accountCursorKey, String(Math.max(0, Math.floor(offset))));
     },
 
+    async expandConcreteRecipients(ctx, activity, recipients, dataset) {
+      const actorUri = actorUriOf(activity);
+      const output = [];
+      for (const recipientUri of recipients || []) {
+        if (typeof recipientUri !== 'string' || recipientUri.length === 0) continue;
+        if (!/\/followers\/?$/u.test(recipientUri)) {
+          output.push(recipientUri);
+          continue;
+        }
+
+        if (!recipientUri.startsWith(this.settings.baseUri)) {
+          throw new Error(`Cannot safely reconcile unresolved remote followers collection ${recipientUri}`);
+        }
+
+        const collection = await ctx.call(
+          'activitypub.collection.get',
+          { resourceUri: recipientUri, webId: actorUri || 'system' },
+          { meta: { dataset } }
+        );
+        const expanded = collectionItemUris(collection);
+        if (expanded.length === 0) {
+          this.logger.debug?.('ActivityPub reconciliation expanded an empty followers collection', { recipientUri });
+        }
+        output.push(...expanded);
+      }
+      return [...new Set(output)];
+    },
+
+    async reconcileActivity(ctx, activity, dataset) {
+      const recipients = await ctx.call('activitypub.activity.getRecipients', { activity });
+      const concreteRecipients = await this.expandConcreteRecipients(ctx, activity, recipients, dataset);
+      const localRecipientUris = [];
+      const remoteRecipientUris = [];
+
+      for (const recipientUri of concreteRecipients) {
+        if (recipientUri.startsWith(this.settings.baseUri)) {
+          const localAccount = await ctx.call('auth.account.findByWebId', { webId: recipientUri });
+          if (localAccount) localRecipientUris.push(recipientUri);
+        } else {
+          remoteRecipientUris.push(recipientUri);
+        }
+      }
+
+      if (remoteRecipientUris.length === 0) return null;
+
+      return buildDeliveryPlanV1(ctx, {
+        activity,
+        localRecipientUris,
+        remoteRecipientUris,
+        podProvider: true
+      });
+    },
+
     async reconcileAccount(ctx, account) {
       const dataset = account.username;
       let activitiesScanned = 0;
@@ -240,70 +301,63 @@ module.exports = {
         }
 
         const cutoffMs = Date.now() - Math.max(60000, Number(this.settings.lookbackMs) || 900000);
-        const maxActivities = Math.max(1, Math.min(1000, Math.floor(Number(this.settings.maxActivitiesPerAccount) || 50)));
-        const queryBody = sanitizeSparqlQuery`
-          PREFIX as: <https://www.w3.org/ns/activitystreams#>
-          SELECT ?activityUri ?published
-          WHERE {
-            <${outboxUri}> as:items ?activityUri .
-            ?activityUri as:published ?published .
-          }
-          ORDER BY DESC(?published)
-        `;
-        const rows = await ctx.call('triplestore.query', {
-          query: `${queryBody}\nLIMIT ${maxActivities}`,
-          accept: MIME_TYPES.JSON,
-          dataset,
-          webId: 'system'
-        });
+        const pageSize = Math.max(1, Math.min(1000, Math.floor(Number(this.settings.maxActivitiesPerAccount) || 50)));
+        let activityOffset = 0;
+        let reachedCutoff = false;
 
-        for (const row of rows || []) {
-          const activityUri = row?.activityUri?.value;
-          if (typeof activityUri !== 'string' || activityUri.length === 0) continue;
-          activitiesScanned += 1;
-
-          try {
-            const activity = await ctx.call(
-              'activitypub.activity.get',
-              { resourceUri: activityUri, webId: 'system' },
-              { meta: { dataset } }
-            );
-            const publishedMs = Date.parse(activity?.published || row?.published?.value || '');
-            if (!Number.isFinite(publishedMs) || publishedMs < cutoffMs) continue;
-
-            const recipients = await ctx.call('activitypub.activity.getRecipients', { activity });
-            const localRecipientUris = [];
-            const remoteRecipientUris = [];
-
-            for (const recipientUri of recipients || []) {
-              if (typeof recipientUri !== 'string' || recipientUri.length === 0) continue;
-              if (recipientUri.startsWith(this.settings.baseUri)) {
-                const localAccount = await ctx.call('auth.account.findByWebId', { webId: recipientUri });
-                if (localAccount) localRecipientUris.push(recipientUri);
-              } else {
-                remoteRecipientUris.push(recipientUri);
-              }
+        while (!reachedCutoff) {
+          const queryBody = sanitizeSparqlQuery`
+            PREFIX as: <https://www.w3.org/ns/activitystreams#>
+            SELECT ?activityUri ?published
+            WHERE {
+              <${outboxUri}> as:items ?activityUri .
+              ?activityUri as:published ?published .
             }
+            ORDER BY DESC(?published) ASC(?activityUri)
+          `;
+          const rows = await ctx.call('triplestore.query', {
+            query: `${queryBody}\nLIMIT ${pageSize}\nOFFSET ${activityOffset}`,
+            accept: MIME_TYPES.JSON,
+            dataset,
+            webId: 'system'
+          });
+          const page = Array.isArray(rows) ? rows : [];
+          if (page.length === 0) break;
 
-            if (remoteRecipientUris.length === 0) continue;
+          for (const row of page) {
+            const activityUri = row?.activityUri?.value;
+            if (typeof activityUri !== 'string' || activityUri.length === 0) continue;
+            activitiesScanned += 1;
 
-            const deliveryPlan = await buildDeliveryPlanV1(ctx, {
-              activity,
-              localRecipientUris,
-              remoteRecipientUris,
-              podProvider: true
-            });
+            try {
+              const activity = await ctx.call(
+                'activitypub.activity.get',
+                { resourceUri: activityUri, webId: 'system' },
+                { meta: { dataset } }
+              );
+              const publishedMs = Date.parse(activity?.published || row?.published?.value || '');
+              if (!Number.isFinite(publishedMs) || publishedMs < cutoffMs) {
+                reachedCutoff = true;
+                break;
+              }
 
-            await ctx.call('activitypub.outbox.enqueueDeliveryHandoff', { deliveryPlan });
-            handoffsRequeued += 1;
-          } catch (error) {
-            failures += 1;
-            this.logger.warn('Failed to reconcile persisted ActivityPub delivery', {
-              activityUri,
-              actorUri: account.webId,
-              error: error.message
-            });
+              const deliveryPlan = await this.reconcileActivity(ctx, activity, dataset);
+              if (!deliveryPlan) continue;
+
+              await ctx.call('activitypub.outbox.enqueueDeliveryHandoff', { deliveryPlan });
+              handoffsRequeued += 1;
+            } catch (error) {
+              failures += 1;
+              this.logger.warn('Failed to reconcile persisted ActivityPub delivery', {
+                activityUri,
+                actorUri: account.webId,
+                error: error.message
+              });
+            }
           }
+
+          if (reachedCutoff || page.length < pageSize) break;
+          activityOffset += page.length;
         }
       } catch (error) {
         failures += 1;
