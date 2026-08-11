@@ -37,7 +37,7 @@ const SEMAPPS_OUTBOX_INTERCEPTION_MARKERS = Object.freeze([
 ]);
 
 function normalizeRemoteDeliveryMode(value) {
-  const normalized = String(value || 'native').trim().toLowerCase();
+  const normalized = value === undefined || value === null ? 'native' : String(value).trim().toLowerCase();
   if (!REMOTE_DELIVERY_MODES.has(normalized)) {
     throw new Error(`Unsupported ActivityPub remote delivery mode '${value}'. Expected one of: native, external.`);
   }
@@ -329,6 +329,9 @@ function createActivityPubServiceWithDeliveryStrategy({
   enqueueHandoff
 } = {}) {
   assertSupportedSemappsVersion();
+  if (typeof allowExternalDeliveryPreview !== 'boolean') {
+    throw new TypeError('ActivityPub external delivery preview guard must be a boolean.');
+  }
   const normalizedRemoteDeliveryMode = normalizeRemoteDeliveryMode(remoteDeliveryMode);
   const resolvedInternals = internals || loadSemappsActivityPubInternals();
   const serviceSettings = {
@@ -344,7 +347,7 @@ function createActivityPubServiceWithDeliveryStrategy({
     deliveryHandoffTimeoutMs: 5000,
     ...settings,
     remoteDeliveryMode: normalizedRemoteDeliveryMode,
-    allowExternalDeliveryPreview: Boolean(allowExternalDeliveryPreview)
+    allowExternalDeliveryPreview
   };
   assertExternalDeliveryConfiguration(serviceSettings);
 
