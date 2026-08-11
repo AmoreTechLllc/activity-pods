@@ -4,7 +4,7 @@ const crypto = require('crypto');
 
 const DELIVERY_PLAN_SCHEMA = 'ap.delivery-plan.v1';
 const DELIVERY_PLAN_FIXTURE_SHA256 = '0d38040d212f781deb71fc8a62c9f4a6bef60ef977414369e9b8a41df0d1b09a';
-const DELIVERY_PLAN_JSON_SCHEMA_SHA256 = '90067ea8c3d309bccb70420920bdc976a59413ba88f477712dca9c77799dcfbe';
+const DELIVERY_PLAN_JSON_SCHEMA_SHA256 = '36ca416cc862c895ca87ff00a85facdd9ad171d9e214e9d0685e4c46fef5d6af';
 const VISIBILITIES = new Set(['public', 'unlisted', 'followers', 'direct']);
 const PLAN_KEYS = new Set(['schema', 'intentId', 'activityId', 'actorUri', 'activity', 'localRecipients', 'remoteRecipients', 'meta']);
 const LOCAL_TARGET_KEYS = new Set(['actorUri', 'dataset', 'inboxUri']);
@@ -12,14 +12,14 @@ const REMOTE_TARGET_KEYS = new Set(['actorUri', 'inboxUrl', 'sharedInboxUrl', 't
 const META_KEYS = new Set(['visibility', 'isPublicActivity', 'isPublicIndexable', 'searchConsent']);
 const APDM_INTENT_ID_PATTERN = /^apdm-v1-[a-f0-9]{64}$/u;
 const PUBLIC_ADDRESSES = new Set(['https://www.w3.org/ns/activitystreams#Public', 'as:Public', 'Public']);
-const ASCII_CONTROL_PATTERN = /[\u0000-\u001f\u007f]/u;
+const UNSAFE_TOKEN_PATTERN = /[\s\u0000-\u001f\u007f]/u;
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.length > 0;
 }
 
 function isCleanString(value) {
-  return isNonEmptyString(value) && value === value.trim() && !ASCII_CONTROL_PATTERN.test(value);
+  return isNonEmptyString(value) && !UNSAFE_TOKEN_PATTERN.test(value);
 }
 
 function hasOnlyKeys(value, allowed) {
@@ -65,10 +65,16 @@ function normalizeAddresses(value) {
   return values.map(normalizeId).filter(item => typeof item === 'string');
 }
 
-function isFollowersAddress(value) {
-  if (typeof value !== 'string') return false;
+function isActorFollowersAddress(value, actorUri) {
+  if (typeof value !== 'string' || typeof actorUri !== 'string') return false;
   try {
-    return new URL(value).pathname.replace(/\/+$/u, '').endsWith('/followers');
+    const address = new URL(value);
+    const actor = new URL(actorUri);
+    if (actor.search || actor.hash || address.search || address.hash) return false;
+    if (address.origin !== actor.origin) return false;
+    const actorPath = actor.pathname.replace(/\/+$/u, '');
+    const addressPath = address.pathname.replace(/\/+$/u, '');
+    return addressPath === `${actorPath}/followers`;
   } catch {
     return false;
   }
@@ -79,7 +85,8 @@ function determineActivityVisibility(activity) {
   const cc = normalizeAddresses(activity?.cc);
   if (to.some(value => PUBLIC_ADDRESSES.has(value))) return 'public';
   if (cc.some(value => PUBLIC_ADDRESSES.has(value))) return 'unlisted';
-  if (to.some(isFollowersAddress)) return 'followers';
+  const actorUri = normalizeId(activity?.actor);
+  if (actorUri && to.some(value => isActorFollowersAddress(value, actorUri))) return 'followers';
   return 'direct';
 }
 
@@ -217,6 +224,7 @@ module.exports = {
   computeDeliveryPlanIntentId,
   deliveryPlanFingerprint,
   determineActivityVisibility,
+  isActorFollowersAddress,
   normalizeDeliveryTargetDomain,
   parseDeliveryEndpointUrl,
   validateDeliveryPlanV1
