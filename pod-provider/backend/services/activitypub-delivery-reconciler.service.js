@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const Redis = require('ioredis');
 const { MIME_TYPES } = require('@semapps/mime-types');
 const { sanitizeSparqlQuery } = require('@semapps/triplestore');
@@ -7,6 +8,7 @@ const CONFIG = require('../config/config');
 const { buildDeliveryPlanV1, mapWithConcurrency } = require('../utils/activitypub-delivery-planner');
 
 const ACCOUNT_CURSOR_KEY = 'apdm:delivery-reconciliation:account-offset:v1';
+const RECONCILIATION_LOCK_KEY = 'apdm:delivery-reconciliation:lock:v1';
 
 function isExternalMode() {
   return String(CONFIG.ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native').trim().toLowerCase() === 'external';
@@ -33,7 +35,8 @@ module.exports = {
     accountBatchSize: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_ACCOUNT_BATCH_SIZE,
     maxActivitiesPerAccount: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_MAX_ACTIVITIES_PER_ACCOUNT,
     concurrency: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_CONCURRENCY,
-    accountCursorKey: ACCOUNT_CURSOR_KEY
+    accountCursorKey: ACCOUNT_CURSOR_KEY,
+    reconciliationLockKey: RECONCILIATION_LOCK_KEY
   },
 
   created() {
@@ -48,6 +51,7 @@ module.exports = {
       handoffsRequeued: 0,
       failures: 0,
       accountOffset: 0,
+      distributedLockSkips: 0,
       lastRunStartedAt: null,
       lastRunCompletedAt: null,
       lastError: null
@@ -102,6 +106,12 @@ module.exports = {
       async handler(ctx) {
         if (!this.settings.enabled) return { skipped: true, reason: 'external delivery disabled' };
         if (this.reconciliationRunning) return { skipped: true, reason: 'reconciliation already running' };
+
+        const leaseToken = await this.acquireDistributedLease();
+        if (!leaseToken) {
+          this.reconciliationStats.distributedLockSkips += 1;
+          return { skipped: true, reason: 'reconciliation active on another provider process' };
+        }
 
         this.reconciliationRunning = true;
         this.reconciliationStats.runs += 1;
@@ -159,6 +169,9 @@ module.exports = {
           throw error;
         } finally {
           this.reconciliationRunning = false;
+          await this.releaseDistributedLease(leaseToken).catch(error => {
+            this.logger.error('Failed to release ActivityPub reconciliation lease', { error: error.message });
+          });
         }
       }
     },
@@ -171,6 +184,33 @@ module.exports = {
   },
 
   methods: {
+    async acquireDistributedLease() {
+      if (!this.reconciliationRedis) throw new Error('ActivityPub reconciliation Redis is not initialized');
+      const token = crypto.randomUUID();
+      // The lease exceeds the normal run interval, but expires automatically if
+      // a provider process crashes. Repeated delivery reconstruction is safe.
+      const ttlMs = Math.max(120000, Number(this.settings.intervalMs) * 2 || 120000);
+      const result = await this.reconciliationRedis.set(
+        this.settings.reconciliationLockKey,
+        token,
+        'PX',
+        ttlMs,
+        'NX'
+      );
+      return result === 'OK' ? token : null;
+    },
+
+    async releaseDistributedLease(token) {
+      if (!this.reconciliationRedis || !token) return false;
+      const result = await this.reconciliationRedis.eval(
+        "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+        1,
+        this.settings.reconciliationLockKey,
+        token
+      );
+      return result === 1;
+    },
+
     async getAccountOffset() {
       if (!this.reconciliationRedis) throw new Error('ActivityPub reconciliation Redis is not initialized');
       const raw = await this.reconciliationRedis.get(this.settings.accountCursorKey);
