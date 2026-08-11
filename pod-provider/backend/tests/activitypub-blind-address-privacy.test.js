@@ -5,6 +5,10 @@ const {
   createOutboxPostHandler,
   createPrivacySafeOutboxContext
 } = require('../lib/activitypub-service-with-delivery-strategy');
+const {
+  containsBlindAudienceFields,
+  sanitizeDeliveryActivity
+} = require('../utils/activitypub-delivery-plan');
 
 function recipientsFrom(activity) {
   const output = [];
@@ -115,11 +119,84 @@ describe('APDM blind-address privacy boundary', () => {
     expect(JSON.stringify(result)).not.toContain('"bcc"');
   });
 
+  test('bare Object posts do not invent blind recipients that SemApps object.wrap would not lift', async () => {
+    const hidden = 'https://remote.example/users/hidden';
+    const calls = [];
+    const ctx = {
+      params: {
+        type: 'Note',
+        attributedTo: 'https://pods.example/alice',
+        bcc: [hidden],
+        content: 'bare object'
+      },
+      async call(action, params) {
+        calls.push({ action, params });
+        if (action === 'activitypub.activity.getRecipients') return recipientsFrom(params.activity);
+        throw new Error(`Unexpected call ${action}`);
+      }
+    };
+
+    const safeCtx = createPrivacySafeOutboxContext(ctx);
+    expect(safeCtx.params.bcc).toBeUndefined();
+    const recipients = await safeCtx.call('activitypub.activity.getRecipients', {
+      activity: { type: 'Create', actor: 'https://pods.example/alice', to: [], cc: [] }
+    });
+
+    expect(recipients).toEqual([]);
+    expect(calls).toHaveLength(1);
+  });
+
+  test('external mode stores blind routing snapshot before Activity persistence and fails closed if snapshot storage fails', async () => {
+    const hidden = 'https://remote.example/users/hidden';
+    const finalizedActivity = {
+      type: 'Create',
+      actor: 'https://pods.example/alice',
+      published: '2026-08-11T09:00:00.000Z',
+      to: [],
+      object: 'https://pods.example/alice/objects/1'
+    };
+    const calls = [];
+    const ctx = {
+      params: { ...finalizedActivity, bcc: [hidden] },
+      async call(action, params) {
+        calls.push({ action, params });
+        if (action === 'activitypub-delivery-reconciler.storeBlindRecipientSnapshot') return { stored: true };
+        if (action === 'activitypub.activity.post') return 'https://pods.example/alice/activities/1';
+        throw new Error(`Unexpected call ${action}`);
+      }
+    };
+    const safeCtx = createPrivacySafeOutboxContext(ctx, { persistBlindSnapshot: true });
+    await expect(safeCtx.call('activitypub.activity.post', { resource: finalizedActivity })).resolves.toBe(
+      'https://pods.example/alice/activities/1'
+    );
+    expect(calls.map(call => call.action)).toEqual([
+      'activitypub-delivery-reconciler.storeBlindRecipientSnapshot',
+      'activitypub.activity.post'
+    ]);
+    expect(calls[0].params.bcc).toEqual([hidden]);
+    expect(calls[0].params.activity).toEqual(finalizedActivity);
+
+    const persistence = jest.fn();
+    const failingCtx = {
+      params: { ...finalizedActivity, bcc: [hidden] },
+      async call(action) {
+        if (action === 'activitypub-delivery-reconciler.storeBlindRecipientSnapshot') throw new Error('redis unavailable');
+        if (action === 'activitypub.activity.post') return persistence();
+        throw new Error(`Unexpected call ${action}`);
+      }
+    };
+    const failingSafeCtx = createPrivacySafeOutboxContext(failingCtx, { persistBlindSnapshot: true });
+    await expect(failingSafeCtx.call('activitypub.activity.post', { resource: finalizedActivity }))
+      .rejects.toThrow(/redis unavailable/u);
+    expect(persistence).not.toHaveBeenCalled();
+  });
+
   test('visible and blind duplicate recipients converge to one recipient identity', async () => {
     const recipient = 'https://remote.example/users/carol';
     const ctx = {
       params: {
         actor: 'https://pods.example/alice',
+        type: 'Create',
         to: [recipient],
         bcc: [recipient]
       },
@@ -135,6 +212,26 @@ describe('APDM blind-address privacy boundary', () => {
     });
 
     expect(recipients).toEqual([recipient]);
+  });
+
+  test('expanded and aliased ActivityStreams blind properties are removed and detected', () => {
+    const hidden = 'https://remote.example/users/hidden';
+    const expanded = {
+      '@context': 'https://www.w3.org/ns/activitystreams',
+      [`https://www.w3.org/ns/activitystreams#bcc`]: [hidden]
+    };
+    expect(containsBlindAudienceFields(expanded)).toBe(true);
+    expect(sanitizeDeliveryActivity(expanded)[`https://www.w3.org/ns/activitystreams#bcc`]).toBeUndefined();
+
+    const aliased = {
+      '@context': {
+        asx: 'https://www.w3.org/ns/activitystreams#',
+        secretRecipients: 'asx:bto'
+      },
+      secretRecipients: [hidden]
+    };
+    expect(containsBlindAudienceFields(aliased)).toBe(true);
+    expect(sanitizeDeliveryActivity(aliased).secretRecipients).toBeUndefined();
   });
 
   test('unsupported unique audience addressing fails before the native outbox handler can persist anything', async () => {
@@ -160,11 +257,11 @@ describe('APDM blind-address privacy boundary', () => {
     const recipient = 'https://remote.example/users/carol';
 
     expect(() => createPrivacySafeOutboxContext({
-      params: { actor, to: [recipient], audience: [recipient] }
+      params: { type: 'Create', actor, to: [recipient], audience: [recipient] }
     })).not.toThrow();
 
     expect(() => createPrivacySafeOutboxContext({
-      params: { actor, to: [`${actor}/followers`], audience: [`${actor}/followers`] }
+      params: { type: 'Create', actor, to: [`${actor}/followers`], audience: [`${actor}/followers`] }
     })).toThrow(/sender-followers audience is unsupported/u);
   });
 
