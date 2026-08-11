@@ -6,6 +6,7 @@ const {
   validateDeliveryPlanV1
 } = require('../utils/activitypub-delivery-plan');
 const {
+  buildDeliveryPlanV1,
   determineVisibility,
   resolveRemoteDeliveryTarget
 } = require('../utils/activitypub-delivery-planner');
@@ -78,6 +79,44 @@ describe('APDM Phase 1 contract hardening', () => {
       to: ['https://remote.example/users/followers'],
       cc: []
     })).toBe('direct');
+  });
+
+  test('planner allows a legitimate actor URI whose path happens to end in /followers', async () => {
+    const actorUri = 'https://pods.example/alice';
+    const recipientUri = 'https://remote.example/users/followers';
+    const ctx = {
+      async call(action, params) {
+        if (action === 'activitypub.actor.get') {
+          expect(params.actorUri).toBe(recipientUri);
+          return { id: recipientUri, inbox: `${recipientUri}/inbox` };
+        }
+        throw new Error(`Unexpected call ${action}`);
+      }
+    };
+
+    const plan = await buildDeliveryPlanV1(ctx, {
+      activity: {
+        id: `${actorUri}/activities/direct-followers-name`,
+        actor: actorUri,
+        type: 'Create',
+        to: [recipientUri],
+        cc: []
+      },
+      remoteRecipientUris: [recipientUri]
+    });
+
+    expect(plan.meta.visibility).toBe('direct');
+    expect(plan.remoteRecipients[0].actorUri).toBe(recipientUri);
+  });
+
+  test('validator rejects a plan that omits an explicitly addressed concrete actor', () => {
+    const omitted = clone(fixture);
+    omitted.activity.bcc = ['https://remote.example/users/missing'];
+    expect(validateDeliveryPlanV1(omitted)).toBe(false);
+
+    const included = clone(fixture);
+    included.activity.bcc = ['https://remote.example/users/carol'];
+    expect(validateDeliveryPlanV1(included)).toBe(true);
   });
 
   test('contract fingerprint canonicalization rejects non-JSON values instead of creating ambiguous hashes', () => {
