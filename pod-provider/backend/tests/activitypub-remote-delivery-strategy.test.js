@@ -260,16 +260,17 @@ describe('APDM Phase 2-4 ActivityPub remote delivery strategy', () => {
       enteredFirst = resolve;
     });
     const nativeHandler = async function nativePost(ctx) {
+      const activity = { id: ctx.activityId, actor: 'https://pods.example/alice' };
       this.createJob('remotePost', ctx.recipient, {
         recipientUri: ctx.recipient,
-        activity: { id: ctx.activityId, actor: 'https://pods.example/alice' }
+        activity
       });
-      this.localPost([ctx.localRecipient], { id: ctx.activityId });
+      this.localPost([ctx.localRecipient], activity);
       if (ctx.wait) {
         enteredFirst();
         await barrier;
       }
-      return { id: ctx.activityId, actor: 'https://pods.example/alice' };
+      return activity;
     };
     const buildDeliveryPlan = jest.fn(async (_ctx, input) =>
       createStubPlan(input.activity, input.localRecipientUris, input.remoteRecipientUris)
