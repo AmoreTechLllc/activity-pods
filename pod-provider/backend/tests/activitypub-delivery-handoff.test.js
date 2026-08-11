@@ -1,6 +1,7 @@
 'use strict';
 
 const {
+  DELIVERY_HANDOFF_JOB_NAME,
   DELIVERY_HANDOFF_QUEUE,
   assertDurableHandoffConfigured,
   enqueueDeliveryHandoff,
@@ -82,7 +83,7 @@ describe('APDM Phase 4 durable ActivityPub handoff', () => {
     });
   });
 
-  test('awaits the Bull insertion promise and uses stable Delivery Plan intent ID as job ID', async () => {
+  test('awaits Bull insertion and sets deterministic uniqueness through opts.jobId', async () => {
     const plan = createPlan();
     let release;
     const insertion = new Promise(resolve => {
@@ -99,9 +100,9 @@ describe('APDM Phase 4 durable ActivityPub handoff', () => {
     expect(settled).toBe(false);
     expect(createJob).toHaveBeenCalledWith(
       DELIVERY_HANDOFF_QUEUE,
-      plan.intentId,
+      DELIVERY_HANDOFF_JOB_NAME,
       { deliveryPlan: plan },
-      expect.any(Object)
+      expect.objectContaining({ jobId: plan.intentId })
     );
 
     release({ id: plan.intentId });
@@ -210,7 +211,7 @@ describe('APDM Phase 4 durable ActivityPub handoff', () => {
     }
   });
 
-  test('same Delivery Plan retry produces the same Bull job ID and stable metadata ID', async () => {
+  test('same Delivery Plan retry keeps identical Bull opts.jobId and stable metadata ID', async () => {
     const plan = createPlan();
     const createJob = jest.fn(async () => ({ id: plan.intentId }));
     const service = { settings: createSettings(), createJob };
@@ -219,7 +220,11 @@ describe('APDM Phase 4 durable ActivityPub handoff', () => {
     await enqueueDeliveryHandoff(service, plan);
 
     expect(createJob).toHaveBeenCalledTimes(2);
-    expect(createJob.mock.calls.map(call => call[1])).toEqual([plan.intentId, plan.intentId]);
+    expect(createJob.mock.calls.map(call => call[1])).toEqual([
+      DELIVERY_HANDOFF_JOB_NAME,
+      DELIVERY_HANDOFF_JOB_NAME
+    ]);
+    expect(createJob.mock.calls.map(call => call[3].jobId)).toEqual([plan.intentId, plan.intentId]);
     expect(toSidecarOutboxPayload(plan).meta.deliveryPlanIntentId).toBe(plan.intentId);
   });
 });
