@@ -90,6 +90,16 @@ function determineActivityVisibility(activity) {
   return 'direct';
 }
 
+function getExplicitConcreteRecipientUris(activity) {
+  const actorUri = normalizeId(activity?.actor);
+  const addresses = ['to', 'bto', 'cc', 'bcc'].flatMap(key => normalizeAddresses(activity?.[key]));
+  return [...new Set(addresses.filter(value => {
+    if (PUBLIC_ADDRESSES.has(value)) return false;
+    if (actorUri && isActorFollowersAddress(value, actorUri)) return false;
+    return true;
+  }))];
+}
+
 function validateLocalRecipient(target) {
   return Boolean(
     target &&
@@ -178,6 +188,10 @@ function validateSemanticInvariants(plan) {
   const localSet = new Set(localUris);
   if (remoteUris.some(uri => localSet.has(uri))) return false;
 
+  const plannedRecipients = new Set([...localUris, ...remoteUris]);
+  const explicitRecipients = getExplicitConcreteRecipientUris(plan.activity);
+  if (explicitRecipients.some(uri => !plannedRecipients.has(uri))) return false;
+
   const expectedIntentId = computeDeliveryPlanIntentId({
     activityId: plan.activityId,
     actorUri: plan.actorUri,
@@ -224,6 +238,7 @@ module.exports = {
   computeDeliveryPlanIntentId,
   deliveryPlanFingerprint,
   determineActivityVisibility,
+  getExplicitConcreteRecipientUris,
   isActorFollowersAddress,
   normalizeDeliveryTargetDomain,
   parseDeliveryEndpointUrl,
