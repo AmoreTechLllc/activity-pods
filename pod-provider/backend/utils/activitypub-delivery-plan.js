@@ -27,6 +27,14 @@ function hasOnlyKeys(value, allowed) {
   return Object.keys(value).every(key => allowed.has(key));
 }
 
+function assertDenseArray(value, label) {
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(value, index)) {
+      throw new TypeError(`Cannot ${label} sparse array`);
+    }
+  }
+}
+
 function parseHttpUrl(value) {
   if (!isCleanString(value)) return null;
   try {
@@ -41,7 +49,7 @@ function parseHttpUrl(value) {
 
 function parseDeliveryEndpointUrl(value) {
   const parsed = parseHttpUrl(value);
-  if (!parsed || parsed.hash) return null;
+  if (!parsed || value.includes('#')) return null;
   return normalizeDeliveryTargetDomain(parsed.hostname) ? parsed : null;
 }
 
@@ -120,6 +128,7 @@ function containsBlindAudienceFields(value, seen = new WeakSet()) {
 function sanitizeDeliveryActivity(value, seen = new WeakSet()) {
   if (value === null) return null;
   if (Array.isArray(value)) {
+    assertDenseArray(value, 'sanitize');
     if (seen.has(value)) throw new TypeError('Cannot sanitize cyclic ActivityPub delivery payload');
     seen.add(value);
     const output = value.map(item => sanitizeDeliveryActivity(item, seen));
@@ -186,7 +195,10 @@ function validateRemoteRecipient(target) {
 
 function canonicalize(value) {
   if (value === null) return 'null';
-  if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`;
+  if (Array.isArray(value)) {
+    assertDenseArray(value, 'canonicalize');
+    return `[${value.map(canonicalize).join(',')}]`;
+  }
 
   switch (typeof value) {
     case 'string':
