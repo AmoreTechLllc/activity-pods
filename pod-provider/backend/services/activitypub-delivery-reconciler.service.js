@@ -1,9 +1,12 @@
 'use strict';
 
+const Redis = require('ioredis');
 const { MIME_TYPES } = require('@semapps/mime-types');
 const { sanitizeSparqlQuery } = require('@semapps/triplestore');
 const CONFIG = require('../config/config');
 const { buildDeliveryPlanV1, mapWithConcurrency } = require('../utils/activitypub-delivery-planner');
+
+const ACCOUNT_CURSOR_KEY = 'apdm:delivery-reconciliation:account-offset:v1';
 
 function isExternalMode() {
   return String(CONFIG.ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native').trim().toLowerCase() === 'external';
@@ -23,17 +26,20 @@ module.exports = {
   settings: {
     enabled: isExternalMode(),
     baseUri: CONFIG.BASE_URL,
+    queueServiceUrl: CONFIG.QUEUE_SERVICE_URL,
     intervalMs: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_INTERVAL_MS,
     initialDelayMs: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_INITIAL_DELAY_MS,
     lookbackMs: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_LOOKBACK_MS,
-    maxAccounts: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_MAX_ACCOUNTS,
+    accountBatchSize: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_ACCOUNT_BATCH_SIZE,
     maxActivitiesPerAccount: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_MAX_ACTIVITIES_PER_ACCOUNT,
-    concurrency: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_CONCURRENCY
+    concurrency: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_CONCURRENCY,
+    accountCursorKey: ACCOUNT_CURSOR_KEY
   },
 
   created() {
     this.reconciliationTimer = null;
     this.reconciliationStartTimer = null;
+    this.reconciliationRedis = null;
     this.reconciliationRunning = false;
     this.reconciliationStats = {
       runs: 0,
@@ -41,17 +47,32 @@ module.exports = {
       activitiesScanned: 0,
       handoffsRequeued: 0,
       failures: 0,
+      accountOffset: 0,
       lastRunStartedAt: null,
       lastRunCompletedAt: null,
       lastError: null
     };
   },
 
-  started() {
+  async started() {
     if (!this.settings.enabled) return;
     if (typeof this.settings.baseUri !== 'string' || this.settings.baseUri.length === 0) {
       throw new Error('ActivityPub delivery reconciliation requires a configured provider base URI');
     }
+    if (typeof this.settings.queueServiceUrl !== 'string' || this.settings.queueServiceUrl.length === 0) {
+      throw new Error('ActivityPub delivery reconciliation requires SEMAPPS_QUEUE_SERVICE_URL');
+    }
+
+    this.reconciliationRedis = new Redis(this.settings.queueServiceUrl, {
+      lazyConnect: true,
+      maxRetriesPerRequest: 2,
+      enableReadyCheck: true
+    });
+    this.reconciliationRedis.on('error', error => {
+      this.logger.error('ActivityPub reconciliation Redis error', { error: error.message });
+    });
+    await this.reconciliationRedis.connect();
+    await this.reconciliationRedis.ping();
 
     const intervalMs = Math.max(10000, Number(this.settings.intervalMs) || 60000);
     const initialDelayMs = Math.max(1000, Number(this.settings.initialDelayMs) || 15000);
@@ -65,11 +86,15 @@ module.exports = {
     this.reconciliationTimer = setInterval(run, intervalMs);
   },
 
-  stopped() {
+  async stopped() {
     if (this.reconciliationStartTimer) clearTimeout(this.reconciliationStartTimer);
     if (this.reconciliationTimer) clearInterval(this.reconciliationTimer);
     this.reconciliationStartTimer = null;
     this.reconciliationTimer = null;
+    if (this.reconciliationRedis) {
+      await this.reconciliationRedis.quit().catch(() => this.reconciliationRedis.disconnect());
+      this.reconciliationRedis = null;
+    }
   },
 
   actions: {
@@ -84,11 +109,21 @@ module.exports = {
         this.reconciliationStats.lastError = null;
 
         try {
-          const maxAccounts = Math.max(1, Math.floor(Number(this.settings.maxAccounts) || 1000));
-          const accounts = await ctx.call('auth.account.find', { limit: maxAccounts });
-          const activeAccounts = (Array.isArray(accounts) ? accounts : [])
-            .filter(account => account && !account.deletedAt && typeof account.webId === 'string' && typeof account.username === 'string')
-            .slice(0, maxAccounts);
+          const batchSize = Math.max(1, Math.min(5000, Math.floor(Number(this.settings.accountBatchSize) || 500)));
+          let offset = await this.getAccountOffset();
+          let accounts = await ctx.call('auth.account.find', { limit: batchSize, offset });
+
+          // Wrap after reaching the end. The cursor lives in Redis so large
+          // providers eventually scan every account across runs and restarts.
+          if ((!Array.isArray(accounts) || accounts.length === 0) && offset > 0) {
+            offset = 0;
+            accounts = await ctx.call('auth.account.find', { limit: batchSize, offset: 0 });
+          }
+
+          const rawAccounts = Array.isArray(accounts) ? accounts : [];
+          const activeAccounts = rawAccounts.filter(
+            account => account && !account.deletedAt && typeof account.webId === 'string' && typeof account.username === 'string'
+          );
 
           const results = await mapWithConcurrency(
             activeAccounts,
@@ -106,14 +141,18 @@ module.exports = {
             { accountsScanned: 0, activitiesScanned: 0, handoffsRequeued: 0, failures: 0 }
           );
 
+          const nextOffset = rawAccounts.length < batchSize ? 0 : offset + rawAccounts.length;
+          await this.setAccountOffset(nextOffset);
+
           this.reconciliationStats.accountsScanned += summary.accountsScanned;
           this.reconciliationStats.activitiesScanned += summary.activitiesScanned;
           this.reconciliationStats.handoffsRequeued += summary.handoffsRequeued;
           this.reconciliationStats.failures += summary.failures;
+          this.reconciliationStats.accountOffset = nextOffset;
           this.reconciliationStats.lastRunCompletedAt = new Date().toISOString();
 
-          this.logger.info('ActivityPub delivery reconciliation completed', summary);
-          return summary;
+          this.logger.info('ActivityPub delivery reconciliation completed', { ...summary, nextAccountOffset: nextOffset });
+          return { ...summary, nextAccountOffset: nextOffset };
         } catch (error) {
           this.reconciliationStats.failures += 1;
           this.reconciliationStats.lastError = error.message;
@@ -132,6 +171,18 @@ module.exports = {
   },
 
   methods: {
+    async getAccountOffset() {
+      if (!this.reconciliationRedis) throw new Error('ActivityPub reconciliation Redis is not initialized');
+      const raw = await this.reconciliationRedis.get(this.settings.accountCursorKey);
+      const parsed = Number.parseInt(raw || '0', 10);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+    },
+
+    async setAccountOffset(offset) {
+      if (!this.reconciliationRedis) throw new Error('ActivityPub reconciliation Redis is not initialized');
+      await this.reconciliationRedis.set(this.settings.accountCursorKey, String(Math.max(0, Math.floor(offset))));
+    },
+
     async reconcileAccount(ctx, account) {
       const dataset = account.username;
       let activitiesScanned = 0;
