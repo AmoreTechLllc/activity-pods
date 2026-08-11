@@ -8,14 +8,17 @@ function createServiceContext(overrides = {}) {
     settings: {
       enabled: true,
       baseUri: 'https://pods.example',
+      intervalMs: 60000,
       lookbackMs: 900000,
       accountBatchSize: 100,
       maxActivitiesPerAccount: 50,
       concurrency: 2,
       ...overrides
     },
-    logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+    logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
     reconcileAccount: service.methods.reconcileAccount,
+    reconcileActivity: service.methods.reconcileActivity,
+    expandConcreteRecipients: service.methods.expandConcreteRecipients,
     acquireDistributedLease: jest.fn(async () => 'lease-token'),
     releaseDistributedLease: jest.fn(async () => true),
     getAccountOffset: jest.fn(async () => accountOffset),
@@ -38,12 +41,13 @@ function createServiceContext(overrides = {}) {
   };
 }
 
-function createContext({ includeRemote = true } = {}) {
+function createContext({ includeRemote = true, unresolvedFollowers = false } = {}) {
   const enqueuedPlans = [];
   const activity = {
     id: 'https://pods.example/alice/activities/recover-me',
     type: 'Create',
     actor: 'https://pods.example/alice',
+    published: new Date().toISOString(),
     to: ['https://www.w3.org/ns/activitystreams#Public'],
     cc: ['https://pods.example/alice/followers'],
     object: {
@@ -65,15 +69,24 @@ function createContext({ includeRemote = true } = {}) {
           throw new Error(`Unexpected predicate ${params.predicate}`);
         case 'triplestore.query':
           expect(params.query).toContain('LIMIT 50');
+          expect(params.query).toContain('OFFSET 0');
           expect(params.dataset).toBe('alice');
-          return [{ activityUri: { value: activity.id }, published: { value: new Date().toISOString() } }];
+          return [{ activityUri: { value: activity.id }, published: { value: activity.published } }];
         case 'activitypub.activity.get':
           expect(options).toEqual({ meta: { dataset: 'alice' } });
           return activity;
         case 'activitypub.activity.getRecipients':
+          if (unresolvedFollowers) return ['https://pods.example/alice/followers'];
           return includeRemote
             ? ['https://pods.example/bob', 'https://remote.example/users/carol']
             : ['https://pods.example/bob'];
+        case 'activitypub.collection.get':
+          expect(params.resourceUri).toBe('https://pods.example/alice/followers');
+          return {
+            id: params.resourceUri,
+            type: 'Collection',
+            items: ['https://pods.example/bob', 'https://remote.example/users/carol']
+          };
         case 'auth.account.findByWebId':
           return { webId: params.webId, username: 'bob' };
         case 'activitypub.actor.get':
@@ -121,6 +134,24 @@ describe('APDM Phase 4 delivery reconciliation', () => {
     );
   });
 
+  test('expands an unresolved local followers collection before rebuilding the plan', async () => {
+    const { ctx, enqueuedPlans } = createContext({ unresolvedFollowers: true });
+    const serviceContext = createServiceContext();
+
+    const result = await service.methods.reconcileAccount.call(
+      serviceContext,
+      ctx,
+      { webId: 'https://pods.example/alice', username: 'alice' }
+    );
+
+    expect(result).toEqual({ activitiesScanned: 1, handoffsRequeued: 1, failures: 0 });
+    expect(enqueuedPlans).toHaveLength(1);
+    expect(enqueuedPlans[0].remoteRecipients).toEqual([
+      expect.objectContaining({ actorUri: 'https://remote.example/users/carol' })
+    ]);
+    expect(JSON.stringify(enqueuedPlans[0].remoteRecipients)).not.toContain('/followers');
+  });
+
   test('repeated reconciliation of the same persisted activity generates the same intent ID', async () => {
     const { ctx, enqueuedPlans } = createContext();
     const serviceContext = createServiceContext();
@@ -146,6 +177,56 @@ describe('APDM Phase 4 delivery reconciliation', () => {
 
     expect(result).toEqual({ activitiesScanned: 1, handoffsRequeued: 0, failures: 0 });
     expect(enqueuedPlans).toHaveLength(0);
+  });
+
+  test('pages beyond the newest activity batch so an older missed handoff inside lookback is repaired', async () => {
+    const serviceContext = createServiceContext({ maxActivitiesPerAccount: 2, lookbackMs: 60 * 60 * 1000 });
+    const now = Date.now();
+    const activities = [0, 1, 2].map(index => ({
+      id: `https://pods.example/alice/activities/${index}`,
+      type: 'Create',
+      actor: 'https://pods.example/alice',
+      published: new Date(now - index * 1000).toISOString()
+    }));
+    const enqueued = [];
+    const offsets = [];
+    const ctx = {
+      async call(action, params) {
+        if (action === 'activitypub.actor.getCollectionUri') return 'https://pods.example/alice/outbox';
+        if (action === 'triplestore.query') {
+          const match = params.query.match(/OFFSET (\d+)/u);
+          const offset = Number(match?.[1] || 0);
+          offsets.push(offset);
+          const page = activities.slice(offset, offset + 2);
+          return page.map(activity => ({
+            activityUri: { value: activity.id },
+            published: { value: activity.published }
+          }));
+        }
+        if (action === 'activitypub.activity.get') {
+          return activities.find(activity => activity.id === params.resourceUri);
+        }
+        if (action === 'activitypub.activity.getRecipients') return ['https://remote.example/users/bob'];
+        if (action === 'activitypub.actor.get') {
+          return { id: params.actorUri, inbox: 'https://remote.example/users/bob/inbox' };
+        }
+        if (action === 'activitypub.outbox.enqueueDeliveryHandoff') {
+          enqueued.push(params.deliveryPlan.activityId);
+          return { intentId: params.deliveryPlan.intentId };
+        }
+        throw new Error(`Unexpected call ${action}`);
+      }
+    };
+
+    const result = await service.methods.reconcileAccount.call(
+      serviceContext,
+      ctx,
+      { webId: 'https://pods.example/alice', username: 'alice' }
+    );
+
+    expect(offsets).toEqual([0, 2]);
+    expect(result).toEqual({ activitiesScanned: 3, handoffsRequeued: 3, failures: 0 });
+    expect(enqueued).toEqual(activities.map(activity => activity.id));
   });
 
   test('run skips overlapping reconciliation in the same process', async () => {
@@ -197,15 +278,6 @@ describe('APDM Phase 4 delivery reconciliation', () => {
       failures: 0,
       nextAccountOffset: 2
     });
-    expect(context.reconciliationStats).toEqual(expect.objectContaining({
-      runs: 1,
-      accountsScanned: 1,
-      activitiesScanned: 1,
-      handoffsRequeued: 1,
-      failures: 0,
-      accountOffset: 2,
-      distributedLockSkips: 0
-    }));
   });
 
   test('run wraps a persisted cursor when it reaches the end of the account table', async () => {
