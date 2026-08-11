@@ -3,8 +3,8 @@
 const crypto = require('crypto');
 
 const DELIVERY_PLAN_SCHEMA = 'ap.delivery-plan.v1';
-const DELIVERY_PLAN_FIXTURE_SHA256 = '8a772d3c6d0555c9419ecf62f06e970ca0f82440f00db0c75b645f47fcaa27d7';
-const DELIVERY_PLAN_JSON_SCHEMA_SHA256 = '555094968f8372e2e2438bf1dc6eae69d2f2541231d3a4aa7ce7efee8f5fcd9f';
+const DELIVERY_PLAN_FIXTURE_SHA256 = '0d38040d212f781deb71fc8a62c9f4a6bef60ef977414369e9b8a41df0d1b09a';
+const DELIVERY_PLAN_JSON_SCHEMA_SHA256 = '737f98bbda5c34fb26803c21abad1049c47b62643bcd4e162e017625ba380a9d';
 const VISIBILITIES = new Set(['public', 'unlisted', 'followers', 'direct']);
 const PLAN_KEYS = new Set(['schema', 'intentId', 'activityId', 'actorUri', 'activity', 'localRecipients', 'remoteRecipients', 'meta']);
 const LOCAL_TARGET_KEYS = new Set(['actorUri', 'dataset', 'inboxUri']);
