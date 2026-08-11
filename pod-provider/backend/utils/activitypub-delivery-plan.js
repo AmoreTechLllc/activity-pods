@@ -11,9 +11,10 @@ const LOCAL_TARGET_KEYS = new Set(['actorUri', 'dataset', 'inboxUri']);
 const REMOTE_TARGET_KEYS = new Set(['actorUri', 'inboxUrl', 'sharedInboxUrl', 'targetDomain']);
 const META_KEYS = new Set(['visibility', 'isPublicActivity', 'isPublicIndexable', 'searchConsent']);
 const APDM_INTENT_ID_PATTERN = /^apdm-v1-[a-f0-9]{64}$/u;
-const PUBLIC_ADDRESSES = new Set(['https://www.w3.org/ns/activitystreams#Public', 'as:Public', 'Public']);
+const ACTIVITYSTREAMS_NAMESPACE = 'https://www.w3.org/ns/activitystreams#';
+const ADDRESSING_TERMS = new Set(['to', 'bto', 'cc', 'bcc', 'audience']);
+const PUBLIC_ADDRESSES = new Set([`${ACTIVITYSTREAMS_NAMESPACE}Public`, 'as:Public', 'Public']);
 const UNSAFE_TOKEN_PATTERN = /[\s\u0000-\u001f\u007f]/u;
-const BLIND_AUDIENCE_KEYS = new Set(['bto', 'bcc']);
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.length > 0;
@@ -74,6 +75,74 @@ function normalizeAddresses(value) {
   return values.map(normalizeId).filter(item => typeof item === 'string');
 }
 
+function resolveAddressingDefinition(definition, prefixes) {
+  const raw = typeof definition === 'string'
+    ? definition
+    : definition && typeof definition === 'object' && !Array.isArray(definition)
+      ? definition['@id']
+      : null;
+  if (typeof raw !== 'string') return null;
+  if (raw.startsWith(ACTIVITYSTREAMS_NAMESPACE)) {
+    const term = raw.slice(ACTIVITYSTREAMS_NAMESPACE.length);
+    return ADDRESSING_TERMS.has(term) ? term : null;
+  }
+  const separator = raw.indexOf(':');
+  if (separator > 0) {
+    const prefix = raw.slice(0, separator);
+    const suffix = raw.slice(separator + 1);
+    if (prefixes.get(prefix) === ACTIVITYSTREAMS_NAMESPACE && ADDRESSING_TERMS.has(suffix)) return suffix;
+  }
+  return ADDRESSING_TERMS.has(raw) ? raw : null;
+}
+
+function buildContextState(context, inherited) {
+  const prefixes = new Map(inherited?.prefixes || [['as', ACTIVITYSTREAMS_NAMESPACE]]);
+  const aliases = new Map(inherited?.aliases || []);
+  const entries = Array.isArray(context) ? context : context === undefined ? [] : [context];
+
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    for (const [key, definition] of Object.entries(entry)) {
+      const raw = typeof definition === 'string'
+        ? definition
+        : definition && typeof definition === 'object' && !Array.isArray(definition)
+          ? definition['@id']
+          : null;
+      if (raw === ACTIVITYSTREAMS_NAMESPACE) prefixes.set(key, ACTIVITYSTREAMS_NAMESPACE);
+    }
+    for (const [key, definition] of Object.entries(entry)) {
+      const term = resolveAddressingDefinition(definition, prefixes);
+      if (term) aliases.set(key, term);
+    }
+  }
+  return { prefixes, aliases };
+}
+
+function canonicalAddressingTerm(key, state) {
+  if (ADDRESSING_TERMS.has(key)) return key;
+  if (key.startsWith(ACTIVITYSTREAMS_NAMESPACE)) {
+    const term = key.slice(ACTIVITYSTREAMS_NAMESPACE.length);
+    return ADDRESSING_TERMS.has(term) ? term : null;
+  }
+  const separator = key.indexOf(':');
+  if (separator > 0) {
+    const prefix = key.slice(0, separator);
+    const suffix = key.slice(separator + 1);
+    if (state.prefixes.get(prefix) === ACTIVITYSTREAMS_NAMESPACE && ADDRESSING_TERMS.has(suffix)) return suffix;
+  }
+  return state.aliases.get(key) || null;
+}
+
+function addressingValues(activity, term) {
+  if (!activity || typeof activity !== 'object' || Array.isArray(activity)) return [];
+  const state = buildContextState(activity['@context']);
+  const values = [];
+  for (const [key, value] of Object.entries(activity)) {
+    if (canonicalAddressingTerm(key, state) === term) values.push(...normalizeAddresses(value));
+  }
+  return values;
+}
+
 function isActorFollowersAddress(value, actorUri) {
   if (typeof value !== 'string' || typeof actorUri !== 'string') return false;
   try {
@@ -90,8 +159,8 @@ function isActorFollowersAddress(value, actorUri) {
 }
 
 function determineActivityVisibility(activity) {
-  const to = normalizeAddresses(activity?.to);
-  const cc = normalizeAddresses(activity?.cc);
+  const to = addressingValues(activity, 'to');
+  const cc = addressingValues(activity, 'cc');
   if (to.some(value => PUBLIC_ADDRESSES.has(value))) return 'public';
   if (cc.some(value => PUBLIC_ADDRESSES.has(value))) return 'unlisted';
   const actorUri = normalizeId(activity?.actor);
@@ -101,14 +170,12 @@ function determineActivityVisibility(activity) {
 
 function hasSenderFollowersAudience(activity) {
   const actorUri = normalizeId(activity?.actor);
-  return Boolean(
-    actorUri && normalizeAddresses(activity?.audience).some(value => isActorFollowersAddress(value, actorUri))
-  );
+  return Boolean(actorUri && addressingValues(activity, 'audience').some(value => isActorFollowersAddress(value, actorUri)));
 }
 
 function getExplicitConcreteRecipientUris(activity) {
   const actorUri = normalizeId(activity?.actor);
-  const addresses = ['to', 'bto', 'cc', 'bcc', 'audience'].flatMap(key => normalizeAddresses(activity?.[key]));
+  const addresses = [...ADDRESSING_TERMS].flatMap(term => addressingValues(activity, term));
   return [...new Set(addresses.filter(value => {
     if (PUBLIC_ADDRESSES.has(value)) return false;
     if (actorUri && isActorFollowersAddress(value, actorUri)) return false;
@@ -116,22 +183,26 @@ function getExplicitConcreteRecipientUris(activity) {
   }))];
 }
 
-function containsBlindAudienceFields(value, seen = new WeakSet()) {
+function containsBlindAudienceFields(value, seen = new WeakSet(), inheritedContext) {
   if (!value || typeof value !== 'object') return false;
   if (seen.has(value)) return false;
   seen.add(value);
-  if (Array.isArray(value)) return value.some(item => containsBlindAudienceFields(item, seen));
-  if (Object.keys(value).some(key => BLIND_AUDIENCE_KEYS.has(key))) return true;
-  return Object.values(value).some(item => containsBlindAudienceFields(item, seen));
+  if (Array.isArray(value)) return value.some(item => containsBlindAudienceFields(item, seen, inheritedContext));
+  const state = buildContextState(value['@context'], inheritedContext);
+  if (Object.keys(value).some(key => {
+    const term = canonicalAddressingTerm(key, state);
+    return term === 'bto' || term === 'bcc';
+  })) return true;
+  return Object.values(value).some(item => containsBlindAudienceFields(item, seen, state));
 }
 
-function sanitizeDeliveryActivity(value, seen = new WeakSet()) {
+function sanitizeDeliveryActivity(value, seen = new WeakSet(), inheritedContext) {
   if (value === null) return null;
   if (Array.isArray(value)) {
     assertDenseArray(value, 'sanitize');
     if (seen.has(value)) throw new TypeError('Cannot sanitize cyclic ActivityPub delivery payload');
     seen.add(value);
-    const output = value.map(item => sanitizeDeliveryActivity(item, seen));
+    const output = value.map(item => sanitizeDeliveryActivity(item, seen, inheritedContext));
     seen.delete(value);
     return output;
   }
@@ -150,10 +221,12 @@ function sanitizeDeliveryActivity(value, seen = new WeakSet()) {
       }
       if (seen.has(value)) throw new TypeError('Cannot sanitize cyclic ActivityPub delivery payload');
       seen.add(value);
+      const state = buildContextState(value['@context'], inheritedContext);
       const output = {};
       for (const [key, item] of Object.entries(value)) {
-        if (BLIND_AUDIENCE_KEYS.has(key)) continue;
-        output[key] = sanitizeDeliveryActivity(item, seen);
+        const term = canonicalAddressingTerm(key, state);
+        if (term === 'bto' || term === 'bcc') continue;
+        output[key] = sanitizeDeliveryActivity(item, seen, state);
       }
       seen.delete(value);
       return output;
@@ -302,6 +375,7 @@ module.exports = {
   DELIVERY_PLAN_SCHEMA,
   DELIVERY_PLAN_FIXTURE_SHA256,
   DELIVERY_PLAN_JSON_SCHEMA_SHA256,
+  addressingValues,
   canonicalize,
   computeDeliveryPlanIntentId,
   containsBlindAudienceFields,
