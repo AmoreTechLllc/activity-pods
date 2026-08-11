@@ -4,6 +4,7 @@ const {
   DELIVERY_PLAN_SCHEMA,
   computeDeliveryPlanIntentId,
   determineActivityVisibility,
+  isActorFollowersAddress,
   normalizeDeliveryTargetDomain,
   parseDeliveryEndpointUrl,
   validateDeliveryPlanV1
@@ -120,8 +121,8 @@ async function resolveRemoteDeliveryTarget(ctx, actorUri) {
   };
 }
 
-function assertConcreteRecipientUris(recipientUris, classification) {
-  const followersCollection = recipientUris.find(isFollowersCollectionUri);
+function assertConcreteRecipientUris(recipientUris, classification, actorUri) {
+  const followersCollection = recipientUris.find(uri => isActorFollowersAddress(uri, actorUri));
   if (followersCollection) {
     throw new Error(
       `ActivityPub Delivery Plan received unresolved ${classification} followers collection ${followersCollection}`
@@ -147,8 +148,8 @@ async function buildDeliveryPlanV1(
 
   const uniqueLocalUris = [...new Set(localRecipientUris.filter(value => typeof value === 'string'))];
   const uniqueRemoteUris = [...new Set(remoteRecipientUris.filter(value => typeof value === 'string'))];
-  assertConcreteRecipientUris(uniqueLocalUris, 'local');
-  assertConcreteRecipientUris(uniqueRemoteUris, 'remote');
+  assertConcreteRecipientUris(uniqueLocalUris, 'local', actorUri);
+  assertConcreteRecipientUris(uniqueRemoteUris, 'remote', actorUri);
 
   const localSet = new Set(uniqueLocalUris);
   const overlappingRecipient = uniqueRemoteUris.find(uri => localSet.has(uri));
