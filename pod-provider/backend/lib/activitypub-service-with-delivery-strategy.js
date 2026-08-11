@@ -107,23 +107,31 @@ function assertMatchingActivityIdentity(expectedActivity, observedActivity, labe
   if (!expected.id || observed.id !== expected.id) {
     throw new Error(`APDM intercepted ${label} with an Activity that does not match the outbox result.`);
   }
-  if (expected.actor && observed.actor && observed.actor !== expected.actor) {
+  if (expected.actor && observed.actor !== expected.actor) {
     throw new Error(`APDM intercepted ${label} with an actor that does not match the outbox result.`);
+  }
+}
+
+function assertCapturedRemotePostStructure(job) {
+  const recipientUri = job?.recipientUri;
+  if (!parseSafeHttpUrl(recipientUri)) {
+    throw new Error('APDM intercepted a remotePost job without a safe concrete HTTP(S) recipientUri.');
+  }
+  if (job.jobId !== recipientUri) {
+    throw new Error('APDM intercepted an incompatible remotePost job: SemApps 1.1.4 requires jobId === recipientUri.');
+  }
+  const identity = activityIdentity(job.activity);
+  if (!identity.id || !identity.actor) {
+    throw new Error('APDM intercepted a remotePost job without a concrete Activity id and actor.');
   }
 }
 
 function validateCapturedRemotePosts(capturedRemotePosts, activity) {
   const recipients = [];
   for (const job of capturedRemotePosts) {
-    const recipientUri = job?.recipientUri;
-    if (!parseSafeHttpUrl(recipientUri)) {
-      throw new Error('APDM intercepted a remotePost job without a safe concrete HTTP(S) recipientUri.');
-    }
-    if (job.jobId !== recipientUri) {
-      throw new Error('APDM intercepted an incompatible remotePost job: SemApps 1.1.4 requires jobId === recipientUri.');
-    }
+    assertCapturedRemotePostStructure(job);
     assertMatchingActivityIdentity(activity, job.activity, 'remotePost job');
-    recipients.push(recipientUri);
+    recipients.push(job.recipientUri);
   }
   return [...new Set(recipients)];
 }
@@ -212,12 +220,14 @@ function createOutboxPostHandler(
 
     executionContext.createJob = (queueName, jobId, payload, options) => {
       if (queueName === 'remotePost') {
-        capturedRemotePosts.push({
+        const capturedJob = {
           jobId,
           recipientUri: payload && payload.recipientUri,
           activity: payload && payload.activity,
           options
-        });
+        };
+        assertCapturedRemotePostStructure(capturedJob);
+        capturedRemotePosts.push(capturedJob);
         return undefined;
       }
       return nativeCreateJob(queueName, jobId, payload, options);
@@ -428,6 +438,7 @@ module.exports = {
   SEMAPPS_INTERNAL_PATHS,
   SEMAPPS_OUTBOX_INTERCEPTION_MARKERS,
   SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION,
+  assertCapturedRemotePostStructure,
   assertExternalDeliveryConfiguration,
   assertSupportedSemappsOutboxShape,
   assertSupportedSemappsVersion,
