@@ -15,6 +15,20 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function remoteCtx() {
+  return {
+    async call(action, params) {
+      if (action === 'activitypub.actor.get') {
+        return {
+          id: params.actorUri,
+          inbox: `${params.actorUri}/inbox`
+        };
+      }
+      throw new Error(`Unexpected call ${action}`);
+    }
+  };
+}
+
 describe('APDM Phase 1 contract hardening', () => {
   test('producer rejects searchConsent arrays to match the mirrored schema and Fedify consumer', () => {
     const plan = clone(fixture);
@@ -74,27 +88,13 @@ describe('APDM Phase 1 contract hardening', () => {
   test('only the sender own followers collection is classified as followers visibility', () => {
     const actor = 'https://pods.example/alice';
     expect(determineVisibility({ actor, to: [`${actor}/followers`], cc: [] })).toBe('followers');
-    expect(determineVisibility({
-      actor,
-      to: ['https://remote.example/users/followers'],
-      cc: []
-    })).toBe('direct');
+    expect(determineVisibility({ actor, to: ['https://remote.example/users/followers'], cc: [] })).toBe('direct');
   });
 
   test('planner allows a legitimate actor URI whose path happens to end in /followers', async () => {
     const actorUri = 'https://pods.example/alice';
     const recipientUri = 'https://remote.example/users/followers';
-    const ctx = {
-      async call(action, params) {
-        if (action === 'activitypub.actor.get') {
-          expect(params.actorUri).toBe(recipientUri);
-          return { id: recipientUri, inbox: `${recipientUri}/inbox` };
-        }
-        throw new Error(`Unexpected call ${action}`);
-      }
-    };
-
-    const plan = await buildDeliveryPlanV1(ctx, {
+    const plan = await buildDeliveryPlanV1(remoteCtx(), {
       activity: {
         id: `${actorUri}/activities/direct-followers-name`,
         actor: actorUri,
@@ -109,14 +109,73 @@ describe('APDM Phase 1 contract hardening', () => {
     expect(plan.remoteRecipients[0].actorUri).toBe(recipientUri);
   });
 
-  test('validator rejects a plan that omits an explicitly addressed concrete actor', () => {
+  test('validator rejects a plan that omits an explicitly addressed visible actor', () => {
     const omitted = clone(fixture);
-    omitted.activity.bcc = ['https://remote.example/users/missing'];
+    omitted.activity.cc = [...omitted.activity.cc, 'https://remote.example/users/missing'];
     expect(validateDeliveryPlanV1(omitted)).toBe(false);
 
     const included = clone(fixture);
-    included.activity.bcc = ['https://remote.example/users/carol'];
+    included.activity.cc = [...included.activity.cc, 'https://remote.example/users/carol'];
     expect(validateDeliveryPlanV1(included)).toBe(true);
+  });
+
+  test('planner uses blind addresses for routing but strips bto/bcc recursively from the outbound payload', async () => {
+    const actorUri = 'https://pods.example/alice';
+    const hiddenRecipient = 'https://remote.example/users/hidden';
+    const plan = await buildDeliveryPlanV1(remoteCtx(), {
+      activity: {
+        id: `${actorUri}/activities/blind`,
+        actor: actorUri,
+        type: 'Create',
+        to: [],
+        bcc: [hiddenRecipient],
+        object: {
+          id: `${actorUri}/objects/blind`,
+          type: 'Note',
+          content: 'private routing',
+          bto: [hiddenRecipient]
+        }
+      },
+      remoteRecipientUris: [hiddenRecipient]
+    });
+
+    expect(plan.remoteRecipients.map(target => target.actorUri)).toContain(hiddenRecipient);
+    expect(JSON.stringify(plan.activity)).not.toContain('"bcc"');
+    expect(JSON.stringify(plan.activity)).not.toContain('"bto"');
+    expect(validateDeliveryPlanV1(plan)).toBe(true);
+  });
+
+  test('validator fails closed if a hand-crafted outbound plan still discloses blind addressing', () => {
+    const leaked = clone(fixture);
+    leaked.activity.bcc = ['https://remote.example/users/carol'];
+    expect(validateDeliveryPlanV1(leaked)).toBe(false);
+  });
+
+  test('concrete audience recipients must be planned and sender-followers audience fails closed until authoritative expansion exists', async () => {
+    const actorUri = 'https://pods.example/alice';
+    const audienceRecipient = 'https://remote.example/users/audience';
+
+    await expect(buildDeliveryPlanV1(remoteCtx(), {
+      activity: {
+        id: `${actorUri}/activities/audience-missing`,
+        actor: actorUri,
+        type: 'Create',
+        to: [],
+        audience: [audienceRecipient]
+      },
+      remoteRecipientUris: []
+    })).rejects.toThrow(/omitted explicitly addressed recipient/u);
+
+    await expect(buildDeliveryPlanV1(remoteCtx(), {
+      activity: {
+        id: `${actorUri}/activities/audience-followers`,
+        actor: actorUri,
+        type: 'Create',
+        to: [],
+        audience: [`${actorUri}/followers`]
+      },
+      remoteRecipientUris: []
+    })).rejects.toThrow(/authoritative audience expansion/u);
   });
 
   test('contract fingerprint canonicalization rejects non-JSON values instead of creating ambiguous hashes', () => {
