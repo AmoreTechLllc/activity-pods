@@ -14,6 +14,7 @@ const {
 const SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION = '1.1.4';
 const REMOTE_DELIVERY_MODES = new Set(['native', 'external']);
 const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.handoff-queued';
+const PUBLIC_ADDRESSES = new Set(['https://www.w3.org/ns/activitystreams#Public', 'as:Public', 'Public']);
 const SEMAPPS_INTERNAL_PATHS = Object.freeze({
   ActorService: '@semapps/activitypub/services/activitypub/subservices/actor',
   ActivityService: '@semapps/activitypub/services/activitypub/subservices/activity',
@@ -94,6 +95,51 @@ function normalizeEntityId(value) {
   return null;
 }
 
+function normalizeAddressValues(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values.map(normalizeEntityId).filter(item => typeof item === 'string' && item.length > 0);
+}
+
+function isActorFollowersAddress(value, actorUri) {
+  if (typeof value !== 'string' || typeof actorUri !== 'string') return false;
+  try {
+    const address = new URL(value);
+    const actor = new URL(actorUri);
+    if (actor.search || actor.hash || address.search || address.hash) return false;
+    if (address.origin !== actor.origin) return false;
+    const actorPath = actor.pathname.replace(/\/+$/u, '');
+    const addressPath = address.pathname.replace(/\/+$/u, '');
+    return addressPath === `${actorPath}/followers`;
+  } catch {
+    return false;
+  }
+}
+
+function assertSupportedAudienceAddressing(params) {
+  const audience = normalizeAddressValues(params?.audience);
+  if (audience.length === 0) return;
+
+  const actorUri = normalizeEntityId(params?.actor || params?.attributedTo);
+  const standardAddresses = new Set(
+    ['to', 'bto', 'cc', 'bcc'].flatMap(key => normalizeAddressValues(params?.[key]))
+  );
+
+  for (const recipient of audience) {
+    if (PUBLIC_ADDRESSES.has(recipient)) continue;
+    if (actorUri && isActorFollowersAddress(recipient, actorUri)) {
+      throw new Error(
+        'ActivityPub sender-followers audience is unsupported by SemApps 1.1.4 recipient discovery; ' +
+          'duplicate the followers collection in to/cc only after an explicit compatibility decision.'
+      );
+    }
+    if (!standardAddresses.has(recipient)) {
+      throw new Error(
+        `ActivityPub audience recipient ${recipient} must also appear in to/bto/cc/bcc until authoritative audience expansion is implemented.`
+      );
+    }
+  }
+}
+
 function activityIdentity(activity) {
   if (!activity || typeof activity !== 'object' || Array.isArray(activity)) return { id: null, actor: null };
   return {
@@ -171,6 +217,8 @@ function createPrivacySafeOutboxContext(ctx) {
     throw new TypeError('ActivityPub outbox context params must be an object.');
   }
 
+  assertSupportedAudienceAddressing(ctx.params);
+
   const blindRecipients = {
     bto: ctx.params.bto,
     bcc: ctx.params.bcc
@@ -227,12 +275,12 @@ function assertExternalDeliveryConfiguration(settings) {
   if (typeof settings.deliveryHandoffUrl !== 'string' || settings.deliveryHandoffUrl.trim().length === 0) {
     throw new Error('ActivityPub external remote delivery requires a sidecar Delivery Plan handoff URL.');
   }
+  if (settings.deliveryHandoffUrl !== settings.deliveryHandoffUrl.trim() || settings.deliveryHandoffUrl.includes('#')) {
+    throw new Error('ActivityPub external remote delivery handoff URL must not contain whitespace padding or a URL fragment.');
+  }
   const handoffUrl = parseSafeHttpUrl(settings.deliveryHandoffUrl);
   if (!handoffUrl) {
     throw new Error('ActivityPub external remote delivery handoff URL must be a valid credential-free HTTP(S) URL.');
-  }
-  if (handoffUrl.hash) {
-    throw new Error('ActivityPub external remote delivery handoff URL must not contain a URL fragment.');
   }
   if (typeof settings.deliveryHandoffToken !== 'string' || settings.deliveryHandoffToken.trim().length === 0) {
     throw new Error('ActivityPub external remote delivery requires SIDECAR_TOKEN for authenticated durable handoff.');
@@ -504,6 +552,7 @@ module.exports = {
   SUPPORTED_SEMAPPS_ACTIVITYPUB_VERSION,
   assertCapturedRemotePostStructure,
   assertExternalDeliveryConfiguration,
+  assertSupportedAudienceAddressing,
   assertSupportedSemappsOutboxShape,
   assertSupportedSemappsVersion,
   createActivityPubServiceWithDeliveryStrategy,
