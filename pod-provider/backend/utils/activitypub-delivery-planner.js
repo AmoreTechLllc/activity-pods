@@ -3,6 +3,8 @@
 const {
   DELIVERY_PLAN_SCHEMA,
   computeDeliveryPlanIntentId,
+  normalizeDeliveryTargetDomain,
+  parseDeliveryEndpointUrl,
   validateDeliveryPlanV1
 } = require('./activitypub-delivery-plan');
 
@@ -86,26 +88,19 @@ async function resolveLocalDeliveryTarget(ctx, actorUri, podProvider) {
     { actorUri, predicate: 'inbox', webId: 'system' },
     { meta: { dataset } }
   );
-  if (typeof inboxUri !== 'string' || inboxUri.length === 0) {
-    throw new Error(`Unable to resolve local inbox for ${actorUri}`);
+  if (!parseDeliveryEndpointUrl(inboxUri)) {
+    throw new Error(`Unable to resolve safe local inbox for ${actorUri}`);
   }
 
   return { actorUri, dataset, inboxUri };
 }
 
 function parseRemoteDeliveryUrl(value, actorUri, label) {
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`Unable to resolve remote ${label} for ${actorUri}`);
-  }
-  try {
-    const parsed = new URL(value);
-    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
-      throw new Error('unsafe protocol or credentials');
-    }
-    return parsed;
-  } catch {
+  const parsed = parseDeliveryEndpointUrl(value);
+  if (!parsed) {
     throw new Error(`Resolved invalid remote ${label} URL for ${actorUri}`);
   }
+  return parsed;
 }
 
 async function resolveRemoteDeliveryTarget(ctx, actorUri) {
@@ -122,11 +117,16 @@ async function resolveRemoteDeliveryTarget(ctx, actorUri) {
     deliveryUrl = sharedInbox;
   }
 
+  const targetDomain = normalizeDeliveryTargetDomain(deliveryUrl.hostname);
+  if (!targetDomain) {
+    throw new Error(`Resolved invalid remote delivery hostname for ${actorUri}`);
+  }
+
   return {
     actorUri,
     inboxUrl: inbox.toString(),
     ...(sharedInboxUrl ? { sharedInboxUrl } : {}),
-    targetDomain: deliveryUrl.hostname.toLowerCase()
+    targetDomain
   };
 }
 
