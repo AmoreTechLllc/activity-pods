@@ -92,13 +92,18 @@ describe('Activity Intent utilities', () => {
     });
   });
 
-  test('builds Create with an embedded object and public follower addressing', () => {
+  test('builds Create with explicit object attribution and public follower addressing', () => {
     expect(
       buildIntentActivity('Create', { content: 'Hello', summary: 'CW' }, 'https://pod.test/alice/')
     ).toEqual({
       type: 'Create',
       actor: 'https://pod.test/alice/',
-      object: { type: 'Note', content: 'Hello', summary: 'CW' },
+      object: {
+        type: 'Note',
+        attributedTo: 'https://pod.test/alice/',
+        content: 'Hello',
+        summary: 'CW'
+      },
       to: PUBLIC_URI,
       cc: ['https://pod.test/alice/followers']
     });
