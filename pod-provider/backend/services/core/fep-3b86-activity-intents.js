@@ -7,6 +7,11 @@
  * GET-only and never mutate state; they redirect the authenticated user to a
  * frontend confirmation workflow. The frontend performs any Activity only
  * after explicit confirmation.
+ *
+ * IMPORTANT: only advertise workflows this provider can execute with correct
+ * ActivityPub delivery semantics. Like/Flag/Block and threaded Create support
+ * require additional object-owner/moderation resolution and are deliberately
+ * not advertised until those execution paths exist.
  */
 
 const CONFIG = require('../../config/config');
@@ -15,28 +20,12 @@ const REL_NS = 'https://w3id.org/fep/3b86/';
 
 const INTENT_DEFINITIONS = [
   { type: 'Follow', frontendPath: '/i/follow', params: ['object'] },
-  { type: 'Like', frontendPath: '/i/like', params: ['object'] },
   { type: 'Announce', frontendPath: '/i/announce', params: ['object'] },
   {
     type: 'Create',
     frontendPath: '/i/create',
-    params: [
-      'type',
-      'name',
-      'summary',
-      'content',
-      'inReplyTo',
-      'attachment',
-      'tag',
-      'startTime',
-      'endTime',
-      'describes',
-      'audience',
-      'context'
-    ]
+    params: ['type', 'name', 'summary', 'content', 'attachment', 'tag', 'startTime', 'endTime', 'describes']
   },
-  { type: 'Flag', frontendPath: '/i/flag', params: ['object'] },
-  { type: 'Block', frontendPath: '/i/block', params: ['object'] },
   { type: 'Object', frontendPath: '/i/object', params: ['object'], hasWorkflow: false }
 ];
 
@@ -90,11 +79,8 @@ module.exports = {
     },
 
     handleFollow: { handler(ctx) { return this.runIntent(ctx, 'Follow'); } },
-    handleLike: { handler(ctx) { return this.runIntent(ctx, 'Like'); } },
     handleAnnounce: { handler(ctx) { return this.runIntent(ctx, 'Announce'); } },
     handleCreate: { handler(ctx) { return this.runIntent(ctx, 'Create'); } },
-    handleFlag: { handler(ctx) { return this.runIntent(ctx, 'Flag'); } },
-    handleBlock: { handler(ctx) { return this.runIntent(ctx, 'Block'); } },
     handleObject: { handler(ctx) { return this.runIntent(ctx, 'Object'); } }
   },
 
@@ -142,6 +128,8 @@ module.exports = {
       ]);
       for (const [key, value] of Object.entries(raw)) {
         if (typeof value !== 'string') continue;
+        // RFC 6570 callers replace unsupported/undefined values with empty
+        // strings. Treat those optional values as absent rather than invalid.
         if (value.length === 0) continue;
         if (value.length > MAX_PARAM_LENGTH) continue;
         if (!SAFE_PARAM_KEYS.has(key)) continue;
@@ -152,7 +140,7 @@ module.exports = {
     },
 
     validateParams(params, intent) {
-      const urlParams = ['object', 'inReplyTo', 'attachment', 'tag', 'describes', 'audience', 'context'];
+      const urlParams = ['object', 'attachment', 'tag', 'describes'];
       for (const key of urlParams) {
         if (params[key] !== undefined && !isAbsoluteHttpUrl(params[key])) {
           return { ok: false, error: `Invalid URL for parameter "${key}"` };
