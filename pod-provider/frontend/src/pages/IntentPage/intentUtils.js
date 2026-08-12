@@ -89,7 +89,9 @@ export function buildIntentActivity(type, params, actor, options = {}) {
   };
 
   if (type === 'Create') {
-    const object = { type: params.type || 'Note' };
+    // This is an already-formed Create Activity rather than a bare object for
+    // SemApps to wrap, so retain authorship explicitly on the embedded object.
+    const object = { type: params.type || 'Note', attributedTo: actor };
     for (const key of CREATE_PARAMS) {
       if (key === 'type') continue;
       if (params[key] !== undefined && params[key] !== '') object[key] = params[key];
