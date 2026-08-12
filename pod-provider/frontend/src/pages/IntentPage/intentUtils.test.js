@@ -42,15 +42,42 @@ describe('Activity Intent utilities', () => {
     expect(parseIntentSearch('Block', params({ object: 'https://example.test/users/bob' }))).toMatchObject({ ok: false });
   });
 
-  test('addresses Follow directly to the target actor for SemApps recipient discovery', () => {
+  test('preserves an actor target as Follow object while addressing its resolved delivery actor', () => {
     expect(
-      buildIntentActivity('Follow', { object: 'https://remote.test/users/bob' }, 'https://pod.test/alice')
+      buildIntentActivity(
+        'Follow',
+        { object: 'https://remote.test/users/bob' },
+        'https://pod.test/alice',
+        { followRecipient: 'https://remote.test/users/bob' }
+      )
     ).toEqual({
       type: 'Follow',
       actor: 'https://pod.test/alice',
       object: 'https://remote.test/users/bob',
       to: 'https://remote.test/users/bob'
     });
+  });
+
+  test('preserves a followable Note as Follow object while addressing its attributedTo actor', () => {
+    expect(
+      buildIntentActivity(
+        'Follow',
+        { object: 'https://remote.test/notes/1' },
+        'https://pod.test/alice',
+        { followRecipient: 'https://remote.test/users/bob' }
+      )
+    ).toEqual({
+      type: 'Follow',
+      actor: 'https://pod.test/alice',
+      object: 'https://remote.test/notes/1',
+      to: 'https://remote.test/users/bob'
+    });
+  });
+
+  test('fails closed if Follow has not been resolved to a delivery actor', () => {
+    expect(() =>
+      buildIntentActivity('Follow', { object: 'https://remote.test/notes/1' }, 'https://pod.test/alice')
+    ).toThrow(/resolved to a deliverable actor/);
   });
 
   test('addresses Announce publicly and to the authenticated actor followers collection', () => {
