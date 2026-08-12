@@ -3,10 +3,14 @@
  * https://w3id.org/fep/3b86
  *
  * Publishes Activity Intent link templates in the WebFinger response and
- * exposes the matching home-server intent endpoints. All endpoints are
- * GET-only and never mutate state; they redirect the authenticated user to a
- * frontend confirmation workflow. The frontend performs any Activity only
- * after explicit confirmation.
+ * exposes the matching home-server intent endpoints. Public intent endpoints
+ * are GET-only and never mutate state; they redirect to a frontend confirmation
+ * workflow. The frontend performs any Activity only after explicit confirmation.
+ *
+ * Follow confirmation uses the existing read-only `followable.resolveTarget`
+ * authority through a separate authenticated route. This preserves the original
+ * followed object while delivering the Follow to the actor that owns a
+ * followable non-actor resource (for example a Note's attributedTo actor).
  *
  * IMPORTANT: only advertise workflows this provider can execute with correct
  * ActivityPub delivery semantics. Like/Flag/Block and threaded Create support
@@ -39,7 +43,7 @@ const SAFE_PARAM_KEYS = new Set([
 
 module.exports = {
   name: 'fep-3b86-activity-intents',
-  dependencies: ['api'],
+  dependencies: ['api', 'followable'],
 
   settings: {
     baseUrl: CONFIG.BASE_URL,
@@ -58,12 +62,29 @@ module.exports = {
         `fep-3b86-activity-intents.handle${intent.type}`;
     }
 
+    // Public FEP entry points. These only validate and redirect to confirmation.
     await this.broker.call('api.addRoute', {
       route: {
         path: '/intents',
         name: 'fep-3b86-activity-intents',
         bodyParsers: false,
         aliases
+      }
+    });
+
+    // Read-only resolution used only after the signed-in user confirms Follow.
+    // Keep this separate from the public FEP route so arbitrary intent links do
+    // not create an unauthenticated remote-dereference surface.
+    await this.broker.call('api.addRoute', {
+      route: {
+        path: '/api/intents',
+        name: 'fep-3b86-activity-intents-resolution',
+        authentication: true,
+        authorization: true,
+        bodyParsers: false,
+        aliases: {
+          'GET /follow/resolve': 'fep-3b86-activity-intents.resolveFollowTarget'
+        }
       }
     });
   },
@@ -81,7 +102,35 @@ module.exports = {
     handleFollow: { handler(ctx) { return this.runIntent(ctx, 'Follow'); } },
     handleAnnounce: { handler(ctx) { return this.runIntent(ctx, 'Announce'); } },
     handleCreate: { handler(ctx) { return this.runIntent(ctx, 'Create'); } },
-    handleObject: { handler(ctx) { return this.runIntent(ctx, 'Object'); } }
+    handleObject: { handler(ctx) { return this.runIntent(ctx, 'Object'); } },
+
+    resolveFollowTarget: {
+      params: {
+        object: { type: 'string', min: 1, max: MAX_PARAM_LENGTH }
+      },
+      async handler(ctx) {
+        if (!isAbsoluteHttpUrl(ctx.params.object)) {
+          if (ctx.meta) ctx.meta.$statusCode = 400;
+          return { error: 'Invalid URL for parameter "object"' };
+        }
+
+        const resolved = await ctx.call('followable.resolveTarget', {
+          objectUri: ctx.params.object,
+          webId: ctx.meta?.webId,
+          requireFollowersCollection: false
+        });
+
+        if (!resolved || resolved.success !== true || !isAbsoluteHttpUrl(resolved.recipientUri)) {
+          if (ctx.meta) ctx.meta.$statusCode = 422;
+          return { error: 'Follow target could not be resolved to a deliverable actor' };
+        }
+
+        return {
+          object: ctx.params.object,
+          recipient: resolved.recipientUri
+        };
+      }
+    }
   },
 
   methods: {
