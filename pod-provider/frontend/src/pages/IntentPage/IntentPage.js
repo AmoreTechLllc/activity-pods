@@ -4,6 +4,7 @@ import { useOutbox } from '@semapps/activitypub-components';
 import { Alert, Box, Button, Card, CardActions, CardContent, Divider, Stack, Typography } from '@mui/material';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import BlockAnonymous from '../../common/BlockAnonymous';
+import { resolveFollowIntentTarget } from './intentApi';
 import { buildIntentActivity, getWorkflowAction, parseIntentSearch } from './intentUtils';
 
 const DISPLAY_KEYS = [
@@ -21,7 +22,7 @@ const DISPLAY_KEYS = [
 
 function titleFor(type) {
   switch (type) {
-    case 'Follow': return 'Follow this actor?';
+    case 'Follow': return 'Follow this actor or resource?';
     case 'Announce': return 'Share this object?';
     case 'Create': return 'Create this object?';
     case 'Object': return 'Open this object?';
@@ -85,7 +86,13 @@ const IntentPage = () => {
         setWorkflow({ kind: 'confirm-navigation', target: parsed.params.object });
         return;
       }
-      const activity = buildIntentActivity(type, parsed.params, outbox.owner);
+
+      // Resolve followable resources only after explicit user confirmation. The
+      // original resource remains the Follow object; the resolver supplies the
+      // actor URI SemApps needs in `to` for remote recipient discovery.
+      const followRecipient =
+        type === 'Follow' ? await resolveFollowIntentTarget(parsed.params.object) : undefined;
+      const activity = buildIntentActivity(type, parsed.params, outbox.owner, { followRecipient });
       await outbox.post(activity);
       setCompleted(true);
       notify(`${type} activity sent`, { type: 'success' });
