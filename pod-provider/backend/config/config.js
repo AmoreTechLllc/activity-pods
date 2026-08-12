@@ -2,6 +2,10 @@
 // See https://github.com/kerimdzhanov/dotenv-flow for more details
 require('dotenv-flow').config();
 
+const {
+  parseAutomaticReconciliationLookbackMs
+} = require('../utils/activitypub-delivery-reconciliation-policy');
+
 module.exports = {
   INSTANCE_NAME: process.env.SEMAPPS_INSTANCE_NAME,
   INSTANCE_DESCRIPTION: {
@@ -38,8 +42,9 @@ module.exports = {
     Number(process.env.SEMAPPS_ACTIVITYPUB_DELIVERY_RECONCILIATION_INTERVAL_MS) || 60000,
   ACTIVITYPUB_DELIVERY_RECONCILIATION_INITIAL_DELAY_MS:
     Number(process.env.SEMAPPS_ACTIVITYPUB_DELIVERY_RECONCILIATION_INITIAL_DELAY_MS) || 15000,
-  ACTIVITYPUB_DELIVERY_RECONCILIATION_LOOKBACK_MS:
-    Number(process.env.SEMAPPS_ACTIVITYPUB_DELIVERY_RECONCILIATION_LOOKBACK_MS) || 900000,
+  ACTIVITYPUB_DELIVERY_RECONCILIATION_LOOKBACK_MS: parseAutomaticReconciliationLookbackMs(
+    process.env.SEMAPPS_ACTIVITYPUB_DELIVERY_RECONCILIATION_LOOKBACK_MS
+  ),
   ACTIVITYPUB_DELIVERY_RECONCILIATION_ACCOUNT_BATCH_SIZE:
     Number(
       process.env.SEMAPPS_ACTIVITYPUB_DELIVERY_RECONCILIATION_ACCOUNT_BATCH_SIZE ||
