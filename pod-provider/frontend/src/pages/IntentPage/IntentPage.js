@@ -12,24 +12,18 @@ const DISPLAY_KEYS = [
   'name',
   'summary',
   'content',
-  'inReplyTo',
   'attachment',
   'tag',
   'startTime',
   'endTime',
-  'describes',
-  'audience',
-  'context'
+  'describes'
 ];
 
 function titleFor(type) {
   switch (type) {
     case 'Follow': return 'Follow this actor?';
-    case 'Like': return 'Like this object?';
     case 'Announce': return 'Share this object?';
     case 'Create': return 'Create this object?';
-    case 'Flag': return 'Report this object?';
-    case 'Block': return 'Block this actor or object?';
     case 'Object': return 'Open this object?';
     default: return 'Activity request';
   }
