@@ -20,7 +20,7 @@ function createInstance() {
 }
 
 describe('FEP-3B86 current-head review regressions', () => {
-  test('registers aliases relative to the /intents route prefix', async () => {
+  test('registers supported aliases relative to the /intents route prefix', async () => {
     const svc = createInstance();
 
     await serviceDefinition.started.call(svc);
@@ -28,14 +28,16 @@ describe('FEP-3B86 current-head review regressions', () => {
     expect(svc.broker.call).toHaveBeenCalledTimes(1);
     const [, payload] = svc.broker.call.mock.calls[0];
     expect(payload.route.path).toBe('/intents');
-    expect(payload.route.aliases).toEqual(
-      expect.objectContaining({
-        'GET /follow': 'fep-3b86-activity-intents.handleFollow',
-        'GET /like': 'fep-3b86-activity-intents.handleLike',
-        'GET /create': 'fep-3b86-activity-intents.handleCreate'
-      })
-    );
+    expect(payload.route.aliases).toEqual({
+      'GET /follow': 'fep-3b86-activity-intents.handleFollow',
+      'GET /announce': 'fep-3b86-activity-intents.handleAnnounce',
+      'GET /create': 'fep-3b86-activity-intents.handleCreate',
+      'GET /object': 'fep-3b86-activity-intents.handleObject'
+    });
     expect(Object.keys(payload.route.aliases).some(alias => alias.startsWith('GET /intents/'))).toBe(false);
+    expect(payload.route.aliases['GET /like']).toBeUndefined();
+    expect(payload.route.aliases['GET /flag']).toBeUndefined();
+    expect(payload.route.aliases['GET /block']).toBeUndefined();
   });
 
   test('treats empty expanded optional workflow values as absent', () => {
@@ -54,7 +56,7 @@ describe('FEP-3B86 current-head review regressions', () => {
     expect(svc.validateParams(sanitized, intent)).toEqual({ ok: true });
   });
 
-  test('treats empty expanded optional Create URL values as absent', () => {
+  test('treats empty expanded optional Create URL values as absent and drops unsupported thread fields', () => {
     const svc = createInstance();
     const intent = serviceDefinition.INTENT_DEFINITIONS.find(definition => definition.type === 'Create');
     const sanitized = svc.sanitizeParams(
