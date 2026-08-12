@@ -42,7 +42,23 @@ describe('fep-3b86-activity-intents', () => {
 
       const createIntent = links.find(l => l.rel === 'https://w3id.org/fep/3b86/Create');
       expect(createIntent.template).toContain('content={content}');
-      expect(createIntent.template).toContain('inReplyTo={inReplyTo}');
+      expect(createIntent.template).not.toContain('inReplyTo=');
+      expect(createIntent.template).not.toContain('audience=');
+      expect(createIntent.template).not.toContain('context=');
+    });
+
+    it('advertises only workflows with a complete execution path', () => {
+      const svc = createInstance();
+      const relations = svc.buildLinks('https://pod.example').map(link => link.rel);
+      expect(relations).toEqual([
+        'https://w3id.org/fep/3b86/Follow',
+        'https://w3id.org/fep/3b86/Announce',
+        'https://w3id.org/fep/3b86/Create',
+        'https://w3id.org/fep/3b86/Object'
+      ]);
+      expect(relations).not.toContain('https://w3id.org/fep/3b86/Like');
+      expect(relations).not.toContain('https://w3id.org/fep/3b86/Flag');
+      expect(relations).not.toContain('https://w3id.org/fep/3b86/Block');
     });
 
     it('omits workflow params for intents without a workflow', () => {
@@ -85,10 +101,26 @@ describe('fep-3b86-activity-intents', () => {
       expect(out.attacker).toBeUndefined();
     });
 
-    it('drops non-string values', () => {
+    it('drops non-string and empty optional values', () => {
       const svc = createInstance();
       const intent = serviceDefinition.INTENT_DEFINITIONS.find(d => d.type === 'Follow');
-      expect(svc.sanitizeParams({ object: 42, 'on-cancel': null }, intent)).toEqual({});
+      expect(svc.sanitizeParams({ object: 42, 'on-cancel': null, 'on-success': '' }, intent)).toEqual({});
+    });
+
+    it('does not accept unsupported Create reply/thread parameters', () => {
+      const svc = createInstance();
+      const intent = serviceDefinition.INTENT_DEFINITIONS.find(d => d.type === 'Create');
+      expect(
+        svc.sanitizeParams(
+          {
+            content: 'hello',
+            inReplyTo: 'https://remote.example/notes/parent',
+            audience: 'https://www.w3.org/ns/activitystreams#Public',
+            context: 'https://remote.example/threads/1'
+          },
+          intent
+        )
+      ).toEqual({ content: 'hello' });
     });
   });
 
@@ -167,9 +199,12 @@ describe('fep-3b86-activity-intents', () => {
       expect(result.error).toMatch(/Invalid URL/);
     });
 
-    it('throws on an unknown intent type', () => {
+    it('throws on an unknown or deliberately unsupported intent type', () => {
       const svc = createInstance();
       expect(() => svc.runIntent(makeCtx({}), 'NoSuch')).toThrow(/unknown intent type/);
+      expect(() => svc.runIntent(makeCtx({ object: 'https://remote.example/notes/1' }), 'Like')).toThrow(
+        /unknown intent type/
+      );
     });
 
     it('does not propagate workflow params for the Object intent', () => {
