@@ -65,7 +65,7 @@ module.exports = {
 
     const aliases = {};
     for (const intent of this.settings.intents) {
-      aliases[`GET /intents/${intent.type.toLowerCase()}`] =
+      aliases[`GET /${intent.type.toLowerCase()}`] =
         `fep-3b86-activity-intents.handle${intent.type}`;
     }
 
@@ -142,6 +142,7 @@ module.exports = {
       ]);
       for (const [key, value] of Object.entries(raw)) {
         if (typeof value !== 'string') continue;
+        if (value.length === 0) continue;
         if (value.length > MAX_PARAM_LENGTH) continue;
         if (!SAFE_PARAM_KEYS.has(key)) continue;
         if (!allowed.has(key)) continue;
