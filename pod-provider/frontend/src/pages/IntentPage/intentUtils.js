@@ -62,16 +62,24 @@ function followersCollection(actor) {
   return `${actor.replace(/\/+$/, '')}/followers`;
 }
 
-export function buildIntentActivity(type, params, actor) {
+export function buildIntentActivity(type, params, actor, options = {}) {
   if (!actor || typeof actor !== 'string') throw new Error('Authenticated outbox owner is unavailable');
   if (type === 'Object') return null;
 
   if (type === 'Follow') {
+    const recipient = options.followRecipient;
+    if (!isAbsoluteHttpUrl(recipient)) {
+      throw new Error('Follow target has not been resolved to a deliverable actor');
+    }
     return {
       type: 'Follow',
       actor,
+      // Keep the requested followable resource as the semantic Follow object.
       object: params.object,
-      to: params.object
+      // SemApps recipient discovery needs the owning actor here. For an actor
+      // target this is the same URI; for a Note/other followable object it is
+      // the attributedTo actor resolved by the backend followable service.
+      to: recipient
     };
   }
 
