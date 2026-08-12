@@ -1,20 +1,18 @@
 const CLOSE_TOKEN = '(close)';
 const MAX_PARAM_LENGTH = 4096;
-const INTENT_TYPES = new Set(['Follow', 'Like', 'Announce', 'Create', 'Flag', 'Block', 'Object']);
-const URL_PARAMS = new Set(['object', 'inReplyTo', 'attachment', 'tag', 'audience', 'context', 'describes']);
+const PUBLIC_URI = 'https://www.w3.org/ns/activitystreams#Public';
+const INTENT_TYPES = new Set(['Follow', 'Announce', 'Create', 'Object']);
+const URL_PARAMS = new Set(['object', 'attachment', 'tag', 'describes']);
 const CREATE_PARAMS = new Set([
   'type',
   'name',
   'summary',
   'content',
-  'inReplyTo',
   'attachment',
   'tag',
   'startTime',
   'endTime',
-  'describes',
-  'audience',
-  'context'
+  'describes'
 ]);
 
 export function isAbsoluteHttpUrl(value) {
@@ -37,6 +35,7 @@ export function parseIntentSearch(type, searchParams) {
   const params = {};
   for (const [key, value] of searchParams.entries()) {
     if (value.length > MAX_PARAM_LENGTH) return { ok: false, error: `Parameter "${key}" is too long` };
+    if (value.length === 0) continue;
     if (key === 'on-success' || key === 'on-cancel') {
       if (value !== CLOSE_TOKEN && !isAbsoluteHttpUrl(value)) {
         return { ok: false, error: `Invalid ${key} workflow target` };
@@ -59,9 +58,27 @@ export function parseIntentSearch(type, searchParams) {
   return { ok: true, params };
 }
 
+function followersCollection(actor) {
+  return `${actor.replace(/\/+$/, '')}/followers`;
+}
+
 export function buildIntentActivity(type, params, actor) {
   if (!actor || typeof actor !== 'string') throw new Error('Authenticated outbox owner is unavailable');
   if (type === 'Object') return null;
+
+  if (type === 'Follow') {
+    return {
+      type: 'Follow',
+      actor,
+      object: params.object,
+      to: params.object
+    };
+  }
+
+  const publicRecipients = {
+    to: PUBLIC_URI,
+    cc: [followersCollection(actor)]
+  };
 
   if (type === 'Create') {
     const object = { type: params.type || 'Note' };
@@ -69,10 +86,24 @@ export function buildIntentActivity(type, params, actor) {
       if (key === 'type') continue;
       if (params[key] !== undefined && params[key] !== '') object[key] = params[key];
     }
-    return { type: 'Create', actor, object };
+    return {
+      type: 'Create',
+      actor,
+      object,
+      ...publicRecipients
+    };
   }
 
-  return { type, actor, object: params.object };
+  if (type === 'Announce') {
+    return {
+      type: 'Announce',
+      actor,
+      object: params.object,
+      ...publicRecipients
+    };
+  }
+
+  throw new Error(`Unsupported executable Activity Intent: ${type}`);
 }
 
 export function getWorkflowAction(params, outcome) {
@@ -84,4 +115,4 @@ export function getWorkflowAction(params, outcome) {
   return { kind: 'none' };
 }
 
-export { CLOSE_TOKEN, MAX_PARAM_LENGTH };
+export { CLOSE_TOKEN, MAX_PARAM_LENGTH, PUBLIC_URI };
