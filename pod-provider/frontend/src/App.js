@@ -29,6 +29,7 @@ import AuthorizePage from './pages/AuthorizePage/AuthorizePage';
 import UserPage from './pages/UserPage';
 import RedirectPage from './pages/RedirectPage';
 import InvitePage from './pages/InvitePage/InvitePage';
+import IntentPage from './pages/IntentPage/IntentPage';
 import ApplicationsPage from './pages/ApplicationsPage/ApplicationsPage';
 import LoginPage from './pages/LoginPage';
 import NetworkPage from './pages/NetworkPage/NetworkPage';
@@ -90,6 +91,7 @@ const App = () => (
           <Route path="/initialize" element={<ProfileCreatePage />} />
           <Route path="/authorize" element={<AuthorizePage />} />
           <Route path="/invite/:capability" element={<InvitePage />} />
+          <Route path="/i/:intentType" element={<IntentPage />} />
           <Route path="/groups">
             <Route path="create" element={<CreateGroupPage />} />
           </Route>
