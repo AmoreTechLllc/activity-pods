@@ -20,12 +20,12 @@ describe('APDM Phase 5 durable handoff configuration', () => {
     expect(config.ACTIVITYPUB_DELIVERY_HANDOFF_URL).toBe('http://fedify-sidecar:8080/webhook/outbox');
   });
 
-  test('explicit durable handoff URL overrides the APDM default', () => {
+  test('explicit durable handoff URL overrides the APDM default and legacy origin', () => {
     process.env.SIDECAR_WEBHOOK_URL = 'http://legacy-sidecar:8080';
-    process.env.SIDECAR_DELIVERY_HANDOFF_URL = 'http://fedify-sidecar:8080/webhook/outbox';
+    process.env.SIDECAR_DELIVERY_HANDOFF_URL = 'http://handoff-sidecar:9080/custom/outbox';
     jest.resetModules();
 
     const config = require('../config/config');
-    expect(config.ACTIVITYPUB_DELIVERY_HANDOFF_URL).toBe('http://fedify-sidecar:8080/webhook/outbox');
+    expect(config.ACTIVITYPUB_DELIVERY_HANDOFF_URL).toBe('http://handoff-sidecar:9080/custom/outbox');
   });
 });
