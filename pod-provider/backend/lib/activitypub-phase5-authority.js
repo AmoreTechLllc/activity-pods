@@ -1,6 +1,7 @@
 'use strict';
 
 const REMOTE_DELIVERY_MODES = new Set(['native', 'external']);
+const EXPLICIT_PREVIEW_ENVIRONMENTS = new Set(['test', 'development']);
 
 function normalizeMode(value) {
   const normalized = value === undefined || value === null ? 'native' : String(value).trim().toLowerCase();
@@ -15,13 +16,14 @@ function normalizeMode(value) {
  * existing Phase 2-4 interception/handoff machinery.
  *
  * `native` is deliberately dominant: changing only REMOTE_DELIVERY_MODE back
- * to native must restore the SemApps rollback path even if stale external
- * opt-in flags remain in the environment.
+ * to native restores the SemApps rollback path even if stale external opt-in
+ * flags remain in the environment.
  *
- * Preview is retained only for non-production controlled migration tests.
- * Production external authority always requires the explicit cutover flag.
- * Preview and production authority remain mutually exclusive so the active
- * contract is unambiguous.
+ * Preview is retained only when the runtime explicitly identifies itself as a
+ * recognized non-production environment. Missing/unknown NODE_ENV values are
+ * production-like for authorization purposes and therefore require the Phase
+ * 5 authority cutover flag. This matches the shipped launcher, which may omit
+ * NODE_ENV entirely.
  */
 function resolvePhase5RemoteAuthority({
   remoteDeliveryMode,
@@ -32,7 +34,8 @@ function resolvePhase5RemoteAuthority({
   const mode = normalizeMode(remoteDeliveryMode);
   const preview = allowExternalDeliveryPreview === true;
   const authority = externalAuthorityCutover === true;
-  const production = String(nodeEnv || '').trim().toLowerCase() === 'production';
+  const normalizedNodeEnv = String(nodeEnv || '').trim().toLowerCase();
+  const previewEnvironment = EXPLICIT_PREVIEW_ENVIRONMENTS.has(normalizedNodeEnv);
 
   // Emergency rollback is intentionally one switch: native wins over stale
   // external flags and restores the original SemApps remote executor.
@@ -51,13 +54,15 @@ function resolvePhase5RemoteAuthority({
     );
   }
 
-  if (production && !authority) {
+  // Unset, production, staging, and any unknown environment are fail-closed:
+  // preview alone never grants production authority.
+  if (!previewEnvironment && !authority) {
     throw new Error(
-      'Production ActivityPub external remote delivery requires the explicit Phase 5 authority-cutover flag.'
+      'ActivityPub external remote delivery outside an explicit test/development environment requires the Phase 5 authority-cutover flag.'
     );
   }
 
-  if (!production && !preview && !authority) {
+  if (previewEnvironment && !preview && !authority) {
     throw new Error(
       'ActivityPub external remote delivery requires either the controlled preview flag or the explicit Phase 5 authority-cutover flag.'
     );
@@ -65,7 +70,7 @@ function resolvePhase5RemoteAuthority({
 
   return {
     mode,
-    preview: preview && !production,
+    preview: preview && previewEnvironment,
     authority,
     compatibilityPreviewGuard: true
   };
