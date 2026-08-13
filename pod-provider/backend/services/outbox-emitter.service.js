@@ -83,10 +83,11 @@ module.exports = {
     },
 
     /**
-     * APDM Phase 3 external-preview routing path. The delivery plan contains
-     * concrete recipients derived from SemApps' already-expanded partition.
+     * APDM Phase 5 external-authority committed-event path. The authoritative
+     * Delivery Plan has already been durably queued before this event fires;
+     * this handler restores local indexing/observability only.
      */
-    'activitypub.outbox.remote-delivery.planned': {
+    'activitypub.outbox.remote-delivery.handoff-queued': {
       async handler(ctx) {
         if (this.settings.remoteDeliveryMode !== 'external') return;
 
@@ -118,8 +119,9 @@ module.exports = {
           deliveryPlanIntentId: deliveryPlan.intentId
         });
 
+        // Remote federation authority is the already-completed durable handoff.
+        // Do not POST this committed-event metadata to the sidecar a second time.
         ctx.emit('outbox.event.ready', event);
-        await this.deliverToSidecar(ctx, event);
       }
     }
   },
