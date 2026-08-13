@@ -77,7 +77,7 @@ function createService(mode) {
   return service;
 }
 
-describe('APDM Phase 3 outbox emitter Delivery Plan authority', () => {
+describe('APDM Phase 5 outbox emitter Delivery Plan authority', () => {
   test('external mode ignores raw outbox.posted before any legacy target resolution', async () => {
     const service = createService('external');
     const ctx = {
@@ -105,7 +105,7 @@ describe('APDM Phase 3 outbox emitter Delivery Plan authority', () => {
     const ctx = {
       params: { activity },
       meta: { podDataset: 'alice' },
-      call: jest.fn(async (action) => {
+      call: jest.fn(async action => {
         if (action === 'outbox-emitter.resolveDeliveryTargets') {
           return {
             targets: [
@@ -140,7 +140,7 @@ describe('APDM Phase 3 outbox emitter Delivery Plan authority', () => {
     expect(committed.meta.deliveryPlanIntentId).toBeUndefined();
   });
 
-  test('external planned event consumes only validated concrete remote targets', async () => {
+  test('external post-durable event consumes only validated concrete remote targets', async () => {
     const service = createService('external');
     const activity = createActivity();
     const deliveryPlan = createPlan(activity);
@@ -151,10 +151,10 @@ describe('APDM Phase 3 outbox emitter Delivery Plan authority', () => {
       emit: jest.fn()
     };
 
-    await emitterSchema.events['activitypub.outbox.remote-delivery.planned'].handler.call(service, ctx);
+    await emitterSchema.events['activitypub.outbox.remote-delivery.handoff-queued'].handler.call(service, ctx);
 
     expect(ctx.call).not.toHaveBeenCalled();
-    expect(service.deliverToSidecar).toHaveBeenCalledTimes(1);
+    expect(service.deliverToSidecar).not.toHaveBeenCalled();
     expect(ctx.emit).toHaveBeenCalledTimes(1);
     const [eventName, committed] = ctx.emit.mock.calls[0];
     expect(eventName).toBe('outbox.event.ready');
@@ -170,7 +170,7 @@ describe('APDM Phase 3 outbox emitter Delivery Plan authority', () => {
     expect(committed.meta.visibility).toBe('public');
   });
 
-  test('planned event rejects an invalid Delivery Plan before sidecar delivery', async () => {
+  test('post-durable event rejects an invalid Delivery Plan before local readiness', async () => {
     const service = createService('external');
     const activity = createActivity();
     const invalidPlan = {
@@ -190,14 +190,14 @@ describe('APDM Phase 3 outbox emitter Delivery Plan authority', () => {
     };
 
     await expect(
-      emitterSchema.events['activitypub.outbox.remote-delivery.planned'].handler.call(service, ctx)
+      emitterSchema.events['activitypub.outbox.remote-delivery.handoff-queued'].handler.call(service, ctx)
     ).rejects.toThrow(/Refusing invalid ap\.delivery-plan\.v1 payload/u);
 
     expect(ctx.emit).not.toHaveBeenCalled();
     expect(service.deliverToSidecar).not.toHaveBeenCalled();
   });
 
-  test('planned event rejects activity identity mismatches', async () => {
+  test('post-durable event rejects activity identity mismatches', async () => {
     const service = createService('external');
     const activity = createActivity();
     const deliveryPlan = createPlan(activity);
@@ -211,14 +211,14 @@ describe('APDM Phase 3 outbox emitter Delivery Plan authority', () => {
     };
 
     await expect(
-      emitterSchema.events['activitypub.outbox.remote-delivery.planned'].handler.call(service, ctx)
+      emitterSchema.events['activitypub.outbox.remote-delivery.handoff-queued'].handler.call(service, ctx)
     ).rejects.toThrow(/activityId does not match/u);
 
     expect(ctx.emit).not.toHaveBeenCalled();
     expect(service.deliverToSidecar).not.toHaveBeenCalled();
   });
 
-  test('native mode ignores the Phase 3 planned event', async () => {
+  test('native mode ignores the external post-durable event', async () => {
     const service = createService('native');
     const activity = createActivity();
     const ctx = {
@@ -226,7 +226,7 @@ describe('APDM Phase 3 outbox emitter Delivery Plan authority', () => {
       emit: jest.fn()
     };
 
-    await emitterSchema.events['activitypub.outbox.remote-delivery.planned'].handler.call(service, ctx);
+    await emitterSchema.events['activitypub.outbox.remote-delivery.handoff-queued'].handler.call(service, ctx);
 
     expect(ctx.emit).not.toHaveBeenCalled();
     expect(service.deliverToSidecar).not.toHaveBeenCalled();
