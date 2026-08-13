@@ -1,22 +1,21 @@
 const CONFIG = require('../../config/config');
 const {
-  createActivityPubServiceWithDeliveryStrategy,
-  normalizeRemoteDeliveryMode
+  createActivityPubServiceWithDeliveryStrategy
 } = require('../../lib/activitypub-service-with-delivery-strategy');
+const { resolvePhase5RemoteAuthority } = require('../../lib/activitypub-phase5-authority');
 
-const remoteDeliveryMode = normalizeRemoteDeliveryMode(CONFIG.ACTIVITYPUB_REMOTE_DELIVERY_MODE);
-
-if (remoteDeliveryMode === 'external' && !CONFIG.ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW) {
-  throw new Error(
-    'SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=external remains preview-only during APDM Phase 4. ' +
-      'Set SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=true only in controlled migration environments; ' +
-      'production remote-authority cutover is APDM Phase 5.'
-  );
-}
+const authorityState = resolvePhase5RemoteAuthority({
+  remoteDeliveryMode: CONFIG.ACTIVITYPUB_REMOTE_DELIVERY_MODE,
+  allowExternalDeliveryPreview: CONFIG.ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW,
+  externalAuthorityCutover: CONFIG.ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER
+});
 
 module.exports = createActivityPubServiceWithDeliveryStrategy({
-  remoteDeliveryMode,
-  allowExternalDeliveryPreview: CONFIG.ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW,
+  remoteDeliveryMode: authorityState.mode,
+  // Phase 2-4 adapter compatibility latch. In production authority mode this is
+  // enabled only after resolvePhase5RemoteAuthority has validated the explicit
+  // cutover flag and rejected ambiguous preview/native combinations.
+  allowExternalDeliveryPreview: authorityState.compatibilityPreviewGuard,
   settings: {
     baseUri: CONFIG.BASE_URL,
     podProvider: true,
