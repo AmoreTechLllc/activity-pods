@@ -14,31 +14,29 @@ function normalizeMode(value) {
  * Resolve the APDM Phase 5 remote-authority state without weakening the
  * existing Phase 2-4 interception/handoff machinery.
  *
- * Preview is retained for controlled migration tests. Production authority is
- * a separate explicit switch. They are mutually exclusive so an operator can
- * always tell which safety contract is active from configuration alone.
+ * `native` is deliberately dominant: changing only REMOTE_DELIVERY_MODE back
+ * to native must restore the SemApps rollback path even if stale external
+ * opt-in flags remain in the environment.
  *
- * The returned compatibilityPreviewGuard is intentionally internal: the
- * Phase 2-4 adapter still uses the old preview boolean as its final opt-in
- * latch. During Phase 5 authority mode we satisfy that latch only after this
- * stronger cutover decision has succeeded. Phase 6 may remove that temporary
- * compatibility seam after rollback/parity proof is complete.
+ * Preview is retained only for non-production controlled migration tests.
+ * Production external authority always requires the explicit cutover flag.
+ * Preview and production authority remain mutually exclusive so the active
+ * contract is unambiguous.
  */
 function resolvePhase5RemoteAuthority({
   remoteDeliveryMode,
   allowExternalDeliveryPreview = false,
-  externalAuthorityCutover = false
+  externalAuthorityCutover = false,
+  nodeEnv = process.env.NODE_ENV
 } = {}) {
   const mode = normalizeMode(remoteDeliveryMode);
   const preview = allowExternalDeliveryPreview === true;
   const authority = externalAuthorityCutover === true;
+  const production = String(nodeEnv || '').trim().toLowerCase() === 'production';
 
+  // Emergency rollback is intentionally one switch: native wins over stale
+  // external flags and restores the original SemApps remote executor.
   if (mode === 'native') {
-    if (preview || authority) {
-      throw new Error(
-        'ActivityPub native remote delivery must not carry external preview or Phase 5 authority-cutover flags.'
-      );
-    }
     return {
       mode,
       preview: false,
@@ -52,7 +50,14 @@ function resolvePhase5RemoteAuthority({
       'ActivityPub external preview and Phase 5 production authority cutover are mutually exclusive.'
     );
   }
-  if (!preview && !authority) {
+
+  if (production && !authority) {
+    throw new Error(
+      'Production ActivityPub external remote delivery requires the explicit Phase 5 authority-cutover flag.'
+    );
+  }
+
+  if (!production && !preview && !authority) {
     throw new Error(
       'ActivityPub external remote delivery requires either the controlled preview flag or the explicit Phase 5 authority-cutover flag.'
     );
@@ -60,7 +65,7 @@ function resolvePhase5RemoteAuthority({
 
   return {
     mode,
-    preview,
+    preview: preview && !production,
     authority,
     compatibilityPreviewGuard: true
   };
