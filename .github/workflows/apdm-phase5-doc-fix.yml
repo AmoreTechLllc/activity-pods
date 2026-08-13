@@ -1,0 +1,65 @@
+name: APDM Phase 5 Runbook Patch
+
+on:
+  push:
+    branches: [apdm/phase-5-remote-authority-cutover]
+    paths:
+      - '.github/workflows/apdm-phase5-doc-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: apdm/phase-5-remote-authority-cutover
+      - name: Patch exact stale APDM runbook passages
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('docs/architecture/activitypub-delivery-migration.md')
+          text = path.read_text()
+          old_cutover = '''```text
+          SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=external
+          SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=false
+          SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER=true
+          ```'''.replace('          ', '')
+          new_cutover = '''```text
+          SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=external
+          SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=false
+          SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER=true
+          SEMAPPS_QUEUE_SERVICE_URL=redis://<redis-host>:6379/<queue-db>
+          SIDECAR_DELIVERY_HANDOFF_URL=http://fedify-sidecar:8080/webhook/outbox
+          SIDECAR_TOKEN=<shared-internal-token>
+          ```
+
+          `SIDECAR_WEBHOOK_URL` is a legacy/transitional sidecar-origin setting and is deliberately not used as the APDM durable handoff fallback. `SIDECAR_DELIVERY_HANDOFF_URL` must name the exact durable acceptance endpoint. External mode also fails closed without the queue service, authenticated handoff token, valid handoff URL, and bounded handoff timeout.'''.replace('          ', '')
+          old_event = '''After the SemApps handler returns, the adapter emits `activitypub.outbox.remote-delivery.planned` containing:
+
+          - the resulting Activity;
+          - the de-duplicated remote actor URIs captured from the would-have-been native jobs;
+          - `suppressedNativeRemotePostCount`;
+          - `deliveryMode: external`.
+
+          That proof surface feeds the later authoritative planning/handoff layers; it is not itself the durable acknowledgement. Phase 3 supplies authoritative expanded recipient planning and Phase 4 supplies the durable idempotent cross-repo handoff.'''.replace('          ', '')
+          new_event = '''After the SemApps handler returns, the adapter validates the captured local/remote recipients, builds the authoritative `ap.delivery-plan.v1`, and awaits the Phase 4 durable Bull handoff enqueuer. Only after that enqueue succeeds does it emit `activitypub.outbox.remote-delivery.handoff-queued` for observability.
+
+          The post-enqueue event contains `activity`, `deliveryPlan`, `remoteRecipients`, `localRecipients`, `suppressedNativeRemotePostCount`, `deliveryMode: external`, and `durableHandoffQueued: true`.
+
+          The event is not a second delivery path or the durable acceptance mechanism: the Bull handoff is already queued before the event exists.'''.replace('          ', '')
+          if old_cutover not in text:
+              raise SystemExit('cutover passage not found')
+          if old_event not in text:
+              raise SystemExit('event passage not found')
+          path.write_text(text.replace(old_cutover, new_cutover).replace(old_event, new_event))
+      - name: Commit runbook correction and remove one-shot workflow
+        run: |
+          rm .github/workflows/apdm-phase5-doc-fix.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/architecture/activitypub-delivery-migration.md .github/workflows/apdm-phase5-doc-fix.yml
+          git commit -m 'docs(apdm): correct durable cutover proof surface'
+          git push origin HEAD:apdm/phase-5-remote-authority-cutover
