@@ -174,7 +174,12 @@ The preview and production-authority flags are mutually exclusive. A production/
 SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=external
 SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=false
 SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER=true
+SEMAPPS_QUEUE_SERVICE_URL=redis://<redis-host>:6379/<queue-db>
+SIDECAR_DELIVERY_HANDOFF_URL=http://fedify-sidecar:8080/webhook/outbox
+SIDECAR_TOKEN=<shared-internal-token>
 ```
+
+`SIDECAR_WEBHOOK_URL` is a legacy/transitional sidecar-origin setting and is deliberately not used as the APDM durable handoff fallback. `SIDECAR_DELIVERY_HANDOFF_URL` must name the exact durable acceptance endpoint. External mode also fails closed without the queue service, authenticated handoff token, valid handoff URL, and bounded handoff timeout.
 
 A controlled local/test preview uses:
 
@@ -199,14 +204,11 @@ Only that request-local context overrides `createJob`:
 
 This matters for concurrency: simultaneous posts cannot accidentally borrow one another's temporary queue interception.
 
-After the SemApps handler returns, the adapter emits `activitypub.outbox.remote-delivery.planned` containing:
+After the SemApps handler returns, the adapter validates the captured local/remote recipients, builds the authoritative `ap.delivery-plan.v1`, and awaits the Phase 4 durable Bull handoff enqueuer. Only after that enqueue succeeds does it emit `activitypub.outbox.remote-delivery.handoff-queued` for observability.
 
-- the resulting Activity;
-- the de-duplicated remote actor URIs captured from the would-have-been native jobs;
-- `suppressedNativeRemotePostCount`;
-- `deliveryMode: external`.
+The post-enqueue event contains `activity`, `deliveryPlan`, `remoteRecipients`, `localRecipients`, `suppressedNativeRemotePostCount`, `deliveryMode: external`, and `durableHandoffQueued: true`.
 
-That proof surface feeds the later authoritative planning/handoff layers; it is not itself the durable acknowledgement. Phase 3 supplies authoritative expanded recipient planning and Phase 4 supplies the durable idempotent cross-repo handoff.
+The event is not a second delivery path or the durable acceptance mechanism: the Bull handoff is already queued before the event exists.
 
 ### Phase 5 production cutover and authority split
 
