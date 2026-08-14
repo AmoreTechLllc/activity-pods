@@ -14,7 +14,7 @@ on:
       provision_concurrency:
         description: Maximum concurrent benchmark-account signups
         required: false
-        default: '12'
+        default: '4'
   push:
     branches:
       - apdm/phase-8-real-measurement-runner
@@ -47,7 +47,7 @@ jobs:
       APDM_P8_RUN_ID: '${{ github.run_id }}-${{ github.run_attempt }}'
       APDM_P8_SAMPLES: "${{ github.event.inputs.samples || '3' }}"
       APDM_P8_WARMUPS: "${{ github.event.inputs.warmups || '1' }}"
-      APDM_P8_PROVISION_CONCURRENCY: "${{ github.event.inputs.provision_concurrency || '12' }}"
+      APDM_P8_PROVISION_CONCURRENCY: "${{ github.event.inputs.provision_concurrency || '4' }}"
 
     steps:
       - name: Checkout repository
