@@ -462,7 +462,7 @@ function createOutboxServiceSchema({
         params: { deliveryPlan: { type: 'object' } },
         async handler(ctx) {
           assertExternalDeliveryConfiguration(this.settings);
-          const intentId = await enqueueDeliveryHandoff(this, ctx.params.deliveryPlan);
+          const intentId = await enqueueHandoff(this, ctx.params.deliveryPlan);
           return { intentId };
         }
       }

@@ -115,9 +115,9 @@ Those belong to `outlaw-dame/mastopod-federation-architecture` / Fedify sidecar.
 
 - `APDM-P0-A` — baseline and ownership documentation only. **Complete.**
 - `APDM-P1-A` — Delivery Plan v1 producer contract and fixtures. **Complete.**
-- `APDM-P2-A` — pre-`remotePost` native/external strategy seam. **In progress.**
-- `APDM-P3-A` — authoritative expanded local/remote target planning.
-- `APDM-P4-A` — durable/idempotent handoff producer.
+- `APDM-P2-A` — pre-`remotePost` native/external strategy seam. **Complete.**
+- `APDM-P3-A` — authoritative expanded local/remote target planning. **Complete.**
+- `APDM-P4-A` — durable/idempotent handoff producer. **Complete.**
 - `APDM-P5-A` — guarded external-authority cutover and rollback proof.
 - `APDM-P6-A` — remove transitional duplicate target inference.
 - `APDM-P7-A` — remove duplicate local account lookup.
@@ -132,7 +132,7 @@ Those belong to `outlaw-dame/mastopod-federation-architecture` / Fedify sidecar.
 
 ## Phase 2 implementation — pre-`remotePost` strategy seam
 
-Phase 2 introduces an ActivityPods-owned adapter at `pod-provider/backend/lib/activitypub-service-with-delivery-strategy.js`.
+Phase 2 introduced an ActivityPods-owned adapter at `pod-provider/backend/lib/activitypub-service-with-delivery-strategy.js`.
 
 ### Why an adapter is required
 
@@ -156,16 +156,43 @@ This protects against a silent SemApps upgrade changing:
 
 A SemApps upgrade therefore requires explicit review of this adapter rather than silently inheriting an incompatible deep import.
 
-### Delivery modes
+### Delivery modes and Phase 5 authority
 
 `SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE` accepts:
 
-- `native` — default. Exact SemApps remote job creation continues unchanged.
-- `external` — Phase 2 preview only.
+- `native` — default and rollback mode. Exact SemApps remote job creation continues unchanged.
+- `external` — suppresses SemApps `remotePost` jobs and uses the hardened Delivery Plan + durable sidecar handoff path, but only after one of the explicit authorization states below succeeds.
 
-`external` is rejected unless `SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=true` is also set. That second flag is deliberately awkward: it prevents an operator from interpreting Phase 2 as the production cutover.
+There are two distinct external authorization states:
 
-### How external preview suppresses native jobs
+1. **Controlled preview** — valid only when `NODE_ENV` is explicitly `test` or `development` and `SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=true`. This is not a production cutover mechanism.
+2. **Phase 5 production authority** — requires `SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER=true`. This requirement also applies when `NODE_ENV` is unset or has an unknown value such as `staging`; unknown environments fail closed rather than inheriting preview authority.
+
+The preview and production-authority flags are mutually exclusive. A production/production-like cutover should therefore use:
+
+```text
+SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=external
+SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=false
+SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER=true
+SEMAPPS_QUEUE_SERVICE_URL=redis://<redis-host>:6379/<queue-db>
+SIDECAR_DELIVERY_HANDOFF_URL=http://fedify-sidecar:8080/webhook/outbox
+SIDECAR_TOKEN=<shared-internal-token>
+```
+
+`SIDECAR_WEBHOOK_URL` is a legacy/transitional sidecar-origin setting and is deliberately not used as the APDM durable handoff fallback. `SIDECAR_DELIVERY_HANDOFF_URL` must name the exact durable acceptance endpoint. External mode also fails closed without the queue service, authenticated handoff token, valid handoff URL, and bounded handoff timeout.
+
+A controlled local/test preview uses:
+
+```text
+NODE_ENV=test
+SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=external
+SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=true
+SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER=false
+```
+
+Unset or unrecognized `NODE_ENV` values never make preview-only external delivery authoritative.
+
+### How external mode suppresses native jobs
 
 The wrapper invokes the exact SemApps outbox `post` handler with an isolated execution context created per request.
 
@@ -177,56 +204,63 @@ Only that request-local context overrides `createJob`:
 
 This matters for concurrency: simultaneous posts cannot accidentally borrow one another's temporary queue interception.
 
-After the SemApps handler returns, the adapter emits `activitypub.outbox.remote-delivery.planned` containing:
+After the SemApps handler returns, the adapter validates the captured local/remote recipients, builds the authoritative `ap.delivery-plan.v1`, and awaits the Phase 4 durable Bull handoff enqueuer. Only after that enqueue succeeds does it emit `activitypub.outbox.remote-delivery.handoff-queued` for observability.
 
-- the resulting Activity;
-- the de-duplicated remote actor URIs captured from the would-have-been native jobs;
-- `suppressedNativeRemotePostCount`;
-- `deliveryMode: external`.
+The post-enqueue event contains `activity`, `deliveryPlan`, `remoteRecipients`, `localRecipients`, `suppressedNativeRemotePostCount`, `deliveryMode: external`, and `durableHandoffQueued: true`.
 
-This event is a **Phase 2 proof surface only**. It is not the final durable cross-repo handoff and it must not be treated as acknowledgement that remote federation has been durably accepted.
+The event is not a second delivery path or the durable acceptance mechanism: the Bull handoff is already queued before the event exists.
 
-### What Phase 2 deliberately does not change
+### Phase 5 production cutover and authority split
 
-Phase 2 does not:
+When production authority is explicitly enabled, the same already-hardened Phase 2–4 execution seam is used rather than introducing a second delivery path:
 
-- make Fedify authoritative in production;
-- disable native delivery by default;
-- make `activitypub.outbox.posted` authoritative for routing;
-- solve the raw `/followers` gap in the current `outbox-emitter`;
-- create the durable `OutboxIntent` handoff;
-- optimize local delivery;
-- remove the existing sidecar emitter.
+1. SemApps still persists/processes the Activity and performs local Pod delivery.
+2. The request-local queue interception captures and suppresses every would-have-been native `remotePost` job.
+3. The authoritative expanded local/remote partition produces `ap.delivery-plan.v1`.
+4. The durable Bull handoff retries until the sidecar durably accepts the intent.
+5. The federation sidecar becomes the sole external ActivityPub HTTP executor for that external-mode request.
+6. User signing/key custody remains in ActivityPods; the sidecar consumes the internal signing boundary rather than taking custody of private keys.
 
-Those changes belong to later gated phases.
+Phase 5 does not remove the native implementation. Native remains a tested rollback path through the later stabilization/cleanup program.
 
-### Phase 2 rollback
+### Rollback
 
-Rollback is configuration-level while the adapter remains installed:
+Rollback remains deliberately one switch:
 
 ```text
 SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=native
 ```
 
-Native is also the default when the variable is absent.
+`native` is also the default when the variable is absent. In native mode, stale values of either external opt-in flag are ignored for authority selection; they cannot turn an emergency rollback into a startup outage. Operators should still clean stale flags after service restoration, but doing so is not a prerequisite to restoring SemApps native remote delivery.
 
-If the adapter itself must be removed, `services/core/activitypub.js` can return to the stock `ActivityPubService` mixin because Phase 2 has not changed persisted Activity data or queue schemas.
+If the adapter itself must eventually be removed, that is a later stabilization/cleanup decision after the Phase 15/16 gates, not part of the Phase 5 cutover.
 
 ### Phase 2 exit criteria
 
-`APDM-P2-A` is complete only when all of the following are verified:
+`APDM-P2-A` established the underlying seam with all of the following verified:
 
 1. native mode delegates to SemApps and creates native `remotePost` work as before;
 2. external preview mode creates **zero** native `remotePost` jobs;
 3. unrelated queue work still delegates normally;
 4. local delivery remains the exact SemApps local path;
 5. simultaneous external-preview requests do not mutate/share queue interception state;
-6. external mode fails closed without the explicit preview guard;
+6. external mode fails closed without an explicit authorization state;
 7. SemApps package drift from 1.1.4 fails fast;
 8. backend CI and relevant tests pass;
 9. no substantive review comments remain.
 
-Phase 3 must not begin before this gate is closed.
+### Phase 5 ActivityPods exit criteria
+
+`APDM-P5-A` is complete only when:
+
+1. production external authority requires `SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER=true`, including when `NODE_ENV` is unset or unknown;
+2. preview-only external delivery is limited to explicit `test`/`development` runtimes;
+3. production authority and preview cannot be enabled together;
+4. external authority reuses the proven Phase 2–4 path and produces zero native `remotePost` jobs;
+5. the durable Delivery Plan handoff remains the only external execution input;
+6. changing only `SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=native` deterministically restores the native executor;
+7. exact-head backend checks and fresh review are clean;
+8. the paired federation Phase 5 executor/security/interoperability gate is also complete before Phase 5 is declared PASS cross-repository.
 
 ## Non-negotiable local-delivery rule
 

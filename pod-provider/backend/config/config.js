@@ -34,8 +34,14 @@ module.exports = {
   ACTIVITYPUB_REMOTE_DELIVERY_MODE: process.env.SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native',
   ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW:
     process.env.SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW === 'true',
+  ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER:
+    process.env.SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER === 'true',
+  // The durable APDM handoff is intentionally isolated from the legacy
+  // SIDECAR_WEBHOOK_URL. That older setting may point at the sidecar origin
+  // for transitional emitters, while Phase 4/5 requires the exact durable
+  // acceptance endpoint.
   ACTIVITYPUB_DELIVERY_HANDOFF_URL:
-    process.env.SIDECAR_DELIVERY_HANDOFF_URL || process.env.SIDECAR_WEBHOOK_URL || 'http://fedify-sidecar:8080/webhook/outbox',
+    process.env.SIDECAR_DELIVERY_HANDOFF_URL || 'http://fedify-sidecar:8080/webhook/outbox',
   ACTIVITYPUB_DELIVERY_HANDOFF_TOKEN: process.env.SIDECAR_TOKEN || '',
   ACTIVITYPUB_DELIVERY_HANDOFF_TIMEOUT_MS: Number(process.env.SIDECAR_DELIVERY_HANDOFF_TIMEOUT_MS) || 5000,
   ACTIVITYPUB_DELIVERY_RECONCILIATION_INTERVAL_MS:
