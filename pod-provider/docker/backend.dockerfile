@@ -11,10 +11,13 @@ RUN yarn global add pm2
 
 ADD docker/ecosystem.config.js /app/backend
 
-# Install packages first so that Docker doesn't run `yarn install` if the packages haven't changed
+# Install packages first so that Docker doesn't run `yarn install` if the packages haven't changed.
+# The Phase 7 postinstall patch must be present before dependency installation so production images
+# patch the exact pinned SemApps artifact and fail closed if its contract drifts.
 # See https://making.close.com/posts/reduce-docker-image-size
 ADD backend/package.json /app/backend
 ADD backend/yarn.lock /app/backend
+ADD backend/scripts/patch-semapps-activitypub-local-delivery.js /app/backend/scripts/patch-semapps-activitypub-local-delivery.js
 RUN yarn install && yarn cache clean
 
 ADD backend /app/backend
