@@ -10,6 +10,7 @@ const { performance } = require('perf_hooks');
 const DEFAULT_ROOT_ACTION = 'activitypub.outbox.post';
 const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'apdm-phase8-tier1.jsonl');
 const PATCH_MARKER = Symbol.for('semapps-atproto.apdm-p8.http-probe');
+const LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY = 'semapps-atproto.apdm-p8.local-delivery-observer';
 
 function normalizeUrl(value) {
   if (!value) return undefined;
@@ -52,6 +53,10 @@ function createTrace({ requestId, recipientCount, caseLabel }) {
     actionCounts: Object.create(null),
     categoryCounts: Object.create(null),
     actionDurationsMs: Object.create(null),
+    pendingDetachedLocalDeliveries: 0,
+    rootSettled: false,
+    rootError: undefined,
+    finalized: false,
     fuseki: {
       requestCount: 0,
       methodCounts: Object.create(null),
@@ -227,6 +232,51 @@ function createPhase8Tier1Instrumentation(options = {}) {
     fusekiUrls: [options.fusekiBase, options.sparqlEndpoint].filter(Boolean)
   });
 
+  function reportInstrumentationError(error) {
+    try {
+      onInstrumentationError(error);
+    } catch (_ignored) {
+      // Instrumentation callbacks must never block the real delivery path.
+    }
+  }
+
+  function maybeFinalizeTrace(trace) {
+    if (!trace || trace.finalized || !trace.rootSettled || trace.pendingDetachedLocalDeliveries > 0) return false;
+    trace.finalized = true;
+    try {
+      const record = finishTrace(trace, trace.rootError);
+      tryWriteJsonLine(outputPath, record, reportInstrumentationError);
+    } catch (error) {
+      reportInstrumentationError(error);
+    }
+    return true;
+  }
+
+  const observerKey = Symbol.for(LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY);
+  const previousLocalDeliveryObserver = globalThis[observerKey];
+  const localDeliveryObserver = (phase, _activity, error) => {
+    const trace = storage.getStore();
+    if (!trace) return;
+
+    if (phase === 'start') {
+      trace.pendingDetachedLocalDeliveries += 1;
+      return;
+    }
+
+    if (phase === 'finish') {
+      if (error) {
+        trace.errors.push({
+          source: 'detached-local-delivery',
+          name: error.name || 'Error',
+          message: error.message || String(error)
+        });
+      }
+      trace.pendingDetachedLocalDeliveries = Math.max(0, trace.pendingDetachedLocalDeliveries - 1);
+      maybeFinalizeTrace(trace);
+    }
+  };
+  globalThis[observerKey] = localDeliveryObserver;
+
   const middleware = {
     name: 'APDMPhase8Tier1Instrumentation',
     localAction(next, action) {
@@ -244,11 +294,7 @@ function createPhase8Tier1Instrumentation(options = {}) {
               caseLabel
             });
           } catch (error) {
-            try {
-              onInstrumentationError(error);
-            } catch (_ignored) {
-              // Instrumentation callbacks must never block the real action.
-            }
+            reportInstrumentationError(error);
             return next(ctx);
           }
         }
@@ -278,23 +324,14 @@ function createPhase8Tier1Instrumentation(options = {}) {
 
         if (!isRoot) return invoke();
 
-        let rootError;
         try {
           return await storage.run(trace, invoke);
         } catch (error) {
-          rootError = error;
+          trace.rootError = error;
           throw error;
         } finally {
-          try {
-            const record = finishTrace(trace, rootError);
-            tryWriteJsonLine(outputPath, record, onInstrumentationError);
-          } catch (error) {
-            try {
-              onInstrumentationError(error);
-            } catch (_ignored) {
-              // Measurement finalization must never mask delivery success/failure.
-            }
-          }
+          trace.rootSettled = true;
+          maybeFinalizeTrace(trace);
         }
       };
     }
@@ -305,6 +342,10 @@ function createPhase8Tier1Instrumentation(options = {}) {
     outputPath,
     dispose() {
       restoreHttp();
+      if (globalThis[observerKey] === localDeliveryObserver) {
+        if (previousLocalDeliveryObserver === undefined) delete globalThis[observerKey];
+        else globalThis[observerKey] = previousLocalDeliveryObserver;
+      }
       storage.disable();
     }
   };
@@ -313,6 +354,7 @@ function createPhase8Tier1Instrumentation(options = {}) {
 module.exports = {
   DEFAULT_ROOT_ACTION,
   DEFAULT_OUTPUT,
+  LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY,
   classifyAction,
   createTrace,
   finishTrace,
