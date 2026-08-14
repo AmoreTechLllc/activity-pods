@@ -1,13 +1,19 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
 const {
   PATCH_MARKER,
   EXPECTED_VERSION,
+  LOCAL_CONTEXT_SYMBOL_KEY,
   findPackageRoot,
   locateOutboxSource,
   patchOutboxSource
 } = require('../scripts/patch-semapps-activitypub-local-delivery');
+const {
+  createActivityPubServiceWithDeliveryStrategy,
+  createOutboxPostHandler
+} = require('../lib/activitypub-service-with-delivery-strategy');
 
 function representativeOutboxSource() {
   return `
@@ -67,6 +73,14 @@ function createLocalPostHarness({ account } = {}) {
   };
 }
 
+function attachResolvedContext(activity, recipientUri, dataset) {
+  Object.defineProperty(activity, Symbol.for(LOCAL_CONTEXT_SYMBOL_KEY), {
+    value: new Map([[recipientUri, { dataset }]]),
+    configurable: true,
+    enumerable: false
+  });
+}
+
 describe('APDM Phase 7 SemApps local delivery patch', () => {
   test('published dependency is pinned to the version the patch was reviewed against', () => {
     const packageRoot = findPackageRoot();
@@ -74,19 +88,36 @@ describe('APDM Phase 7 SemApps local delivery patch', () => {
     expect(packageJson.version).toBe(EXPECTED_VERSION);
   });
 
-  test('installed outbox artifact is patched during dependency installation', () => {
+  test('production Docker image copies the lifecycle patcher before yarn install', () => {
+    const dockerfile = fs.readFileSync(path.resolve(__dirname, '../../docker/backend.dockerfile'), 'utf8');
+    const patcherCopy = dockerfile.indexOf('ADD backend/scripts/patch-semapps-activitypub-local-delivery.js');
+    const install = dockerfile.indexOf('RUN yarn install && yarn cache clean');
+
+    expect(patcherCopy).toBeGreaterThan(-1);
+    expect(install).toBeGreaterThan(patcherCopy);
+  });
+
+  test('installed outbox artifact is patched without changing the reviewed localPost dispatch shape', () => {
     const packageRoot = findPackageRoot();
     const outboxFile = locateOutboxSource(packageRoot);
     const source = fs.readFileSync(outboxFile, 'utf8');
 
     expect(source).toContain(PATCH_MARKER);
-    expect(source).toContain('this.localPost(localRecipients, activity, localRecipientContexts);');
-    expect(source).toContain('localRecipientContexts.has(recipientUri)');
+    expect(source).toContain(`Symbol.for('${LOCAL_CONTEXT_SYMBOL_KEY}')`);
+    expect(source).toContain('Object.defineProperty(activity, Symbol.for(');
+    expect(source).toContain('this.localPost(localRecipients, activity);');
+    expect(source).not.toContain('this.localPost(localRecipients, activity, localRecipientContexts);');
+    expect(source).toContain('localRecipientContexts instanceof Map && localRecipientContexts.has(recipientUri)');
+    expect(source).toContain('delete activityToPost[localRecipientContextKey]');
     expect(source).toContain("ctx.call('auth.account.findByWebId', { webId: recipientUri })");
     expect(source).toContain("this.broker.call('auth.account.findByWebId', { webId: recipientUri })");
   });
 
-  test('normal localPost path reuses resolved dataset with zero duplicate account lookups', async () => {
+  test('delivery-strategy startup guard accepts the installed Phase 7 outbox shape', () => {
+    expect(() => createActivityPubServiceWithDeliveryStrategy()).not.toThrow();
+  });
+
+  test('normal localPost path reuses resolved dataset with zero duplicate account lookups and removes private context', async () => {
     const localPost = loadInstalledLocalPost();
     const { service, calls, emitted } = createLocalPostHarness({
       account: { username: 'should-not-be-read' }
@@ -98,14 +129,16 @@ describe('APDM Phase 7 SemApps local delivery patch', () => {
       actor: 'https://pod.example/bob',
       object: 'https://pod.example/objects/1'
     };
-    const result = await localPost.call(
-      service,
-      [recipientUri],
-      activity,
-      new Map([[recipientUri, { dataset: 'alice-dataset' }]])
-    );
+    attachResolvedContext(activity, recipientUri, 'alice-dataset');
+    const contextSymbol = Symbol.for(LOCAL_CONTEXT_SYMBOL_KEY);
+
+    expect(Object.getOwnPropertyDescriptor(activity, contextSymbol).enumerable).toBe(false);
+    expect(JSON.stringify(activity)).not.toContain(LOCAL_CONTEXT_SYMBOL_KEY);
+
+    const result = await localPost.call(service, [recipientUri], activity);
 
     expect(result).toEqual({ success: [recipientUri], failures: [] });
+    expect(activity[contextSymbol]).toBeUndefined();
     expect(calls.filter(call => call.action === 'auth.account.findByWebId')).toHaveLength(0);
 
     const datasetBoundCalls = calls.filter(call =>
@@ -136,6 +169,50 @@ describe('APDM Phase 7 SemApps local delivery patch', () => {
     ]);
   });
 
+  test('external delivery interception preserves the same Activity-bound context without a third localPost argument', async () => {
+    const localPost = loadInstalledLocalPost();
+    const { service: localPostService, calls } = createLocalPostHarness({ account: { username: 'should-not-be-read' } });
+    const recipientUri = 'https://pod.example/alice';
+    const activity = {
+      id: 'https://pod.example/activities/external',
+      type: 'Create',
+      actor: 'https://pod.example/bob',
+      object: 'https://pod.example/objects/external'
+    };
+    attachResolvedContext(activity, recipientUri, 'alice-dataset');
+
+    const nativeLocalPost = jest.fn((...args) => localPost.call(localPostService, ...args));
+    const nativeHandler = async function nativePost() {
+      this.localPost([recipientUri], activity);
+      return activity;
+    };
+    const buildDeliveryPlan = jest.fn(async () => ({ intentId: 'phase-7-external-proof' }));
+    const enqueueHandoff = jest.fn(async () => 'phase-7-external-proof');
+    const wrapped = createOutboxPostHandler(nativeHandler, { buildDeliveryPlan, enqueueHandoff });
+    const service = {
+      settings: {
+        remoteDeliveryMode: 'external',
+        allowExternalDeliveryPreview: true,
+        podProvider: true,
+        queueServiceUrl: 'redis://queue.example:6379',
+        deliveryHandoffUrl: 'http://fedify-sidecar:8080/webhook/outbox',
+        deliveryHandoffToken: 'secret',
+        deliveryHandoffTimeoutMs: 1000
+      },
+      createJob: jest.fn(),
+      localPost: nativeLocalPost,
+      broker: { emit: jest.fn() }
+    };
+
+    await expect(wrapped.call(service, {})).resolves.toBe(activity);
+
+    expect(nativeLocalPost).toHaveBeenCalledTimes(1);
+    expect(nativeLocalPost).toHaveBeenCalledWith([recipientUri], activity);
+    expect(calls.filter(call => call.action === 'auth.account.findByWebId')).toHaveLength(0);
+    expect(calls.find(call => call.action === 'ldp.remote.store').params.dataset).toBe('alice-dataset');
+    expect(activity[Symbol.for(LOCAL_CONTEXT_SYMBOL_KEY)]).toBeUndefined();
+  });
+
   test('legacy direct localPost caller keeps original account lookup and dataset behavior', async () => {
     const localPost = loadInstalledLocalPost();
     const { service, calls } = createLocalPostHarness({ account: { username: 'alice-dataset' } });
@@ -164,13 +241,12 @@ describe('APDM Phase 7 SemApps local delivery patch', () => {
 
     expect(result.changed).toBe(true);
     expect(result.source).toContain(PATCH_MARKER);
-    expect(result.source).toContain(
-      'dataset: this.settings.podProvider ? account.username : undefined'
-    );
-    expect(result.source).toContain(
-      'this.localPost(localRecipients, activity, localRecipientContexts);'
-    );
-    expect(result.source).toContain('localRecipientContexts.has(recipientUri)');
+    expect(result.source).toContain('dataset: this.settings.podProvider ? account.username : undefined');
+    expect(result.source).toContain(`Symbol.for('${LOCAL_CONTEXT_SYMBOL_KEY}')`);
+    expect(result.source).toContain('enumerable: false');
+    expect(result.source).toContain('this.localPost(localRecipients, activity);');
+    expect(result.source).toContain('delete activityToPost[localRecipientContextKey]');
+    expect(result.source).toContain('localRecipientContexts instanceof Map && localRecipientContexts.has(recipientUri)');
     expect(result.source).toContain(
       ": await this.broker.call('auth.account.findByWebId', { webId: recipientUri });"
     );
