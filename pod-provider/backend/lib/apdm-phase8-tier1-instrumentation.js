@@ -282,12 +282,27 @@ function createPhase8Tier1Instrumentation(options = {}) {
 
   const localDeliveryResultObserver = (_activity, result) => {
     const trace = storage.getStore();
-    if (!trace || !result || !Array.isArray(result.failures) || result.failures.length === 0) return;
-    trace.errors.push({
-      source: 'detached-local-delivery-partial',
-      failureCount: result.failures.length,
-      failures: [...result.failures]
-    });
+    if (!trace || !result) return;
+
+    const successes = Array.isArray(result.success) ? result.success : [];
+    const failures = Array.isArray(result.failures) ? result.failures : [];
+
+    if (failures.length > 0) {
+      trace.errors.push({
+        source: 'detached-local-delivery-partial',
+        failureCount: failures.length,
+        failures: [...failures]
+      });
+    }
+
+    if (Number.isInteger(trace.recipientCount) && trace.recipientCount > 0 && successes.length !== trace.recipientCount) {
+      trace.errors.push({
+        source: 'detached-local-delivery-count-mismatch',
+        expectedRecipientCount: trace.recipientCount,
+        successfulRecipientCount: successes.length,
+        failureCount: failures.length
+      });
+    }
   };
 
   globalThis[observerKey] = localDeliveryObserver;
