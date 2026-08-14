@@ -73,6 +73,7 @@ function createService(mode) {
   }
 
   service.buildSearchConsent = jest.fn(async () => ({ raw: [], isPublic: true, explicitlySet: false }));
+  service.deliverObservationToSidecar = jest.fn(async () => undefined);
   return service;
 }
 
@@ -91,11 +92,12 @@ describe('APDM Phase 6 outbox routing authority', () => {
 
     expect(ctx.call).not.toHaveBeenCalled();
     expect(service.buildSearchConsent).not.toHaveBeenCalled();
+    expect(service.deliverObservationToSidecar).not.toHaveBeenCalled();
     expect(ctx.emit).not.toHaveBeenCalled();
     expect(service.logger.debug).toHaveBeenCalledWith('Ignoring raw outbox.posted routing event in APDM external mode');
   });
 
-  test('native rollback observes the committed Activity without inferring or submitting remote targets', async () => {
+  test('native rollback preserves indexing via observation-only transport without inferring remote targets', async () => {
     const service = createService('native');
     const activity = createActivity();
     const ctx = {
@@ -116,6 +118,8 @@ describe('APDM Phase 6 outbox routing authority', () => {
     expect(eventName).toBe('outbox.event.ready');
     expect(committed.deliveryTargets).toEqual([]);
     expect(committed.meta.deliveryPlanIntentId).toBeUndefined();
+    expect(service.deliverObservationToSidecar).toHaveBeenCalledTimes(1);
+    expect(service.deliverObservationToSidecar).toHaveBeenCalledWith(committed);
   });
 
   test('external post-durable event consumes only validated concrete remote targets', async () => {
@@ -145,6 +149,7 @@ describe('APDM Phase 6 outbox routing authority', () => {
     expect(committed.deliveryTargets.some(target => target.inboxUrl.endsWith('/followers'))).toBe(false);
     expect(committed.meta.deliveryPlanIntentId).toBe(deliveryPlan.intentId);
     expect(committed.meta.visibility).toBe('public');
+    expect(service.deliverObservationToSidecar).not.toHaveBeenCalled();
   });
 
   test('post-durable event rejects an invalid Delivery Plan before local readiness', async () => {
@@ -204,5 +209,6 @@ describe('APDM Phase 6 outbox routing authority', () => {
     await emitterSchema.events['activitypub.outbox.remote-delivery.handoff-queued'].handler.call(service, ctx);
 
     expect(ctx.emit).not.toHaveBeenCalled();
+    expect(service.deliverObservationToSidecar).not.toHaveBeenCalled();
   });
 });
