@@ -32,15 +32,19 @@ function close(server) {
   });
 }
 
-function get(url) {
+function request(url, options = {}) {
   return new Promise((resolve, reject) => {
-    http
-      .get(url, response => {
-        response.resume();
-        response.once('end', () => resolve(response.statusCode));
-      })
-      .once('error', reject);
+    const req = http.request(url, options, response => {
+      response.resume();
+      response.once('end', () => resolve(response.statusCode));
+    });
+    req.once('error', reject);
+    req.end();
   });
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 describe('APDM Phase 8 Tier 1 instrumentation', () => {
@@ -53,9 +57,11 @@ describe('APDM Phase 8 Tier 1 instrumentation', () => {
     expect(classifyAction('auth.account.findByWebId')).toBe('auth');
   });
 
-  test('matches Fuseki by origin and configured path prefix', () => {
+  test('matches Fuseki by exact origin and path-segment prefix', () => {
     const base = normalizeUrl('http://127.0.0.1:3030/ds');
     expect(targetMatchesFuseki(normalizeUrl('http://127.0.0.1:3030/ds/query'), [base])).toBe(true);
+    expect(targetMatchesFuseki(normalizeUrl('http://127.0.0.1:3030/ds'), [base])).toBe(true);
+    expect(targetMatchesFuseki(normalizeUrl('http://127.0.0.1:3030/ds2/query'), [base])).toBe(false);
     expect(targetMatchesFuseki(normalizeUrl('http://127.0.0.1:3030/other/query'), [base])).toBe(false);
     expect(targetMatchesFuseki(normalizeUrl('http://127.0.0.1:4040/ds/query'), [base])).toBe(false);
   });
@@ -76,7 +82,7 @@ describe('APDM Phase 8 Tier 1 instrumentation', () => {
   test('captures nested actions, Fuseki HTTP, CPU/heap and the configured recipient case in one root trace', async () => {
     const outputDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'apdm-p8-'));
     const outputPath = path.join(outputDirectory, 'measurement.jsonl');
-    const server = http.createServer((request, response) => {
+    const server = http.createServer((incoming, response) => {
       response.writeHead(204);
       response.end();
     });
@@ -94,7 +100,7 @@ describe('APDM Phase 8 Tier 1 instrumentation', () => {
     try {
       const child = instrumentation.middleware.localAction(
         async () => {
-          const status = await get(`${fusekiBase}/query`);
+          const status = await request(`${fusekiBase}/query`);
           expect(status).toBe(204);
           return 'child-result';
         },
@@ -135,6 +141,64 @@ describe('APDM Phase 8 Tier 1 instrumentation', () => {
     } finally {
       instrumentation.dispose();
       await close(server);
+      fs.rmSync(outputDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps concurrent root traces isolated', async () => {
+    const outputDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'apdm-p8-concurrency-'));
+    const outputPath = path.join(outputDirectory, 'measurement.jsonl');
+    const instrumentation = createPhase8Tier1Instrumentation({ enabled: true, outputPath, recipientCount: 2 });
+
+    try {
+      const child = instrumentation.middleware.localAction(async ctx => {
+        await delay(ctx.delayMs);
+        return ctx.value;
+      }, { name: 'ldp.remote.store' });
+      const root = instrumentation.middleware.localAction(async ctx => child(ctx), {
+        name: 'activitypub.outbox.post'
+      });
+
+      await expect(
+        Promise.all([
+          root({ id: 'root-a', requestID: 'request-a', delayMs: 20, value: 'a' }),
+          root({ id: 'root-b', requestID: 'request-b', delayMs: 1, value: 'b' })
+        ])
+      ).resolves.toEqual(['a', 'b']);
+
+      const records = readRecords(outputPath).sort((a, b) => a.requestId.localeCompare(b.requestId));
+      expect(records.map(record => record.requestId)).toEqual(['request-a', 'request-b']);
+      for (const record of records) {
+        expect(record.actionCount).toBe(2);
+        expect(record.actionCounts['activitypub.outbox.post']).toBe(1);
+        expect(record.actionCounts['ldp.remote.store']).toBe(1);
+      }
+    } finally {
+      instrumentation.dispose();
+      fs.rmSync(outputDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test('measurement output failure cannot turn a successful delivery into failure', async () => {
+    const outputDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'apdm-p8-write-failure-'));
+    const outputPath = path.join(outputDirectory, 'not-a-file');
+    fs.mkdirSync(outputPath);
+    const instrumentationErrors = [];
+    const instrumentation = createPhase8Tier1Instrumentation({
+      enabled: true,
+      outputPath,
+      onInstrumentationError: error => instrumentationErrors.push(error.message)
+    });
+
+    try {
+      const root = instrumentation.middleware.localAction(async () => 'delivery-succeeded', {
+        name: 'activitypub.outbox.post'
+      });
+
+      await expect(root({ id: 'root-write-failure' })).resolves.toBe('delivery-succeeded');
+      expect(instrumentationErrors.length).toBeGreaterThan(0);
+    } finally {
+      instrumentation.dispose();
       fs.rmSync(outputDirectory, { recursive: true, force: true });
     }
   });
