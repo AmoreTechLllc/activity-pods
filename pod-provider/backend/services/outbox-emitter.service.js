@@ -128,7 +128,10 @@ module.exports = {
 
   actions: {
     /**
-     * Manually emit an outbox event (for testing/reconciliation).
+     * Manually emit an outbox event for the legacy/native compatibility path.
+     * External authority must never use this action because it creates a fresh
+     * committed-event id and POSTs through the legacy sidecar webhook rather
+     * than the authoritative Delivery Plan handoff.
      */
     emitEvent: {
       params: {
@@ -137,6 +140,12 @@ module.exports = {
         deliveryTargets: { type: 'array', optional: true }
       },
       async handler(ctx) {
+        if (this.settings.remoteDeliveryMode === 'external') {
+          throw new Error(
+            'outbox-emitter.emitEvent is disabled in APDM external mode; use the authoritative Delivery Plan handoff'
+          );
+        }
+
         const { actorUri, activity, deliveryTargets } = ctx.params;
         const visibility = this.determineVisibility(activity);
         const isPublicActivity = visibility === 'public' || visibility === 'unlisted';
