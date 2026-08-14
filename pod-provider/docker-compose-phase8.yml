@@ -1,0 +1,28 @@
+services:
+  backend:
+    environment:
+      # Phase 8 measures ActivityPub local fan-out. Skip unrelated ATProto
+      # provisioning while creating the benchmark actors.
+      APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
+
+      # Keep the benchmark local-only and suppress the transitional sidecar
+      # observer so unrelated failed HTTP attempts cannot contaminate samples.
+      SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: native
+      SIDECAR_WEBHOOK_URL: ''
+
+      # These values are supplied by the measurement workflow before each
+      # backend recreation. The recipient count is metadata only; the runner
+      # independently validates that the Activity contains exactly N actors.
+      SEMAPPS_APDM_PHASE8_INSTRUMENTATION_ENABLED: '${APDM_P8_ENABLED:-false}'
+      SEMAPPS_APDM_PHASE8_RECIPIENT_COUNT: '${APDM_P8_COUNT:-0}'
+      SEMAPPS_APDM_PHASE8_CASE_LABEL: 'real-local-${APDM_P8_COUNT:-0}'
+      SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT: '/app/backend/measurements/apdm-p8-${APDM_P8_COUNT:-0}.jsonl'
+
+      # Runner settings are passed into docker compose exec as well.
+      APDM_P8_RUN_ID: '${APDM_P8_RUN_ID:-local}'
+      APDM_P8_SAMPLES: '${APDM_P8_SAMPLES:-3}'
+      APDM_P8_WARMUPS: '${APDM_P8_WARMUPS:-1}'
+      APDM_P8_PROVISION_CONCURRENCY: '${APDM_P8_PROVISION_CONCURRENCY:-12}'
+
+    volumes:
+      - ./measurements:/app/backend/measurements
