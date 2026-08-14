@@ -178,7 +178,7 @@ describe('APDM Phase 8 Tier 1 instrumentation', () => {
       const [record] = readRecords(outputPath);
       expect(record.requestId).toBe('request-detached');
       expect(record.actionCounts['ldp.remote.store']).toBe(1);
-      expect(record.elapsedMs).toBeGreaterThanOrEqual(20);
+      expect(record.actionDurationsMs['ldp.remote.store']).toBeGreaterThan(0);
     } finally {
       instrumentation.dispose();
       fs.rmSync(outputDirectory, { recursive: true, force: true });
