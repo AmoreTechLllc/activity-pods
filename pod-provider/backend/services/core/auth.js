@@ -89,23 +89,23 @@ module.exports = {
 
         let activityPubProvisioning = null;
         let atprotoProvisioning = null;
-        if (this.settings.atproto.autoProvisionOnSignup) {
-          try {
-            // Wait for the key container (/data/key) before reading the
-            // ActivityPub actor or generating AT keys. The container and actor
-            // are created asynchronously by auth.registered listeners.
-            await this._waitForKeyContainerWithTimeout(ctx, webId);
+        try {
+          // ActivityPub and Pod-local key bootstrap are Tier 1 account semantics and
+          // must complete regardless of whether optional ATProto provisioning is enabled.
+          // APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP therefore gates only the ATProto slice.
+          await this._waitForKeyContainerWithTimeout(ctx, webId);
 
-            activityPubProvisioning = await ctx.call('activitypub-provisioning.provisionForAccount', {
-              canonicalAccountId: webId,
-              webId,
-              username: accountData.username || username,
-              profile: {
-                displayName: rest?.name || accountData?.username || username,
-                ...(rest?.summary ? { summary: rest.summary } : {})
-              }
-            });
+          activityPubProvisioning = await ctx.call('activitypub-provisioning.provisionForAccount', {
+            canonicalAccountId: webId,
+            webId,
+            username: accountData.username || username,
+            profile: {
+              displayName: rest?.name || accountData?.username || username,
+              ...(rest?.summary ? { summary: rest.summary } : {})
+            }
+          });
 
+          if (this.settings.atproto.autoProvisionOnSignup) {
             atprotoProvisioning = await ctx.call('atproto-provisioning.provisionForAccount', {
               canonicalAccountId: webId,
               webId,
@@ -118,18 +118,21 @@ module.exports = {
                 ...(rest?.summary ? { summary: rest.summary } : {})
               }
             });
-          } catch (e) {
-            this.logger.error(`[Auth] ATProto provisioning failed for ${webId}: ${e.message}`);
-            // Best-effort cleanup of any partial AT artifacts before the
-            // outer catch removes the account. Each step is isolated so a
-            // failure in one does not block the others.
-            await this._cleanupPartialAtprotoArtifacts(ctx, webId);
-            throw new MoleculerError(
-              `ATProto provisioning failed during signup: ${e.message}`,
-              Number.isFinite(Number(e.code)) ? Number(e.code) : 500,
-              e.type || 'ATPROTO_PROVISIONING_FAILED'
-            );
           }
+        } catch (e) {
+          const provisioningStage = this.settings.atproto.autoProvisionOnSignup
+            ? 'ActivityPub/ATProto provisioning'
+            : 'ActivityPub provisioning';
+          this.logger.error(`[Auth] ${provisioningStage} failed for ${webId}: ${e.message}`);
+          // Best-effort cleanup of any partial AT artifacts before the
+          // outer catch removes the account. Each step is isolated so a
+          // failure in one does not block the others.
+          await this._cleanupPartialAtprotoArtifacts(ctx, webId);
+          throw new MoleculerError(
+            `${provisioningStage} failed during signup: ${e.message}`,
+            Number.isFinite(Number(e.code)) ? Number(e.code) : 500,
+            e.type || 'ACCOUNT_PROVISIONING_FAILED'
+          );
         }
 
         const token = await ctx.call('auth.jwt.generateServerSignedToken', { payload: { webId } });
@@ -232,12 +235,14 @@ module.exports = {
   hooks: {
     after: {
       async signup(ctx, res) {
-        if (process.env.NODE_ENV !== 'production') {
+        const forceCompleteSignupBootstrap = process.env.APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP === 'true';
+        if (process.env.NODE_ENV !== 'production' && !forceCompleteSignupBootstrap) {
           return res;
         }
 
         const allowIncompleteSignupBootstrap =
-          process.env.SEMAPPS_ALLOW_INCOMPLETE_SIGNUP_BOOTSTRAP === 'true' || process.env.NODE_ENV !== 'production';
+          !forceCompleteSignupBootstrap &&
+          (process.env.SEMAPPS_ALLOW_INCOMPLETE_SIGNUP_BOOTSTRAP === 'true' || process.env.NODE_ENV !== 'production');
 
         const { webId } = res;
 
