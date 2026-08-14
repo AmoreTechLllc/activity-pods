@@ -20,6 +20,13 @@ on:
       - apdm/phase-8-real-measurement-runner
     paths:
       - '.github/workflows/apdm-phase8-real-measurement.yml'
+      - 'pod-provider/backend/lib/apdm-phase8-tier1-instrumentation.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-real-measure.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-summarize.js'
+      - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-delivery.js'
+      - 'pod-provider/backend/tests/apdm-phase8-*.test.js'
+      - 'pod-provider/docker-compose-phase8.yml'
+      - 'pod-provider/docker-compose-test.yml'
 
 permissions:
   contents: read
