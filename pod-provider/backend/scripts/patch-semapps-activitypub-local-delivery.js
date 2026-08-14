@@ -6,6 +6,7 @@ const path = require('path');
 const EXPECTED_PACKAGE = '@semapps/activitypub';
 const EXPECTED_VERSION = '1.1.4';
 const PATCH_MARKER = 'APDM-P7_LOCAL_RECIPIENT_CONTEXT_REUSE';
+const LOCAL_CONTEXT_SYMBOL_KEY = 'semapps-atproto.apdm.local-recipient-contexts';
 
 function findPackageRoot() {
   let current = path.dirname(require.resolve(EXPECTED_PACKAGE));
@@ -38,7 +39,7 @@ function walkJavaScriptFiles(directory) {
 
 function isOutboxCandidate(source) {
   return (
-    source.includes("auth.account.findByWebId") &&
+    source.includes('auth.account.findByWebId') &&
     source.includes('localRecipients.push(recipientUri)') &&
     source.includes('localPost(localRecipients, activity') &&
     source.includes('activitypub.side-effects.processInbox')
@@ -91,22 +92,27 @@ function patchOutboxSource(source) {
     'validated local recipient insertion'
   );
 
+  // Keep the reviewed two-argument SemApps dispatch shape intact. The APDM delivery-strategy
+  // startup guard and external-authority interception both depend on this exact call shape.
+  // The context is attached only to this in-memory Activity using a non-enumerable Symbol key,
+  // so it cannot enter ActivityPub JSON or object spreads. localPost removes it synchronously
+  // before its first await, avoiding shared service state and cross-request races.
   patched = replaceExactlyOnce(
     patched,
     'this.localPost(localRecipients, activity);',
-    'this.localPost(localRecipients, activity, localRecipientContexts);',
+    `Object.defineProperty(activity, Symbol.for('${LOCAL_CONTEXT_SYMBOL_KEY}'), {\n            value: localRecipientContexts,\n            configurable: true,\n            enumerable: false\n          });\n          this.localPost(localRecipients, activity);`,
     'localPost dispatch'
   );
 
   patched = replaceExactlyOnce(
     patched,
     'async localPost(recipients, activityToPost) {',
-    'async localPost(recipients, activityToPost, localRecipientContexts = new Map()) {',
-    'localPost signature'
+    `async localPost(recipients, activityToPost) {\n      const localRecipientContextKey = Symbol.for('${LOCAL_CONTEXT_SYMBOL_KEY}');\n      const localRecipientContexts =\n        activityToPost && typeof activityToPost === 'object'\n          ? activityToPost[localRecipientContextKey]\n          : undefined;\n      if (activityToPost && typeof activityToPost === 'object') {\n        delete activityToPost[localRecipientContextKey];\n      }`,
+    'localPost context extraction'
   );
 
   const originalLookup = "const account = await this.broker.call('auth.account.findByWebId', { webId: recipientUri });";
-  const contextAwareLookup = `const account = localRecipientContexts.has(recipientUri)\n            ? { username: localRecipientContexts.get(recipientUri).dataset }\n            : await this.broker.call('auth.account.findByWebId', { webId: recipientUri });`;
+  const contextAwareLookup = `const account = localRecipientContexts instanceof Map && localRecipientContexts.has(recipientUri)\n            ? { username: localRecipientContexts.get(recipientUri).dataset }\n            : await this.broker.call('auth.account.findByWebId', { webId: recipientUri });`;
   patched = replaceExactlyOnce(patched, originalLookup, contextAwareLookup, 'localPost account lookup');
 
   return { source: patched, changed: true };
@@ -141,6 +147,7 @@ module.exports = {
   EXPECTED_PACKAGE,
   EXPECTED_VERSION,
   PATCH_MARKER,
+  LOCAL_CONTEXT_SYMBOL_KEY,
   findPackageRoot,
   locateOutboxSource,
   patchOutboxSource,
