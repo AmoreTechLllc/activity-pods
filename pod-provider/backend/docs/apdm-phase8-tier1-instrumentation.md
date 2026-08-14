@@ -19,6 +19,8 @@ For each root `activitypub.outbox.post` trace, one JSONL record captures:
 
 The observer uses `AsyncLocalStorage` so nested local action work and Fuseki HTTP requests remain attributable to the root outbox operation without adding fields to ActivityPub payloads or Moleculer params.
 
+CPU and heap/RSS are intentionally process-level observations, not per-request isolation primitives. They are meaningful only when benchmark traffic is controlled so unrelated work does not materially overlap the measured root action.
+
 ## Required measurement matrix
 
 Run the real local-delivery path at these exact local-recipient counts:
@@ -34,6 +36,8 @@ Do not call `localPost()` directly. Each sample must enter through the normal `a
 Use distinct local actors whose Pod datasets already exist and are valid delivery targets. Keep the Activity payload semantically equivalent across sizes except for the recipient set.
 
 Run warm-up traffic before collecting samples. For comparable latency percentiles, collect multiple measured samples for each size under the same machine/container limits and the same Fuseki/Redis configuration.
+
+Collect the canonical Phase 8 matrix under isolated benchmark traffic: run one measured root outbox operation at a time and suppress unrelated application/background traffic where operationally possible. If background work cannot be suppressed, record that fact with the measurement artifact and do not interpret process CPU/heap deltas as request-exclusive cost. Separate concurrency/load characterization belongs to later phases; Phase 8 establishes the serial Tier 1 work model.
 
 ## Enable one measurement case
 
