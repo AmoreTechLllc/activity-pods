@@ -107,25 +107,38 @@ function writeJsonLine(outputPath, record) {
   fs.appendFileSync(outputPath, `${JSON.stringify(record)}\n`, 'utf8');
 }
 
+function tryWriteJsonLine(outputPath, record, onInstrumentationError = () => {}) {
+  try {
+    writeJsonLine(outputPath, record);
+    return true;
+  } catch (error) {
+    try {
+      onInstrumentationError(error);
+    } catch (_ignored) {
+      // Measurement reporting is not allowed to affect delivery semantics.
+    }
+    return false;
+  }
+}
+
 function getRequestTarget(args, protocol) {
   if (args.length === 0) return undefined;
-  const [first, second] = args;
+  const [first] = args;
 
   if (first instanceof URL) return first;
   if (typeof first === 'string') return normalizeUrl(first);
 
   if (first && typeof first === 'object') {
     if (first.href) return normalizeUrl(first.href);
-    const hostname = first.hostname || first.host;
+    let hostname = first.hostname || first.host;
     if (!hostname) return undefined;
+    hostname = String(hostname);
+    const portAlreadyIncluded = !first.hostname && first.port && hostname.endsWith(`:${first.port}`);
+    if (hostname.includes(':') && !hostname.startsWith('[') && !portAlreadyIncluded) hostname = `[${hostname}]`;
     const scheme = first.protocol || `${protocol}:`;
-    const port = first.port ? `:${first.port}` : '';
+    const port = first.port && !portAlreadyIncluded ? `:${first.port}` : '';
     const requestPath = first.path || first.pathname || '/';
     return normalizeUrl(`${scheme}//${hostname}${port}${requestPath}`);
-  }
-
-  if (typeof first === 'string' && second && typeof second === 'object') {
-    return normalizeUrl(first);
   }
 
   return undefined;
@@ -136,8 +149,9 @@ function targetMatchesFuseki(target, fusekiTargets) {
   return fusekiTargets.some(candidate => {
     if (!candidate) return false;
     if (candidate.origin !== target.origin) return false;
-    if (candidate.pathname === '/' || candidate.pathname === '') return true;
-    return target.pathname.startsWith(candidate.pathname.replace(/\/$/u, ''));
+    const prefix = candidate.pathname.replace(/\/$/u, '');
+    if (prefix === '') return true;
+    return target.pathname === prefix || target.pathname.startsWith(`${prefix}/`);
   });
 }
 
@@ -206,6 +220,8 @@ function createPhase8Tier1Instrumentation(options = {}) {
   const outputPath = path.resolve(options.outputPath || DEFAULT_OUTPUT);
   const defaultRecipientCount = Number(options.recipientCount);
   const caseLabel = options.caseLabel || undefined;
+  const onInstrumentationError =
+    typeof options.onInstrumentationError === 'function' ? options.onInstrumentationError : () => {};
   const restoreHttp = installFusekiHttpProbe({
     storage,
     fusekiUrls: [options.fusekiBase, options.sparqlEndpoint].filter(Boolean)
@@ -218,14 +234,24 @@ function createPhase8Tier1Instrumentation(options = {}) {
       return async function apdmPhase8InstrumentedAction(ctx) {
         const currentTrace = storage.getStore();
         const isRoot = actionName === rootAction && !currentTrace;
-        const trace = currentTrace ||
-          (isRoot
-            ? createTrace({
-                requestId: (ctx && (ctx.requestID || ctx.id)) || `apdm-p8-${Date.now()}`,
-                recipientCount: defaultRecipientCount,
-                caseLabel
-              })
-            : undefined);
+        let trace = currentTrace;
+
+        if (isRoot) {
+          try {
+            trace = createTrace({
+              requestId: (ctx && (ctx.requestID || ctx.id)) || `apdm-p8-${Date.now()}`,
+              recipientCount: defaultRecipientCount,
+              caseLabel
+            });
+          } catch (error) {
+            try {
+              onInstrumentationError(error);
+            } catch (_ignored) {
+              // Instrumentation callbacks must never block the real action.
+            }
+            return next(ctx);
+          }
+        }
 
         if (!trace) return next(ctx);
 
@@ -259,7 +285,16 @@ function createPhase8Tier1Instrumentation(options = {}) {
           rootError = error;
           throw error;
         } finally {
-          writeJsonLine(outputPath, finishTrace(trace, rootError));
+          try {
+            const record = finishTrace(trace, rootError);
+            tryWriteJsonLine(outputPath, record, onInstrumentationError);
+          } catch (error) {
+            try {
+              onInstrumentationError(error);
+            } catch (_ignored) {
+              // Measurement finalization must never mask delivery success/failure.
+            }
+          }
         }
       };
     }
@@ -284,5 +319,7 @@ module.exports = {
   createPhase8Tier1Instrumentation,
   installFusekiHttpProbe,
   normalizeUrl,
-  targetMatchesFuseki
+  targetMatchesFuseki,
+  tryWriteJsonLine,
+  writeJsonLine
 };
