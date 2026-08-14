@@ -47,7 +47,9 @@ describe('APDM Phase 5/6 committed outbox authority contract', () => {
     expect(rawHandler).toContain('deliveryTargets: []');
     expect(rawHandler).toContain("ctx.emit('outbox.event.ready', event)");
     expect(rawHandler).toContain('deliverObservationToSidecar(event)');
-    expect(observationMethod).toContain('SIDECAR_OBSERVATION_WEBHOOK_URL');
+    expect(source).toContain('SIDECAR_OBSERVATION_WEBHOOK_URL');
+    expect(source).toContain('/webhook/outbox-observation');
+    expect(observationMethod).toContain('sidecarObservationWebhookUrl');
     expect(observationMethod).not.toContain('remoteTargets');
     expect(observationMethod).not.toContain('deliveryTargets');
   });
