@@ -102,19 +102,15 @@ describe('APDM Phase 6 outbox routing authority', () => {
       params: { activity },
       meta: { podDataset: 'alice' },
       call: jest.fn(async action => {
-        if (action === 'activitypub.actor.get') return { id: activity.actor };
-        throw new Error(`Unexpected call ${action}`);
+        throw new Error(`Unexpected recipient-resolution call ${action}`);
       }),
       emit: jest.fn()
     };
 
     await emitterSchema.events['activitypub.outbox.posted'].handler.call(service, ctx);
 
-    expect(ctx.call).toHaveBeenCalledTimes(1);
-    expect(ctx.call).toHaveBeenCalledWith('activitypub.actor.get', {
-      actorUri: activity.actor,
-      webId: 'system'
-    });
+    expect(ctx.call).not.toHaveBeenCalled();
+    expect(service.buildSearchConsent).toHaveBeenCalledWith(ctx, activity, activity.actor);
     expect(ctx.emit).toHaveBeenCalledTimes(1);
     const [eventName, committed] = ctx.emit.mock.calls[0];
     expect(eventName).toBe('outbox.event.ready');
