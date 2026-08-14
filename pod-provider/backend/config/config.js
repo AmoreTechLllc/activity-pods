@@ -36,6 +36,13 @@ module.exports = {
     process.env.SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW === 'true',
   ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER:
     process.env.SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER === 'true',
+  // APDM Phase 8 is opt-in measurement only. These settings do not alter
+  // delivery behavior; they attach observers to the real local Tier 1 path.
+  APDM_PHASE8_INSTRUMENTATION_ENABLED: process.env.SEMAPPS_APDM_PHASE8_INSTRUMENTATION_ENABLED === 'true',
+  APDM_PHASE8_INSTRUMENTATION_OUTPUT:
+    process.env.SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT || './apdm-phase8-tier1.jsonl',
+  APDM_PHASE8_RECIPIENT_COUNT: Number(process.env.SEMAPPS_APDM_PHASE8_RECIPIENT_COUNT),
+  APDM_PHASE8_CASE_LABEL: process.env.SEMAPPS_APDM_PHASE8_CASE_LABEL,
   // The durable APDM handoff is intentionally isolated from the legacy
   // SIDECAR_WEBHOOK_URL. That older setting may point at the sidecar origin
   // for transitional emitters, while Phase 4/5 requires the exact durable

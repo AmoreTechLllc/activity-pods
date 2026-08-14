@@ -4,8 +4,10 @@ const fs = require('fs');
 const path = require('path');
 const {
   PATCH_MARKER,
+  PHASE8_COMPLETION_MARKER,
   EXPECTED_VERSION,
   LOCAL_CONTEXT_SYMBOL_KEY,
+  LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY,
   findPackageRoot,
   locateOutboxSource,
   patchOutboxSource
@@ -31,13 +33,17 @@ if (localRecipients.length > 0) {
   this.localPost(localRecipients, activity);
 }
 async localPost(recipients, activityToPost) {
+  const success = [];
+  const failures = [];
   await this.broker.call('activitypub.side-effects.processInbox', { activity: activityToPost, recipients });
   for (const recipientUri of recipients) {
     const account = await this.broker.call('auth.account.findByWebId', { webId: recipientUri });
     if (!account) throw new Error(\`No account found with webId \${recipientUri}\`);
     const dataset = this.settings.podProvider ? account.username : undefined;
+    success.push(recipientUri);
   }
-}
+      return { success, failures };
+    }
 `;
 }
 
@@ -106,7 +112,9 @@ describe('APDM Phase 7 SemApps local delivery patch', () => {
     const source = fs.readFileSync(outboxFile, 'utf8');
 
     expect(source).toContain(PATCH_MARKER);
+    expect(source).toContain(PHASE8_COMPLETION_MARKER);
     expect(source).toContain(`Symbol.for('${LOCAL_CONTEXT_SYMBOL_KEY}')`);
+    expect(source).toContain(`Symbol.for('${LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY}')`);
     expect(source).toContain('Object.defineProperty(activity, Symbol.for(');
     expect(source).toContain('this.localPost(localRecipients, activity);');
     expect(source).not.toContain('this.localPost(localRecipients, activity, localRecipientContexts);');
@@ -171,6 +179,37 @@ describe('APDM Phase 7 SemApps local delivery patch', () => {
         payload: { activity, recipients: [recipientUri], local: true }
       }
     ]);
+  });
+
+  test('Phase 8 observer sees localPost start and finish without changing its result', async () => {
+    const localPost = loadInstalledLocalPost();
+    const { service } = createLocalPostHarness({ account: { username: 'alice-dataset' } });
+    const recipientUri = 'https://pod.example/alice';
+    const activity = {
+      id: 'https://pod.example/activities/observed',
+      type: 'Like',
+      actor: 'https://pod.example/bob',
+      object: 'https://remote.example/objects/observed'
+    };
+    const observerKey = Symbol.for(LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY);
+    const previousObserver = globalThis[observerKey];
+    const observations = [];
+    globalThis[observerKey] = (phase, observedActivity, error) => {
+      observations.push({ phase, observedActivity, error });
+    };
+
+    try {
+      await expect(localPost.call(service, [recipientUri], activity)).resolves.toEqual({
+        success: [recipientUri],
+        failures: []
+      });
+      expect(observations.map(observation => observation.phase)).toEqual(['start', 'finish']);
+      expect(observations.every(observation => observation.observedActivity === activity)).toBe(true);
+      expect(observations[1].error).toBeUndefined();
+    } finally {
+      if (previousObserver === undefined) delete globalThis[observerKey];
+      else globalThis[observerKey] = previousObserver;
+    }
   });
 
   test('external delivery interception preserves the same Activity-bound context without a third localPost argument', async () => {
@@ -242,23 +281,25 @@ describe('APDM Phase 7 SemApps local delivery patch', () => {
     });
   });
 
-  test('normal post-to-localPost source carries dataset context and preserves a legacy fallback', () => {
+  test('normal post-to-localPost source carries dataset context, completion observation and a legacy fallback', () => {
     const result = patchOutboxSource(representativeOutboxSource());
 
     expect(result.changed).toBe(true);
     expect(result.source).toContain(PATCH_MARKER);
+    expect(result.source).toContain(PHASE8_COMPLETION_MARKER);
     expect(result.source).toContain('dataset: this.settings.podProvider ? account.username : undefined');
     expect(result.source).toContain(`Symbol.for('${LOCAL_CONTEXT_SYMBOL_KEY}')`);
+    expect(result.source).toContain(`Symbol.for('${LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY}')`);
     expect(result.source).toContain('enumerable: false');
     expect(result.source).toContain('this.localPost(localRecipients, activity);');
     expect(result.source).toContain('delete activityToPost[localRecipientContextKey]');
     expect(result.source).toContain('localRecipientContexts instanceof Map && localRecipientContexts.has(recipientUri)');
+    expect(result.source).toContain("phase8LocalDeliveryObserver('start', activityToPost)");
+    expect(result.source).toContain("phase8LocalDeliveryObserver('finish', activityToPost, phase8LocalDeliveryError)");
     expect(result.source).toContain(
       ": await this.broker.call('auth.account.findByWebId', { webId: recipientUri });"
     );
 
-    // The first lookup still validates that the local actor has a real account. The second textual lookup
-    // remains only as a backward-compatible branch for direct localPost callers without resolved context.
     expect((result.source.match(/auth\.account\.findByWebId/gu) || []).length).toBe(2);
   });
 
