@@ -10,6 +10,7 @@ const PHASE8_COMPLETION_MARKER = 'APDM-P8_LOCAL_DELIVERY_COMPLETION_OBSERVER';
 const PHASE8_RESULT_MARKER = 'APDM-P8_LOCAL_DELIVERY_RESULT_OBSERVER';
 const LOCAL_CONTEXT_SYMBOL_KEY = 'semapps-atproto.apdm.local-recipient-contexts';
 const LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY = 'semapps-atproto.apdm-p8.local-delivery-observer';
+const LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY = 'semapps-atproto.apdm-p8.local-delivery-result-observer';
 
 function findPackageRoot() {
   let current = path.dirname(require.resolve(EXPECTED_PACKAGE));
@@ -129,35 +130,36 @@ function patchOutboxSource(source) {
     patched = replaceExactlyOnce(
       patched,
       `async localPost(recipients, activityToPost) {\n      const localRecipientContextKey = Symbol.for('${LOCAL_CONTEXT_SYMBOL_KEY}');`,
-      `async localPost(recipients, activityToPost) {\n      const phase8LocalDeliveryObserver = globalThis[Symbol.for('${LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY}')]; // ${PHASE8_COMPLETION_MARKER}\n      let phase8LocalDeliveryError;\n      let phase8LocalDeliveryResult; // ${PHASE8_RESULT_MARKER}\n      if (typeof phase8LocalDeliveryObserver === 'function') {\n        try {\n          phase8LocalDeliveryObserver('start', activityToPost);\n        } catch (_instrumentationError) {\n          // APDM measurement hooks must never affect local delivery.\n        }\n      }\n      try {\n      const localRecipientContextKey = Symbol.for('${LOCAL_CONTEXT_SYMBOL_KEY}');`,
+      `async localPost(recipients, activityToPost) {\n      const phase8LocalDeliveryObserver = globalThis[Symbol.for('${LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY}')]; // ${PHASE8_COMPLETION_MARKER}\n      let phase8LocalDeliveryError;\n      if (typeof phase8LocalDeliveryObserver === 'function') {\n        try {\n          phase8LocalDeliveryObserver('start', activityToPost);\n        } catch (_instrumentationError) {\n          // APDM measurement hooks must never affect local delivery.\n        }\n      }\n      try {\n      const localRecipientContextKey = Symbol.for('${LOCAL_CONTEXT_SYMBOL_KEY}');`,
       'Phase 8 localPost start observer'
     );
 
     patched = replaceExactlyOnce(
       patched,
       '      return { success, failures };\n    }',
-      `      phase8LocalDeliveryResult = { success, failures };\n      return phase8LocalDeliveryResult;\n      } catch (error) {\n        phase8LocalDeliveryError = error;\n        throw error;\n      } finally {\n        if (typeof phase8LocalDeliveryObserver === 'function') {\n          try {\n            phase8LocalDeliveryObserver(\n              'finish',\n              activityToPost,\n              phase8LocalDeliveryError,\n              phase8LocalDeliveryResult\n            );\n          } catch (_instrumentationError) {\n            // APDM measurement hooks must never affect local delivery.\n          }\n        }\n      }\n    }`,
+      `      return { success, failures };\n      } catch (error) {\n        phase8LocalDeliveryError = error;\n        throw error;\n      } finally {\n        if (typeof phase8LocalDeliveryObserver === 'function') {\n          try {\n            phase8LocalDeliveryObserver('finish', activityToPost, phase8LocalDeliveryError);\n          } catch (_instrumentationError) {\n            // APDM measurement hooks must never affect local delivery.\n          }\n        }\n      }\n    }`,
       'Phase 8 localPost completion observer'
     );
     changed = true;
-  } else if (!patched.includes(PHASE8_RESULT_MARKER)) {
+  }
+
+  if (!patched.includes(PHASE8_RESULT_MARKER)) {
+    if (!patched.includes(PHASE8_COMPLETION_MARKER)) {
+      throw new Error('[APDM-P8] Phase 8 result seam requires the completion observer patch');
+    }
+
     patched = replaceExactlyOnce(
       patched,
-      '      let phase8LocalDeliveryError;\n',
-      `      let phase8LocalDeliveryError;\n      let phase8LocalDeliveryResult; // ${PHASE8_RESULT_MARKER}\n`,
-      'Phase 8 result declaration'
+      `      const phase8LocalDeliveryObserver = globalThis[Symbol.for('${LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY}')]; // ${PHASE8_COMPLETION_MARKER}\n`,
+      `      const phase8LocalDeliveryObserver = globalThis[Symbol.for('${LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY}')]; // ${PHASE8_COMPLETION_MARKER}\n      const phase8LocalDeliveryResultObserver = globalThis[Symbol.for('${LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY}')]; // ${PHASE8_RESULT_MARKER}\n`,
+      'Phase 8 result observer declaration'
     );
+
     patched = replaceExactlyOnce(
       patched,
       '      return { success, failures };\n      } catch (error) {',
-      '      phase8LocalDeliveryResult = { success, failures };\n      return phase8LocalDeliveryResult;\n      } catch (error) {',
-      'Phase 8 result capture'
-    );
-    patched = replaceExactlyOnce(
-      patched,
-      "            phase8LocalDeliveryObserver('finish', activityToPost, phase8LocalDeliveryError);",
-      `            phase8LocalDeliveryObserver(\n              'finish',\n              activityToPost,\n              phase8LocalDeliveryError,\n              phase8LocalDeliveryResult\n            );`,
-      'Phase 8 result observation'
+      `      const phase8LocalDeliveryResult = { success, failures };\n      if (typeof phase8LocalDeliveryResultObserver === 'function') {\n        try {\n          phase8LocalDeliveryResultObserver(activityToPost, phase8LocalDeliveryResult);\n        } catch (_instrumentationError) {\n          // APDM measurement hooks must never affect local delivery.\n        }\n      }\n      return phase8LocalDeliveryResult;\n      } catch (error) {`,
+      'Phase 8 localPost result observer'
     );
     changed = true;
   }
@@ -200,6 +202,7 @@ module.exports = {
   PHASE8_RESULT_MARKER,
   LOCAL_CONTEXT_SYMBOL_KEY,
   LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY,
+  LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY,
   findPackageRoot,
   locateOutboxSource,
   patchOutboxSource,
