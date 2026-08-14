@@ -42,19 +42,26 @@ function aggregateCounts(records, field) {
   return result;
 }
 
+function isSuccessfulRecord(record) {
+  return !Array.isArray(record.errors) || record.errors.length === 0;
+}
+
 function summarizeRecipientCase(records) {
-  const elapsed = records.map(record => Number(record.elapsedMs)).filter(Number.isFinite);
-  const cpu = records
+  const successfulRecords = records.filter(isSuccessfulRecord);
+  const elapsed = successfulRecords.map(record => Number(record.elapsedMs)).filter(Number.isFinite);
+  const cpu = successfulRecords
     .map(record => Number(record.cpuUserMs || 0) + Number(record.cpuSystemMs || 0))
     .filter(Number.isFinite);
-  const heapDelta = records.map(record => Number(record.heapUsedDelta)).filter(Number.isFinite);
-  const actionCounts = records.map(record => Number(record.actionCount)).filter(Number.isFinite);
-  const fusekiCounts = records
+  const heapDelta = successfulRecords.map(record => Number(record.heapUsedDelta)).filter(Number.isFinite);
+  const actionCounts = successfulRecords.map(record => Number(record.actionCount)).filter(Number.isFinite);
+  const fusekiCounts = successfulRecords
     .map(record => Number(record.fuseki && record.fuseki.requestCount))
     .filter(Number.isFinite);
 
   return {
     samples: records.length,
+    successfulSamples: successfulRecords.length,
+    failedSamples: records.length - successfulRecords.length,
     elapsedMs: {
       mean: mean(elapsed),
       p50: percentile(elapsed, 0.5),
@@ -81,9 +88,9 @@ function summarizeRecipientCase(records) {
       p50: percentile(fusekiCounts, 0.5),
       p95: percentile(fusekiCounts, 0.95)
     },
-    actionCounts: aggregateCounts(records, 'actionCounts'),
-    categoryCounts: aggregateCounts(records, 'categoryCounts'),
-    errorSamples: records.filter(record => Array.isArray(record.errors) && record.errors.length > 0).length
+    actionCounts: aggregateCounts(successfulRecords, 'actionCounts'),
+    categoryCounts: aggregateCounts(successfulRecords, 'categoryCounts'),
+    errorSamples: records.length - successfulRecords.length
   };
 }
 
@@ -116,19 +123,32 @@ function summarize(records, requiredRecipientCounts = REQUIRED_RECIPIENT_COUNTS)
     cases[count] = summarizeRecipientCase(byCount.get(count));
   }
 
-  const missingRecipientCounts = requiredRecipientCounts.filter(count => !byCount.has(count));
-  const actionFitPoints = [...byCount.entries()].map(([count, caseRecords]) => ({
-    x: count,
-    y: mean(caseRecords.map(record => Number(record.actionCount)).filter(Number.isFinite))
-  })).filter(point => Number.isFinite(point.y));
-  const fusekiFitPoints = [...byCount.entries()].map(([count, caseRecords]) => ({
-    x: count,
-    y: mean(
-      caseRecords
-        .map(record => Number(record.fuseki && record.fuseki.requestCount))
-        .filter(Number.isFinite)
-    )
-  })).filter(point => Number.isFinite(point.y));
+  const missingRecipientCounts = requiredRecipientCounts.filter(count => {
+    const caseRecords = byCount.get(count) || [];
+    return !caseRecords.some(isSuccessfulRecord);
+  });
+
+  const usableEntries = [...byCount.entries()]
+    .map(([count, caseRecords]) => [count, caseRecords.filter(isSuccessfulRecord)])
+    .filter(([, caseRecords]) => caseRecords.length > 0);
+
+  const actionFitPoints = usableEntries
+    .map(([count, caseRecords]) => ({
+      x: count,
+      y: mean(caseRecords.map(record => Number(record.actionCount)).filter(Number.isFinite))
+    }))
+    .filter(point => Number.isFinite(point.y));
+
+  const fusekiFitPoints = usableEntries
+    .map(([count, caseRecords]) => ({
+      x: count,
+      y: mean(
+        caseRecords
+          .map(record => Number(record.fuseki && record.fuseki.requestCount))
+          .filter(Number.isFinite)
+      )
+    }))
+    .filter(point => Number.isFinite(point.y));
 
   return {
     phase: 'APDM-P8-A',
@@ -164,7 +184,7 @@ function main(argv = process.argv.slice(2)) {
 
   if (!summary.complete) {
     process.stderr.write(
-      `[APDM-P8] Missing required recipient measurements: ${summary.missingRecipientCounts.join(', ')}\n`
+      `[APDM-P8] Missing successful recipient measurements: ${summary.missingRecipientCounts.join(', ')}\n`
     );
     process.exitCode = 2;
   }
@@ -175,6 +195,7 @@ if (require.main === module) main();
 module.exports = {
   REQUIRED_RECIPIENT_COUNTS,
   aggregateCounts,
+  isSuccessfulRecord,
   linearFit,
   mean,
   parseJsonLines,
