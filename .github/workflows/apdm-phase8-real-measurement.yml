@@ -32,6 +32,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: apdm-phase8-real-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   measure-real-local-fanout:
     runs-on: ubuntu-latest
