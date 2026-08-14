@@ -41,7 +41,7 @@ const SEMAPPS_OUTBOX_INTERCEPTION_MARKERS = Object.freeze([
   'activitypub.activity.getRecipients',
   "this.createJob('remotePost'",
   'activitypub.outbox.posted',
-  'this.localPost(localRecipients, activity)'
+  'this.localPost(localRecipients, activity, localRecipientContexts)'
 ]);
 
 function normalizeRemoteDeliveryMode(value) {
@@ -382,12 +382,12 @@ function createOutboxPostHandler(
     };
 
     if (nativeLocalPost) {
-      executionContext.localPost = (recipients, localActivity) => {
+      executionContext.localPost = (recipients, localActivity, localRecipientContexts) => {
         capturedLocalPosts.push({
           recipients: Array.isArray(recipients) ? [...recipients] : recipients,
           activity: localActivity
         });
-        return nativeLocalPost(recipients, localActivity);
+        return nativeLocalPost(recipients, localActivity, localRecipientContexts);
       };
     }
 
