@@ -13,31 +13,44 @@ function between(start, end) {
   return source.slice(startIndex, endIndex);
 }
 
-describe('APDM Phase 5 committed outbox authority contract', () => {
+describe('APDM Phase 5/6 committed outbox authority contract', () => {
   test('external mode retains raw pre-handoff suppression', () => {
     const rawHandler = between("'activitypub.outbox.posted':", "'activitypub.outbox.remote-delivery.handoff-queued':");
     expect(rawHandler).toContain("remoteDeliveryMode === 'external'");
     expect(rawHandler).toContain('return;');
   });
 
-  test('committed indexing event is sourced only from post-durable handoff', () => {
+  test('committed indexing event is sourced only from post-durable handoff in external mode', () => {
     expect(source).toContain("'activitypub.outbox.remote-delivery.handoff-queued':");
     expect(source).not.toContain("'activitypub.outbox.remote-delivery.planned':");
   });
 
-  test('post-durable handler emits local readiness without a second sidecar delivery', () => {
-    const durableHandler = between("'activitypub.outbox.remote-delivery.handoff-queued':", '\n  },\n\n  actions:');
+  test('post-durable handler emits readiness without a second sidecar delivery', () => {
+    const durableHandler = between("'activitypub.outbox.remote-delivery.handoff-queued':", '\n  },\n  methods:');
     expect(durableHandler).toContain("ctx.emit('outbox.event.ready', event)");
-    expect(durableHandler).not.toContain('deliverToSidecar');
+    expect(durableHandler).not.toContain('deliverObservationToSidecar');
+    expect(durableHandler).not.toContain('remoteTargets');
   });
 
-  test('legacy manual emitter cannot create a second sidecar submission in external mode', () => {
-    const emitAction = between('emitEvent: {', '\n\n    /**\n     * Resolve delivery targets');
-    const guardIndex = emitAction.indexOf("remoteDeliveryMode === 'external'");
-    const deliveryIndex = emitAction.indexOf('deliverToSidecar');
+  test('Phase 6 removes the legacy raw recipient-routing surface', () => {
+    expect(source).not.toContain('resolveDeliveryTargets');
+    expect(source).not.toContain('extractRecipients');
+    expect(source).not.toContain('deduplicateBySharedInbox');
+    expect(source).not.toContain('followable.resolveFollowActivityDelivery');
+    expect(source).not.toContain('deliverToSidecar');
+    expect(source).not.toContain('SIDECAR_WEBHOOK_URL');
+  });
 
-    expect(guardIndex).toBeGreaterThanOrEqual(0);
-    expect(emitAction).toContain('authoritative Delivery Plan handoff');
-    expect(deliveryIndex).toBeGreaterThan(guardIndex);
+  test('native rollback uses only the dedicated targetless observation transport', () => {
+    const rawHandler = between("'activitypub.outbox.posted':", "'activitypub.outbox.remote-delivery.handoff-queued':");
+    const observationMethod = between('async deliverObservationToSidecar(event)', '\n    extractObjectId(activity)');
+    expect(rawHandler).toContain('deliveryTargets: []');
+    expect(rawHandler).toContain("ctx.emit('outbox.event.ready', event)");
+    expect(rawHandler).toContain('deliverObservationToSidecar(event)');
+    expect(source).toContain('SIDECAR_OBSERVATION_WEBHOOK_URL');
+    expect(source).toContain('/webhook/outbox-observation');
+    expect(observationMethod).toContain('sidecarObservationWebhookUrl');
+    expect(observationMethod).not.toContain('remoteTargets');
+    expect(observationMethod).not.toContain('deliveryTargets');
   });
 });

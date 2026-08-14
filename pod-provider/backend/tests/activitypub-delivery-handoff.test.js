@@ -42,7 +42,7 @@ function createSettings() {
   };
 }
 
-describe('APDM Phase 4 durable ActivityPub handoff', () => {
+describe('APDM durable ActivityPub handoff', () => {
   test('external durability fails closed without queue, URL, HTTP(S), or token configuration', () => {
     expect(() => assertDurableHandoffConfigured({ deliveryHandoffUrl: 'http://sidecar', deliveryHandoffToken: 'x' })).toThrow(
       /SEMAPPS_QUEUE_SERVICE_URL/u
@@ -62,7 +62,7 @@ describe('APDM Phase 4 durable ActivityPub handoff', () => {
     })).toThrow(/SIDECAR_TOKEN/u);
   });
 
-  test('maps authoritative Delivery Plan targets onto the proven sidecar webhook contract', () => {
+  test('maps authoritative Delivery Plan targets onto the Phase 6 sidecar webhook contract', () => {
     expect(toSidecarOutboxPayload(createPlan())).toEqual({
       actorUri: 'https://pods.example/alice',
       activityId: 'https://pods.example/alice/activities/1',
@@ -71,7 +71,11 @@ describe('APDM Phase 4 durable ActivityPub handoff', () => {
         {
           inboxUrl: 'https://remote.example/users/bob/inbox',
           sharedInboxUrl: 'https://remote.example/inbox',
-          targetDomain: 'remote.example'
+          targetDomain: 'remote.example',
+          apdmAuthority: {
+            schema: 'ap.delivery-plan.v1',
+            intentId: 'apdm-v1-test-intent'
+          }
         }
       ],
       meta: {
@@ -141,7 +145,13 @@ describe('APDM Phase 4 durable ActivityPub handoff', () => {
     const [, request] = fetchImpl.mock.calls[0];
     expect(request.headers.Authorization).toBe('Bearer secret');
     expect(request.headers['X-APDM-Intent-Id']).toBe(plan.intentId);
-    expect(JSON.parse(request.body).meta.deliveryPlanIntentId).toBe(plan.intentId);
+    const body = JSON.parse(request.body);
+    expect(body.meta.deliveryPlanIntentId).toBe(plan.intentId);
+    expect(body.meta.deliveryPlanSchema).toBe(plan.schema);
+    expect(body.remoteTargets[0].apdmAuthority).toEqual({
+      schema: plan.schema,
+      intentId: plan.intentId
+    });
   });
 
   test('worker rejects a generic 200 even when the body says accepted', async () => {
@@ -211,7 +221,7 @@ describe('APDM Phase 4 durable ActivityPub handoff', () => {
     }
   });
 
-  test('same Delivery Plan retry keeps identical Bull opts.jobId and stable metadata ID', async () => {
+  test('same Delivery Plan retry keeps identical Bull opts.jobId and stable wire authority', async () => {
     const plan = createPlan();
     const createJob = jest.fn(async () => ({ id: plan.intentId }));
     const service = { settings: createSettings(), createJob };
@@ -225,6 +235,8 @@ describe('APDM Phase 4 durable ActivityPub handoff', () => {
       DELIVERY_HANDOFF_JOB_NAME
     ]);
     expect(createJob.mock.calls.map(call => call[3].jobId)).toEqual([plan.intentId, plan.intentId]);
-    expect(toSidecarOutboxPayload(plan).meta.deliveryPlanIntentId).toBe(plan.intentId);
+    const payload = toSidecarOutboxPayload(plan);
+    expect(payload.meta.deliveryPlanIntentId).toBe(plan.intentId);
+    expect(payload.remoteTargets[0].apdmAuthority.intentId).toBe(plan.intentId);
   });
 });
