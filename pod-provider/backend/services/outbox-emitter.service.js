@@ -1,52 +1,36 @@
 /**
  * ActivityPods Outbox Event Emitter Service
- *
- * APDM Phase 6 keeps this service as a committed-event observation surface,
- * but removes raw-Activity recipient inference and legacy sidecar federation
- * submission. Remote delivery authority is either:
- *
- * - SemApps native `remotePost` in native rollback mode; or
- * - the authoritative Delivery Plan durable handoff in external mode.
  */
 'use strict';
 
 const { ulid } = require('ulid');
+const { retryWithBackoff } = require('../utils/backoff');
 const { validateDeliveryPlanV1 } = require('../utils/activitypub-delivery-plan');
 const { resolvePublicSearchConsent } = require('../utils/search-consent');
 const { extractHashtagsFromText } = require('../utils/hashtags');
 
 module.exports = {
   name: 'outbox-emitter',
-
   dependencies: ['activitypub.outbox'],
-
   settings: {
-    remoteDeliveryMode: String(process.env.SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native')
-      .trim()
-      .toLowerCase()
+    remoteDeliveryMode: String(process.env.SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native').trim().toLowerCase(),
+    sidecarObservationWebhookUrl: process.env.SIDECAR_OBSERVATION_WEBHOOK_URL || 'http://fedify-sidecar:8080/webhook/outbox-observation',
+    sidecarToken: process.env.SIDECAR_TOKEN || '',
+    observationWebhookRetries: Number(process.env.OBSERVATION_WEBHOOK_RETRIES) || 3,
+    observationWebhookTimeoutMs: Number(process.env.OBSERVATION_WEBHOOK_TIMEOUT_MS) || 5000
   },
-
   events: {
-    /**
-     * Native rollback path.
-     *
-     * SemApps owns recipient expansion and remote delivery in this mode. The
-     * raw committed Activity is therefore observation-only: do not infer
-     * recipients again and do not submit federation work to the sidecar.
-     */
     'activitypub.outbox.posted': {
       async handler(ctx) {
         if (this.settings.remoteDeliveryMode === 'external') {
           this.logger.debug('Ignoring raw outbox.posted routing event in APDM external mode');
           return;
         }
-
         const { activity } = ctx.params;
         const actorUri = typeof activity.actor === 'string' ? activity.actor : activity.actor?.id || null;
         const visibility = this.determineVisibility(activity);
         const isPublicActivity = visibility === 'public' || visibility === 'unlisted';
         const searchConsent = await this.buildSearchConsent(ctx, activity, actorUri);
-
         const event = await this.buildCommittedEvent(ctx, {
           activity,
           actorUri,
@@ -55,30 +39,18 @@ module.exports = {
           isPublicActivity,
           searchConsent
         });
-
         ctx.emit('outbox.event.ready', event);
+        await this.deliverObservationToSidecar(event);
       }
     },
-
-    /**
-     * External-authority committed-event path.
-     *
-     * The authoritative Delivery Plan has already been durably queued before
-     * this event fires. Its concrete remote target metadata may be exposed for
-     * observation, but this handler must never create another delivery route.
-     */
     'activitypub.outbox.remote-delivery.handoff-queued': {
       async handler(ctx) {
         if (this.settings.remoteDeliveryMode !== 'external') return;
-
         const { activity, deliveryPlan } = ctx.params;
-        if (!validateDeliveryPlanV1(deliveryPlan)) {
-          throw new Error('Refusing invalid ap.delivery-plan.v1 payload');
-        }
+        if (!validateDeliveryPlanV1(deliveryPlan)) throw new Error('Refusing invalid ap.delivery-plan.v1 payload');
         if (deliveryPlan.activityId !== (activity.id || activity['@id'])) {
           throw new Error('Delivery Plan activityId does not match emitted Activity');
         }
-
         const actorUri = deliveryPlan.actorUri;
         const visibility = deliveryPlan.meta.visibility;
         const isPublicActivity = deliveryPlan.meta.isPublicActivity;
@@ -88,7 +60,6 @@ module.exports = {
           inboxUrl: target.inboxUrl,
           ...(target.sharedInboxUrl ? { sharedInboxUrl: target.sharedInboxUrl } : {})
         }));
-
         const event = await this.buildCommittedEvent(ctx, {
           activity,
           actorUri,
@@ -98,17 +69,12 @@ module.exports = {
           searchConsent,
           deliveryPlanIntentId: deliveryPlan.intentId
         });
-
         ctx.emit('outbox.event.ready', event);
       }
     }
   },
-
   methods: {
-    async buildCommittedEvent(
-      ctx,
-      { activity, actorUri, deliveryTargets, visibility, isPublicActivity, searchConsent, deliveryPlanIntentId }
-    ) {
+    async buildCommittedEvent(ctx, { activity, actorUri, deliveryTargets, visibility, isPublicActivity, searchConsent, deliveryPlanIntentId }) {
       return {
         schema: 'ap.outbox.committed.v1',
         eventId: ulid(),
@@ -131,52 +97,76 @@ module.exports = {
         }
       };
     },
-
+    async deliverObservationToSidecar(event) {
+      const payload = {
+        actorUri: event.actorUri,
+        activityId: event.activityId,
+        activity: event.activity,
+        meta: event.meta
+      };
+      try {
+        await retryWithBackoff(async () => {
+          const headers = {
+            'Content-Type': 'application/json',
+            'X-Event-Id': event.eventId,
+            'X-Event-Schema': event.schema
+          };
+          if (this.settings.sidecarToken) headers.Authorization = `Bearer ${this.settings.sidecarToken}`;
+          const response = await fetch(this.settings.sidecarObservationWebhookUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(this.settings.observationWebhookTimeoutMs)
+          });
+          if (!response.ok) {
+            const error = new Error(`Sidecar observation webhook returned ${response.status}`);
+            error.retryable = response.status === 429 || response.status >= 500;
+            throw error;
+          }
+        }, {
+          maxRetries: Math.max(0, this.settings.observationWebhookRetries - 1),
+          baseDelayMs: 250,
+          maxDelayMs: 5000,
+          retryIf: error => error.retryable !== false
+        });
+      } catch (error) {
+        this.logger.error('Failed to deliver native observation to sidecar after retries', {
+          eventId: event.eventId,
+          activityId: event.activityId,
+          error: error.message
+        });
+      }
+    },
     extractObjectId(activity) {
       const object = activity.object;
       if (!object) return null;
       if (typeof object === 'string') return object;
       return object.id || object['@id'] || null;
     },
-
     isDeleteOrTombstone(activity) {
       const type = activity.type || activity['@type'];
       return type === 'Delete' || type === 'Tombstone' || (type === 'Undo' && activity.object?.type === 'Announce');
     },
-
     determineVisibility(activity) {
       const publicAddress = 'https://www.w3.org/ns/activitystreams#Public';
       const to = Array.isArray(activity.to) ? activity.to : [activity.to];
       const cc = Array.isArray(activity.cc) ? activity.cc : [activity.cc];
-
       if (to.includes(publicAddress) || to.includes('as:Public')) return 'public';
       if (cc.includes(publicAddress) || cc.includes('as:Public')) return 'unlisted';
       if (to.some(r => r?.endsWith('/followers'))) return 'followers';
       return 'direct';
     },
-
     async buildSearchConsent(ctx, activity, actorUri) {
       const obj = activity.object && typeof activity.object === 'object' ? activity.object : activity;
       let attributedToActor = null;
-
       if (actorUri && typeof ctx.call === 'function') {
-        attributedToActor = await Promise.resolve(
-          ctx.call('activitypub.actor.get', {
-            actorUri,
-            webId: 'system'
-          })
-        ).catch(error => {
-          this.logger.warn('Failed to resolve actor search consent for outbox event', {
-            actorUri,
-            error: error.message
-          });
+        attributedToActor = await Promise.resolve(ctx.call('activitypub.actor.get', { actorUri, webId: 'system' })).catch(error => {
+          this.logger.warn('Failed to resolve actor search consent for outbox event', { actorUri, error: error.message });
           return null;
         });
       }
-
       return resolvePublicSearchConsent(obj, { attributedToActor });
     },
-
     extractMetadataHashtags(activity) {
       const obj = activity.object && typeof activity.object === 'object' ? activity.object : activity;
       return extractHashtagsFromText(obj.content || '');
