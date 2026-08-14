@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const {
   LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY,
+  LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY,
   classifyAction,
   createPhase8Tier1Instrumentation,
   normalizeUrl,
@@ -115,13 +116,11 @@ describe('APDM Phase 8 Tier 1 instrumentation', () => {
       const webAcl = instrumentation.middleware.localAction(async () => child({ id: 'child-1' }), {
         name: 'webacl.resource.hasRights'
       });
-
       const root = instrumentation.middleware.localAction(async () => webAcl({ id: 'acl-1' }), {
         name: 'activitypub.outbox.post'
       });
 
       await expect(root({ id: 'root-1', requestID: 'request-1' })).resolves.toBe('child-result');
-
       const [record] = readRecords(outputPath);
       expect(record.phase).toBe('APDM-P8-A');
       expect(record.requestId).toBe('request-1');
@@ -161,7 +160,6 @@ describe('APDM Phase 8 Tier 1 instrumentation', () => {
         await delay(20);
         return 'detached-complete';
       }, { name: 'ldp.remote.store' });
-
       const root = instrumentation.middleware.localAction(async () => {
         observer('start', { id: 'activity-1' });
         void detachedChild({ id: 'detached-child' }).then(
@@ -173,12 +171,41 @@ describe('APDM Phase 8 Tier 1 instrumentation', () => {
 
       await expect(root({ id: 'root-detached', requestID: 'request-detached' })).resolves.toBe('outbox-returned');
       expect(fs.existsSync(outputPath)).toBe(false);
-
       await delay(35);
       const [record] = readRecords(outputPath);
       expect(record.requestId).toBe('request-detached');
       expect(record.actionCounts['ldp.remote.store']).toBe(1);
       expect(record.actionDurationsMs['ldp.remote.store']).toBeGreaterThan(0);
+    } finally {
+      instrumentation.dispose();
+      fs.rmSync(outputDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test('marks a short successful local fan-out unusable even when SemApps reports no failures', async () => {
+    const outputDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'apdm-p8-short-fanout-'));
+    const outputPath = path.join(outputDirectory, 'measurement.jsonl');
+    const instrumentation = createPhase8Tier1Instrumentation({ enabled: true, outputPath, recipientCount: 3 });
+    const observer = globalThis[Symbol.for(LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY)];
+    const resultObserver = globalThis[Symbol.for(LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY)];
+
+    try {
+      const root = instrumentation.middleware.localAction(async () => {
+        const activity = { id: 'activity-short' };
+        observer('start', activity);
+        resultObserver(activity, { success: ['actor-a', 'actor-b'], failures: [] });
+        observer('finish', activity);
+        return 'outbox-returned';
+      }, { name: 'activitypub.outbox.post' });
+
+      await expect(root({ id: 'root-short', requestID: 'request-short' })).resolves.toBe('outbox-returned');
+      const [record] = readRecords(outputPath);
+      expect(record.errors).toContainEqual({
+        source: 'detached-local-delivery-count-mismatch',
+        expectedRecipientCount: 3,
+        successfulRecipientCount: 2,
+        failureCount: 0
+      });
     } finally {
       instrumentation.dispose();
       fs.rmSync(outputDirectory, { recursive: true, force: true });
@@ -199,12 +226,10 @@ describe('APDM Phase 8 Tier 1 instrumentation', () => {
         name: 'activitypub.outbox.post'
       });
 
-      await expect(
-        Promise.all([
-          root({ id: 'root-a', requestID: 'request-a', delayMs: 20, value: 'a' }),
-          root({ id: 'root-b', requestID: 'request-b', delayMs: 1, value: 'b' })
-        ])
-      ).resolves.toEqual(['a', 'b']);
+      await expect(Promise.all([
+        root({ id: 'root-a', requestID: 'request-a', delayMs: 20, value: 'a' }),
+        root({ id: 'root-b', requestID: 'request-b', delayMs: 1, value: 'b' })
+      ])).resolves.toEqual(['a', 'b']);
 
       const records = readRecords(outputPath).sort((a, b) => a.requestId.localeCompare(b.requestId));
       expect(records.map(record => record.requestId)).toEqual(['request-a', 'request-b']);
@@ -234,7 +259,6 @@ describe('APDM Phase 8 Tier 1 instrumentation', () => {
       const root = instrumentation.middleware.localAction(async () => 'delivery-succeeded', {
         name: 'activitypub.outbox.post'
       });
-
       await expect(root({ id: 'root-write-failure' })).resolves.toBe('delivery-succeeded');
       expect(instrumentationErrors.length).toBeGreaterThan(0);
     } finally {
