@@ -5,6 +5,7 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const {
+  LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY,
   classifyAction,
   createPhase8Tier1Instrumentation,
   normalizeUrl,
@@ -68,6 +69,8 @@ describe('APDM Phase 8 Tier 1 instrumentation', () => {
 
   test('disabled mode does not patch Node HTTP or expose a middleware', () => {
     const originalRequest = http.request;
+    const observerKey = Symbol.for(LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY);
+    const previousObserver = globalThis[observerKey];
     const instrumentation = createPhase8Tier1Instrumentation({
       enabled: false,
       fusekiBase: 'http://127.0.0.1:3030/'
@@ -75,8 +78,10 @@ describe('APDM Phase 8 Tier 1 instrumentation', () => {
 
     expect(instrumentation.middleware).toBeNull();
     expect(http.request).toBe(originalRequest);
+    expect(globalThis[observerKey]).toBe(previousObserver);
     instrumentation.dispose();
     expect(http.request).toBe(originalRequest);
+    expect(globalThis[observerKey]).toBe(previousObserver);
   });
 
   test('captures nested actions, Fuseki HTTP, CPU/heap and the configured recipient case in one root trace', async () => {
@@ -141,6 +146,41 @@ describe('APDM Phase 8 Tier 1 instrumentation', () => {
     } finally {
       instrumentation.dispose();
       await close(server);
+      fs.rmSync(outputDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test('waits for detached local delivery before writing the root trace', async () => {
+    const outputDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'apdm-p8-detached-'));
+    const outputPath = path.join(outputDirectory, 'measurement.jsonl');
+    const instrumentation = createPhase8Tier1Instrumentation({ enabled: true, outputPath, recipientCount: 1 });
+    const observer = globalThis[Symbol.for(LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY)];
+
+    try {
+      const detachedChild = instrumentation.middleware.localAction(async () => {
+        await delay(20);
+        return 'detached-complete';
+      }, { name: 'ldp.remote.store' });
+
+      const root = instrumentation.middleware.localAction(async () => {
+        observer('start', { id: 'activity-1' });
+        void detachedChild({ id: 'detached-child' }).then(
+          () => observer('finish', { id: 'activity-1' }),
+          error => observer('finish', { id: 'activity-1' }, error)
+        );
+        return 'outbox-returned';
+      }, { name: 'activitypub.outbox.post' });
+
+      await expect(root({ id: 'root-detached', requestID: 'request-detached' })).resolves.toBe('outbox-returned');
+      expect(fs.existsSync(outputPath)).toBe(false);
+
+      await delay(35);
+      const [record] = readRecords(outputPath);
+      expect(record.requestId).toBe('request-detached');
+      expect(record.actionCounts['ldp.remote.store']).toBe(1);
+      expect(record.elapsedMs).toBeGreaterThanOrEqual(20);
+    } finally {
+      instrumentation.dispose();
       fs.rmSync(outputDirectory, { recursive: true, force: true });
     }
   });
