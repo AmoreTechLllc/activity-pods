@@ -107,13 +107,16 @@ jobs:
         env:
           APDM_P8_ENABLED: 'false'
           APDM_P8_COUNT: '0'
+        shell: bash
         run: |
+          set -euo pipefail
           docker compose \
             -f docker-compose-test.yml \
             -f docker-compose-phase8.yml \
             exec -T backend \
             node scripts/apdm-phase8-real-measure.js \
-              provision /app/backend/measurements/apdm-p8-actors.json 1000
+              provision /app/backend/measurements/apdm-p8-actors.json 1000 \
+            2>&1 | tee measurements/apdm-p8-provision.log
 
       - name: Measure canonical recipient matrix serially
         shell: bash
@@ -173,6 +176,7 @@ jobs:
         with:
           name: apdm-phase8-real-measurements-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            pod-provider/measurements/apdm-p8-provision.log
             pod-provider/measurements/apdm-p8-actors.json
             pod-provider/measurements/apdm-p8-1.jsonl
             pod-provider/measurements/apdm-p8-10.jsonl
