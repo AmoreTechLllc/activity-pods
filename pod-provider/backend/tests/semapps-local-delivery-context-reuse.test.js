@@ -35,6 +35,38 @@ async localPost(recipients, activityToPost) {
 `;
 }
 
+function loadInstalledLocalPost() {
+  const packageRoot = findPackageRoot();
+  const outboxFile = locateOutboxSource(packageRoot);
+  delete require.cache[require.resolve(outboxFile)];
+  const service = require(outboxFile);
+  return service.methods.localPost;
+}
+
+function createLocalPostHarness({ account } = {}) {
+  const calls = [];
+  const emitted = [];
+  const broker = {
+    call: jest.fn(async (action, params, options) => {
+      calls.push({ action, params, options });
+      if (action === 'auth.account.findByWebId') return account;
+      if (action === 'activitypub.actor.getCollectionUri') return 'https://pod.example/alice/inbox';
+      return undefined;
+    }),
+    emit: jest.fn((event, payload) => emitted.push({ event, payload }))
+  };
+
+  return {
+    service: {
+      broker,
+      settings: { podProvider: true },
+      logger: { error: jest.fn(), warn: jest.fn() }
+    },
+    calls,
+    emitted
+  };
+}
+
 describe('APDM Phase 7 SemApps local delivery patch', () => {
   test('published dependency is pinned to the version the patch was reviewed against', () => {
     const packageRoot = findPackageRoot();
@@ -54,7 +86,80 @@ describe('APDM Phase 7 SemApps local delivery patch', () => {
     expect(source).toContain("this.broker.call('auth.account.findByWebId', { webId: recipientUri })");
   });
 
-  test('normal post-to-localPost path carries dataset context and preserves a legacy fallback', () => {
+  test('normal localPost path reuses resolved dataset with zero duplicate account lookups', async () => {
+    const localPost = loadInstalledLocalPost();
+    const { service, calls, emitted } = createLocalPostHarness({
+      account: { username: 'should-not-be-read' }
+    });
+    const recipientUri = 'https://pod.example/alice';
+    const activity = {
+      id: 'https://pod.example/activities/1',
+      type: 'Create',
+      actor: 'https://pod.example/bob',
+      object: 'https://pod.example/objects/1'
+    };
+    const result = await localPost.call(
+      service,
+      [recipientUri],
+      activity,
+      new Map([[recipientUri, { dataset: 'alice-dataset' }]])
+    );
+
+    expect(result).toEqual({ success: [recipientUri], failures: [] });
+    expect(calls.filter(call => call.action === 'auth.account.findByWebId')).toHaveLength(0);
+
+    const datasetBoundCalls = calls.filter(call =>
+      [
+        'activitypub.actor.getCollectionUri',
+        'activitypub.collection.add',
+        'ldp.remote.store',
+        'activitypub.activity.attach'
+      ].includes(call.action)
+    );
+    expect(datasetBoundCalls).toHaveLength(4);
+
+    const getInbox = datasetBoundCalls.find(call => call.action === 'activitypub.actor.getCollectionUri');
+    const addInbox = datasetBoundCalls.find(call => call.action === 'activitypub.collection.add');
+    const remoteStore = datasetBoundCalls.find(call => call.action === 'ldp.remote.store');
+    const attach = datasetBoundCalls.find(call => call.action === 'activitypub.activity.attach');
+
+    expect(getInbox.options).toEqual({ meta: { dataset: 'alice-dataset' } });
+    expect(addInbox.options).toEqual({ meta: { dataset: 'alice-dataset' } });
+    expect(remoteStore.params.dataset).toBe('alice-dataset');
+    expect(remoteStore.params.webId).toBe(recipientUri);
+    expect(attach.options).toEqual({ meta: { dataset: 'alice-dataset' } });
+    expect(emitted).toEqual([
+      {
+        event: 'activitypub.inbox.received',
+        payload: { activity, recipients: [recipientUri], local: true }
+      }
+    ]);
+  });
+
+  test('legacy direct localPost caller keeps original account lookup and dataset behavior', async () => {
+    const localPost = loadInstalledLocalPost();
+    const { service, calls } = createLocalPostHarness({ account: { username: 'alice-dataset' } });
+    const recipientUri = 'https://pod.example/alice';
+    const activity = {
+      id: 'https://pod.example/activities/2',
+      type: 'Like',
+      actor: 'https://pod.example/bob',
+      object: 'https://remote.example/objects/2'
+    };
+    const result = await localPost.call(service, [recipientUri], activity);
+
+    expect(result).toEqual({ success: [recipientUri], failures: [] });
+    expect(calls.filter(call => call.action === 'auth.account.findByWebId')).toHaveLength(1);
+    expect(calls.find(call => call.action === 'ldp.remote.store').params.dataset).toBe('alice-dataset');
+    expect(calls.find(call => call.action === 'activitypub.collection.add').options).toEqual({
+      meta: { dataset: 'alice-dataset' }
+    });
+    expect(calls.find(call => call.action === 'activitypub.activity.attach').options).toEqual({
+      meta: { dataset: 'alice-dataset' }
+    });
+  });
+
+  test('normal post-to-localPost source carries dataset context and preserves a legacy fallback', () => {
     const result = patchOutboxSource(representativeOutboxSource());
 
     expect(result.changed).toBe(true);
@@ -70,8 +175,8 @@ describe('APDM Phase 7 SemApps local delivery patch', () => {
       ": await this.broker.call('auth.account.findByWebId', { webId: recipientUri });"
     );
 
-    // The first lookup still validates that the local actor has a real account. The second lookup
-    // remains only as a backward-compatible fallback for direct localPost callers without context.
+    // The first lookup still validates that the local actor has a real account. The second textual lookup
+    // remains only as a backward-compatible branch for direct localPost callers without resolved context.
     expect((result.source.match(/auth\.account\.findByWebId/gu) || []).length).toBe(2);
   });
 
