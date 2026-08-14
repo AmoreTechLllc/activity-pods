@@ -11,7 +11,7 @@ const {
   patchOutboxSource
 } = require('../scripts/patch-semapps-activitypub-local-delivery');
 const {
-  createActivityPubServiceWithDeliveryStrategy,
+  assertSupportedSemappsOutboxShape,
   createOutboxPostHandler
 } = require('../lib/activitypub-service-with-delivery-strategy');
 
@@ -41,12 +41,15 @@ async localPost(recipients, activityToPost) {
 `;
 }
 
-function loadInstalledLocalPost() {
+function loadInstalledOutboxService() {
   const packageRoot = findPackageRoot();
   const outboxFile = locateOutboxSource(packageRoot);
   delete require.cache[require.resolve(outboxFile)];
-  const service = require(outboxFile);
-  return service.methods.localPost;
+  return require(outboxFile);
+}
+
+function loadInstalledLocalPost() {
+  return loadInstalledOutboxService().methods.localPost;
 }
 
 function createLocalPostHarness({ account } = {}) {
@@ -114,7 +117,8 @@ describe('APDM Phase 7 SemApps local delivery patch', () => {
   });
 
   test('delivery-strategy startup guard accepts the installed Phase 7 outbox shape', () => {
-    expect(() => createActivityPubServiceWithDeliveryStrategy()).not.toThrow();
+    const outboxService = loadInstalledOutboxService();
+    expect(() => assertSupportedSemappsOutboxShape(outboxService)).not.toThrow();
   });
 
   test('normal localPost path reuses resolved dataset with zero duplicate account lookups and removes private context', async () => {
@@ -207,7 +211,9 @@ describe('APDM Phase 7 SemApps local delivery patch', () => {
     await expect(wrapped.call(service, {})).resolves.toBe(activity);
 
     expect(nativeLocalPost).toHaveBeenCalledTimes(1);
-    expect(nativeLocalPost).toHaveBeenCalledWith([recipientUri], activity);
+    const [passedRecipients, passedActivity] = nativeLocalPost.mock.calls[0];
+    expect(passedRecipients).toEqual([recipientUri]);
+    expect(passedActivity).toBe(activity);
     expect(calls.filter(call => call.action === 'auth.account.findByWebId')).toHaveLength(0);
     expect(calls.find(call => call.action === 'ldp.remote.store').params.dataset).toBe('alice-dataset');
     expect(activity[Symbol.for(LOCAL_CONTEXT_SYMBOL_KEY)]).toBeUndefined();
