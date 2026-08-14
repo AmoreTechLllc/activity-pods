@@ -3,14 +3,88 @@
 const {
   assertUsableRecord,
   boundedMap,
+  createBenchmarkUsername,
+  isUsernameNotAllowed,
   normalizeRunId,
-  positiveInteger
+  positiveInteger,
+  signupWithCandidateRetries
 } = require('../scripts/apdm-phase8-real-measure');
 
 describe('APDM Phase 8 real measurement runner', () => {
   test('normalizes run IDs into bounded signup-safe prefixes', () => {
     expect(normalizeRunId('31834711667-2')).toMatch(/^p8[a-z0-9]+$/u);
     expect(normalizeRunId('31834711667-2').length).toBeLessThanOrEqual(12);
+  });
+
+  test('generates bounded distinct benchmark username candidates', () => {
+    const first = createBenchmarkUsername({ runId: '31834711667-2', role: 'recipient', index: 7, attempt: 0 });
+    const second = createBenchmarkUsername({ runId: '31834711667-2', role: 'recipient', index: 7, attempt: 1 });
+    const otherRecipient = createBenchmarkUsername({ runId: '31834711667-2', role: 'recipient', index: 8, attempt: 0 });
+    const sender = createBenchmarkUsername({ runId: '31834711667-2', role: 'sender' });
+
+    expect(first).toMatch(/^p8mr[a-f0-9]{16}$/u);
+    expect(sender).toMatch(/^p8ms[a-f0-9]{16}$/u);
+    expect(first).not.toBe(second);
+    expect(first).not.toBe(otherRecipient);
+  });
+
+  test('recognizes only the normal username-moderation rejection as candidate-regenerable', () => {
+    const moderationError = Object.assign(new Error('username is not available'), {
+      status: 422,
+      body: { type: 'USERNAME_NOT_ALLOWED' }
+    });
+    const other422 = Object.assign(new Error('other validation'), { status: 422, body: { type: 'OTHER' } });
+
+    expect(isUsernameNotAllowed(moderationError)).toBe(true);
+    expect(isUsernameNotAllowed(other422)).toBe(false);
+  });
+
+  test('regenerates a fresh username after deterministic moderation rejection', async () => {
+    const attempted = [];
+    const signupFn = async (_baseUrl, username) => {
+      attempted.push(username);
+      if (attempted.length === 1) {
+        throw Object.assign(new Error('This username is not available.'), {
+          status: 422,
+          body: { type: 'USERNAME_NOT_ALLOWED' }
+        });
+      }
+      return { username, webId: `http://localhost:3000/${username}` };
+    };
+
+    await expect(
+      signupWithCandidateRetries({
+        baseUrl: 'http://localhost:3000',
+        password: 'unused',
+        runId: 'run-1',
+        role: 'recipient',
+        index: 7,
+        maxAttempts: 3,
+        signupFn
+      })
+    ).resolves.toMatchObject({ webId: expect.stringContaining('http://localhost:3000/') });
+
+    expect(attempted).toHaveLength(2);
+    expect(attempted[0]).not.toBe(attempted[1]);
+  });
+
+  test('does not regenerate on unrelated signup failures', async () => {
+    const signupFn = jest.fn(async () => {
+      throw Object.assign(new Error('email rejected'), { status: 422, body: { type: 'EMAIL_INVALID' } });
+    });
+
+    await expect(
+      signupWithCandidateRetries({
+        baseUrl: 'http://localhost:3000',
+        password: 'unused',
+        runId: 'run-1',
+        role: 'recipient',
+        index: 7,
+        maxAttempts: 3,
+        signupFn
+      })
+    ).rejects.toThrow('email rejected');
+    expect(signupFn).toHaveBeenCalledTimes(1);
   });
 
   test('rejects invalid positive-integer settings', () => {
