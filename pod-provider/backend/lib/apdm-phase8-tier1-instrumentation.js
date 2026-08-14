@@ -254,7 +254,7 @@ function createPhase8Tier1Instrumentation(options = {}) {
 
   const observerKey = Symbol.for(LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY);
   const previousLocalDeliveryObserver = globalThis[observerKey];
-  const localDeliveryObserver = (phase, _activity, error) => {
+  const localDeliveryObserver = (phase, _activity, error, result) => {
     const trace = storage.getStore();
     if (!trace) return;
 
@@ -269,6 +269,13 @@ function createPhase8Tier1Instrumentation(options = {}) {
           source: 'detached-local-delivery',
           name: error.name || 'Error',
           message: error.message || String(error)
+        });
+      }
+      if (result && Array.isArray(result.failures) && result.failures.length > 0) {
+        trace.errors.push({
+          source: 'detached-local-delivery-partial',
+          failureCount: result.failures.length,
+          failures: [...result.failures]
         });
       }
       trace.pendingDetachedLocalDeliveries = Math.max(0, trace.pendingDetachedLocalDeliveries - 1);
