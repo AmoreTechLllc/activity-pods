@@ -1,0 +1,193 @@
+name: APDM Phase 8 real local measurements
+
+on:
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: Canonical measured samples per recipient count
+        required: false
+        default: '3'
+      warmups:
+        description: Warmup roots per recipient count
+        required: false
+        default: '1'
+      provision_concurrency:
+        description: Maximum concurrent benchmark-account signups
+        required: false
+        default: '12'
+  push:
+    branches:
+      - apdm/phase-8-real-measurement-runner
+    paths:
+      - '.github/workflows/apdm-phase8-real-measurement.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  measure-real-local-fanout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        working-directory: pod-provider
+    env:
+      APDM_P8_RUN_ID: '${{ github.run_id }}-${{ github.run_attempt }}'
+      APDM_P8_SAMPLES: "${{ github.event.inputs.samples || '3' }}"
+      APDM_P8_WARMUPS: "${{ github.event.inputs.warmups || '1' }}"
+      APDM_P8_PROVISION_CONCURRENCY: "${{ github.event.inputs.provision_concurrency || '12' }}"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Prepare measurement directory
+        run: |
+          rm -rf measurements
+          mkdir -p measurements
+
+      - name: Start real Fuseki, Redis and mailcatcher
+        run: |
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            up -d fuseki_test redis mailcatcher
+
+      - name: Bootstrap Fuseki datasets
+        env:
+          FUSEKI_URL: http://localhost:3040
+          AUTH_DATASET: settings
+          WAIT_SECONDS: '60'
+        run: ./scripts/fuseki-bootstrap.sh
+
+      - name: Build benchmark backend image
+        run: |
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            build backend
+
+      - name: Start backend for actor provisioning
+        env:
+          APDM_P8_ENABLED: 'false'
+          APDM_P8_COUNT: '0'
+        run: |
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            up -d --no-deps backend
+
+          for attempt in $(seq 1 120); do
+            if curl -sS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'Backend did not become reachable for provisioning' >&2
+          exit 1
+
+      - name: Provision one sender and 1000 real local recipients
+        env:
+          APDM_P8_ENABLED: 'false'
+          APDM_P8_COUNT: '0'
+        run: |
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            exec -T backend \
+            node scripts/apdm-phase8-real-measure.js \
+              provision /app/backend/measurements/apdm-p8-actors.json 1000
+
+      - name: Measure canonical recipient matrix serially
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for count in 1 10 100 200 1000; do
+            echo "[APDM-P8] recreating backend for N=${count}"
+            export APDM_P8_ENABLED=true
+            export APDM_P8_COUNT="${count}"
+
+            docker compose \
+              -f docker-compose-test.yml \
+              -f docker-compose-phase8.yml \
+              up -d --force-recreate --no-deps backend
+
+            ready=false
+            for attempt in $(seq 1 120); do
+              if curl -sS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then
+                ready=true
+                break
+              fi
+              sleep 1
+            done
+            if [[ "${ready}" != true ]]; then
+              echo "Backend did not become reachable for N=${count}" >&2
+              exit 1
+            fi
+
+            docker compose \
+              -f docker-compose-test.yml \
+              -f docker-compose-phase8.yml \
+              exec -T backend \
+              node scripts/apdm-phase8-real-measure.js \
+                measure /app/backend/measurements/apdm-p8-actors.json "${count}"
+          done
+
+      - name: Reconcile real measurement matrix
+        run: |
+          cat \
+            measurements/apdm-p8-1.jsonl \
+            measurements/apdm-p8-10.jsonl \
+            measurements/apdm-p8-100.jsonl \
+            measurements/apdm-p8-200.jsonl \
+            measurements/apdm-p8-1000.jsonl \
+            > measurements/apdm-p8-all.jsonl
+
+          node backend/scripts/apdm-phase8-summarize.js \
+            measurements/apdm-p8-all.jsonl \
+            measurements/apdm-p8-summary.json
+
+          cat measurements/apdm-p8-summary.json
+
+      - name: Upload Phase 8 raw and summarized measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apdm-phase8-real-measurements-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            pod-provider/measurements/apdm-p8-actors.json
+            pod-provider/measurements/apdm-p8-1.jsonl
+            pod-provider/measurements/apdm-p8-10.jsonl
+            pod-provider/measurements/apdm-p8-100.jsonl
+            pod-provider/measurements/apdm-p8-200.jsonl
+            pod-provider/measurements/apdm-p8-1000.jsonl
+            pod-provider/measurements/apdm-p8-all.jsonl
+            pod-provider/measurements/apdm-p8-summary.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Show container logs on failure
+        if: failure()
+        run: |
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            ps || true
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            logs --no-color --tail=400 backend fuseki_test redis || true
+
+      - name: Stop benchmark stack
+        if: always()
+        run: |
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            down -v || true
