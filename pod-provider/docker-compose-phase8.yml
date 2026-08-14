@@ -1,9 +1,11 @@
 services:
   backend:
     environment:
-      # Phase 8 measures ActivityPub local fan-out. Skip unrelated ATProto
-      # provisioning while creating the benchmark actors.
+      # Phase 8 measures ActivityPub local fan-out. Disable only the unrelated
+      # ATProto account projection; Tier 1 Pod/key/ActivityPub bootstrap still
+      # runs and the signup hook below waits for the full local registry state.
       APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
+      APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
 
       # Keep the benchmark local-only and suppress the transitional sidecar
       # observer so unrelated failed HTTP attempts cannot contaminate samples.
