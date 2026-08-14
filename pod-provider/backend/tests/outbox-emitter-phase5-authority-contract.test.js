@@ -26,9 +26,10 @@ describe('APDM Phase 5/6 committed outbox authority contract', () => {
   });
 
   test('post-durable handler emits readiness without a second sidecar delivery', () => {
-    const durableHandler = between("'activitypub.outbox.remote-delivery.handoff-queued':", '\n  },\n\n  methods:');
+    const durableHandler = between("'activitypub.outbox.remote-delivery.handoff-queued':", '\n  },\n  methods:');
     expect(durableHandler).toContain("ctx.emit('outbox.event.ready', event)");
-    expect(durableHandler).not.toContain('deliverToSidecar');
+    expect(durableHandler).not.toContain('deliverObservationToSidecar');
+    expect(durableHandler).not.toContain('remoteTargets');
   });
 
   test('Phase 6 removes the legacy raw recipient-routing surface', () => {
@@ -40,9 +41,14 @@ describe('APDM Phase 5/6 committed outbox authority contract', () => {
     expect(source).not.toContain('SIDECAR_WEBHOOK_URL');
   });
 
-  test('native rollback remains observation-only in the emitter', () => {
+  test('native rollback uses only the dedicated targetless observation transport', () => {
     const rawHandler = between("'activitypub.outbox.posted':", "'activitypub.outbox.remote-delivery.handoff-queued':");
+    const observationMethod = between('async deliverObservationToSidecar(event)', '\n    extractObjectId(activity)');
     expect(rawHandler).toContain('deliveryTargets: []');
     expect(rawHandler).toContain("ctx.emit('outbox.event.ready', event)");
+    expect(rawHandler).toContain('deliverObservationToSidecar(event)');
+    expect(observationMethod).toContain('SIDECAR_OBSERVATION_WEBHOOK_URL');
+    expect(observationMethod).not.toContain('remoteTargets');
+    expect(observationMethod).not.toContain('deliveryTargets');
   });
 });
