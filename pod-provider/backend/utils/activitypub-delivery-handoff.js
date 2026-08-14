@@ -34,6 +34,11 @@ function assertDurableHandoffConfigured(settings) {
 }
 
 function toSidecarOutboxPayload(deliveryPlan) {
+  const apdmAuthority = {
+    schema: deliveryPlan.schema,
+    intentId: deliveryPlan.intentId
+  };
+
   return {
     actorUri: deliveryPlan.actorUri,
     activityId: deliveryPlan.activityId,
@@ -41,7 +46,12 @@ function toSidecarOutboxPayload(deliveryPlan) {
     remoteTargets: deliveryPlan.remoteRecipients.map(target => ({
       inboxUrl: target.inboxUrl,
       ...(target.sharedInboxUrl ? { sharedInboxUrl: target.sharedInboxUrl } : {}),
-      targetDomain: target.targetDomain
+      targetDomain: target.targetDomain,
+      // Phase 6 wire proof: the sidecar target normalizer rejects legacy raw
+      // routing submissions that do not carry one consistent Delivery Plan
+      // authority marker across every target. This is transport metadata only;
+      // it is not added to ap.delivery-plan.v1 itself.
+      apdmAuthority
     })),
     meta: {
       ...deliveryPlan.meta,
