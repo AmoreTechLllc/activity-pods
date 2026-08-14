@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const fetch = require('node-fetch');
@@ -13,6 +14,7 @@ const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_SAMPLE_TIMEOUT_MS = 900_000;
 const DEFAULT_SAMPLES = 3;
 const DEFAULT_WARMUPS = 1;
+const DEFAULT_USERNAME_CANDIDATE_ATTEMPTS = 12;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -30,6 +32,21 @@ function normalizeRunId(value) {
     .replace(/[^a-z0-9]/g, '')
     .slice(-10);
   return `p8${cleaned || 'local'}`;
+}
+
+function createBenchmarkUsername({ runId, role, index = 0, attempt = 0 }) {
+  const roleToken = role === 'sender' ? 's' : 'r';
+  const seed = `${normalizeRunId(runId)}:${roleToken}:${index}:${attempt}`;
+  const digest = crypto.createHash('sha256').update(seed).digest('hex');
+  return `p8m${roleToken}${digest.slice(0, 16)}`;
+}
+
+function isUsernameNotAllowed(error) {
+  return Boolean(
+    error &&
+      Number(error.status) === 422 &&
+      (error.body?.type === 'USERNAME_NOT_ALLOWED' || /USERNAME_NOT_ALLOWED|username is not available/iu.test(error.message || ''))
+  );
 }
 
 function readJsonLines(file) {
@@ -75,9 +92,14 @@ async function requestJsonWithRetry(url, options, { attempts = 5, timeoutMs = 30
 
       if (response.ok) return body;
       const error = new Error(`HTTP ${response.status}: ${JSON.stringify(body)}`);
-      if (response.status < 500 && response.status !== 408 && response.status !== 429) throw error;
+      error.status = response.status;
+      error.body = body;
+      const retryable = response.status >= 500 || response.status === 408 || response.status === 429;
+      if (!retryable) throw error;
       lastError = error;
     } catch (error) {
+      const status = Number(error && error.status);
+      if (Number.isFinite(status) && status < 500 && status !== 408 && status !== 429) throw error;
       lastError = error;
     }
 
@@ -99,6 +121,36 @@ async function signup(baseUrl, username, password) {
 
   if (!body.webId) throw new Error(`Signup for ${username} did not return webId`);
   return { username, webId: body.webId };
+}
+
+async function signupWithCandidateRetries({
+  baseUrl,
+  password,
+  runId,
+  role,
+  index = 0,
+  maxAttempts = DEFAULT_USERNAME_CANDIDATE_ATTEMPTS,
+  signupFn = signup
+}) {
+  let lastModerationError;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const username = createBenchmarkUsername({ runId, role, index, attempt });
+    try {
+      return await signupFn(baseUrl, username, password);
+    } catch (error) {
+      if (!isUsernameNotAllowed(error)) throw error;
+      lastModerationError = error;
+      process.stderr.write(
+        `[APDM-P8] benchmark username candidate rejected by normal moderation; regenerating role=${role} index=${index} attempt=${attempt + 1}/${maxAttempts}\n`
+      );
+    }
+  }
+
+  throw new Error(
+    `Unable to obtain an allowed benchmark username after ${maxAttempts} candidates for role=${role} index=${index}: ${
+      lastModerationError?.message || 'all candidates rejected'
+    }`
+  );
 }
 
 function createRemoteBroker(transporterUrl) {
@@ -144,14 +196,24 @@ async function provisionActors({ manifestPath, recipientCount, baseUrl, transpor
 
     const prefix = normalizeRunId(runId);
     const password = process.env.APDM_P8_SIGNUP_PASSWORD || 'Phase8MeasurePass123!';
-    const sender = await signup(baseUrl, `${prefix}s`, password);
+    const sender = await signupWithCandidateRetries({
+      baseUrl,
+      password,
+      runId: prefix,
+      role: 'sender'
+    });
     sender.outbox = await waitForCollection(broker, sender, 'outbox', readyTimeoutMs);
 
     const indexes = Array.from({ length: recipientCount }, (_, index) => index + 1);
     let completed = 0;
     const recipients = await boundedMap(indexes, concurrency, async index => {
-      const username = `${prefix}r${String(index).padStart(4, '0')}`;
-      const recipient = await signup(baseUrl, username, password);
+      const recipient = await signupWithCandidateRetries({
+        baseUrl,
+        password,
+        runId: prefix,
+        role: 'recipient',
+        index
+      });
       recipient.inbox = await waitForCollection(broker, recipient, 'inbox', readyTimeoutMs);
       completed += 1;
       if (completed === recipientCount || completed % 50 === 0) {
@@ -336,8 +398,11 @@ module.exports = {
   REQUIRED_RECIPIENT_COUNTS,
   assertUsableRecord,
   boundedMap,
+  createBenchmarkUsername,
+  isUsernameNotAllowed,
   normalizeRunId,
   positiveInteger,
   readJsonLines,
+  signupWithCandidateRetries,
   waitForRecordCount
 };
