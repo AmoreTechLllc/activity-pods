@@ -1,0 +1,69 @@
+name: APDM P7 wrapper patcher
+
+on:
+  push:
+    branches:
+      - apdm/phase-7-remove-duplicate-local-account-lookup
+    paths:
+      - .github/workflows/apdm-p7-wrapper-patcher.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: apdm/phase-7-remove-duplicate-local-account-lookup
+          fetch-depth: 0
+      - name: Patch ActivityPub delivery strategy wrapper
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('pod-provider/backend/lib/activitypub-service-with-delivery-strategy.js')
+          source = path.read_text()
+
+          replacements = [
+              (
+                  "  'this.localPost(localRecipients, activity)'\n",
+                  "  'this.localPost(localRecipients, activity, localRecipientContexts)'\n",
+                  'patched outbox interception marker',
+              ),
+              (
+                  "      executionContext.localPost = (recipients, localActivity) => {\n"
+                  "        capturedLocalPosts.push({\n"
+                  "          recipients: Array.isArray(recipients) ? [...recipients] : recipients,\n"
+                  "          activity: localActivity\n"
+                  "        });\n"
+                  "        return nativeLocalPost(recipients, localActivity);\n"
+                  "      };\n",
+                  "      executionContext.localPost = (recipients, localActivity, localRecipientContexts) => {\n"
+                  "        capturedLocalPosts.push({\n"
+                  "          recipients: Array.isArray(recipients) ? [...recipients] : recipients,\n"
+                  "          activity: localActivity\n"
+                  "        });\n"
+                  "        return nativeLocalPost(recipients, localActivity, localRecipientContexts);\n"
+                  "      };\n",
+                  'external localPost context forwarding',
+              ),
+          ]
+
+          for old, new, label in replacements:
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f'APDM-P7: expected exactly one {label} match, found {count}')
+              source = source.replace(old, new)
+
+          path.write_text(source)
+          PY
+      - name: Commit patch and remove one-shot workflow
+        run: |
+          rm .github/workflows/apdm-p7-wrapper-patcher.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add pod-provider/backend/lib/activitypub-service-with-delivery-strategy.js .github/workflows/apdm-p7-wrapper-patcher.yml
+          git commit -m 'fix(apdm): preserve local recipient context through strategy wrapper'
+          git push origin HEAD:apdm/phase-7-remove-duplicate-local-account-lookup
