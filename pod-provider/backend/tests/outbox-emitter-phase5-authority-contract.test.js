@@ -30,4 +30,14 @@ describe('APDM Phase 5 committed outbox authority contract', () => {
     expect(durableHandler).toContain("ctx.emit('outbox.event.ready', event)");
     expect(durableHandler).not.toContain('deliverToSidecar');
   });
+
+  test('legacy manual emitter cannot create a second sidecar submission in external mode', () => {
+    const emitAction = between('emitEvent: {', '\n\n    /**\n     * Resolve delivery targets');
+    const guardIndex = emitAction.indexOf("remoteDeliveryMode === 'external'");
+    const deliveryIndex = emitAction.indexOf('deliverToSidecar');
+
+    expect(guardIndex).toBeGreaterThanOrEqual(0);
+    expect(emitAction).toContain('authoritative Delivery Plan handoff');
+    expect(deliveryIndex).toBeGreaterThan(guardIndex);
+  });
 });
