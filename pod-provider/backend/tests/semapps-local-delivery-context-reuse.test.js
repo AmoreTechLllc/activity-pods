@@ -42,8 +42,8 @@ async localPost(recipients, activityToPost) {
     const dataset = this.settings.podProvider ? account.username : undefined;
     success.push(recipientUri);
   }
-  return { success, failures };
-}
+      return { success, failures };
+    }
 `;
 }
 
