@@ -220,17 +220,20 @@ module.exports = {
 
     async isReady(ctx, collectionUri) {
       if (this.dirtyCollections.has(collectionUri)) return false;
-      const result = await this.triQuery(
+      const rows = await this.triQuery(
         ctx,
         `
           PREFIX apods: <${APODS}>
-          ASK {
+          SELECT ?ready
+          WHERE {
             <${this.stateUri(collectionUri)}> a ${STATE_TYPE} ;
-              apods:ready true .
+              apods:ready ?ready .
+            FILTER(?ready = true)
           }
+          LIMIT 1
         `
       );
-      return result === true || result?.boolean === true || result?.value === true;
+      return Array.isArray(rows) && rows.length > 0;
     },
 
     async ensureReady(ctx, collectionUri) {
