@@ -6,6 +6,13 @@ const DEFAULT_TRANSPORTER_URL = 'redis://redis:6379/12';
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_POLL_MS = 500;
 const COMPLETED_PREDICATE = 'http://activitypods.org/ns/core#completed';
+const REQUIRED_RESTART_SERVICES = Object.freeze([
+  'triplestore',
+  'activitypub.outbox',
+  'activitypub.actor',
+  'activitypub.blocked',
+  'activitypub.muted'
+]);
 const REQUIRED_MIGRATION_MARKERS = Object.freeze([
   'urn:activitypods:migration:blocked-collections-v1',
   'urn:activitypods:migration:muted-collections-v1'
@@ -63,7 +70,13 @@ async function waitForWarmRestartReady({
   const broker = brokerFactory(transporterUrl);
   await broker.start();
   try {
-    await broker.waitForServices(['triplestore', 'activitypub.outbox', 'activitypub.actor'], timeoutMs);
+    // Marker durability alone is not a restart barrier: on a warm restart the
+    // marker may already exist before activitypub.blocked/activitypub.muted
+    // have completed their current started() hooks. Require both collection
+    // services themselves to be available before checking the durable marker
+    // state, so their O(1) registration/query startup work cannot overlap a
+    // measured root.
+    await broker.waitForServices([...REQUIRED_RESTART_SERVICES], timeoutMs);
 
     const deadline = Date.now() + timeoutMs;
     let lastError;
@@ -81,6 +94,7 @@ async function waitForWarmRestartReady({
         if (lastMissing.length === 0) {
           return {
             ready: true,
+            services: [...REQUIRED_RESTART_SERVICES],
             markers: [...REQUIRED_MIGRATION_MARKERS]
           };
         }
@@ -117,6 +131,7 @@ if (require.main === module) {
 module.exports = {
   COMPLETED_PREDICATE,
   REQUIRED_MIGRATION_MARKERS,
+  REQUIRED_RESTART_SERVICES,
   markerQuery,
   markerValues,
   missingMarkers,
