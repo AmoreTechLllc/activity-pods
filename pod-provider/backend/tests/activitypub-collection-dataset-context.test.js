@@ -61,15 +61,22 @@ describe('ActivityPub collection service dataset context', () => {
     ['blocked inverse', blockedService, 'resolveBlocksCollectionUri'],
     ['blocked delivery', blockedService, 'resolveBlockCollectionUris'],
     ['muted', mutedService, 'resolveMutedCollectionUri']
-  ])('%s actor resolution supplies the actor WebID', async (_name, service, methodName) => {
+  ])('%s actor resolution supplies the actor WebID and owner dataset', async (_name, service, methodName) => {
     const { ctx, calls } = makeContext();
 
     await service.methods[methodName].call(service.methods, ctx, ACTOR_URI);
 
     expect(calls).toContainEqual(
       expect.objectContaining({
+        action: 'auth.account.findByWebId',
+        params: { webId: ACTOR_URI }
+      })
+    );
+    expect(calls).toContainEqual(
+      expect.objectContaining({
         action: 'activitypub.actor.get',
-        params: { actorUri: ACTOR_URI, webId: ACTOR_URI }
+        params: { actorUri: ACTOR_URI, webId: ACTOR_URI },
+        options: { meta: { dataset: DATASET } }
       })
     );
   });
@@ -129,7 +136,7 @@ describe('ActivityPub collection service dataset context', () => {
   test.each([
     ['blocked', blockedService, 2],
     ['muted', mutedService, 1]
-  ])('%s bootstrap scopes registry collection creation to the owner dataset', async (_name, service, expectedCalls) => {
+  ])('%s bootstrap scopes registry collection creation and actor reads to the owner dataset', async (_name, service, expectedCalls) => {
     const { ctx, calls } = makeContext();
     const methods = bindMethods(service);
 
@@ -142,6 +149,15 @@ describe('ActivityPub collection service dataset context', () => {
     for (const call of registryCalls) {
       expect(call.options).toEqual({ meta: { webId: ACTOR_URI, dataset: DATASET } });
     }
+
+    const actorCalls = calls.filter(call => call.action === 'activitypub.actor.get');
+    expect(actorCalls).toHaveLength(1);
+    expect(actorCalls[0]).toEqual(
+      expect.objectContaining({
+        params: { actorUri: ACTOR_URI, webId: ACTOR_URI },
+        options: { meta: { dataset: DATASET } }
+      })
+    );
   });
 
   test.each([
