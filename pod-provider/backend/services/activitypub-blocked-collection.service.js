@@ -120,11 +120,19 @@ module.exports = {
     await this.broker.call('activitypub.collections-registry.register', this.settings.blocksCollectionOptions);
 
     const markerRows = await this.broker.call('triplestore.query', {
-      query: `ASK { <${BLOCKED_BOOTSTRAP_MARKER}> <http://activitypods.org/ns/core#completed> true }`,
+      query: `
+        SELECT ?completed
+        WHERE {
+          <${BLOCKED_BOOTSTRAP_MARKER}> <http://activitypods.org/ns/core#completed> ?completed .
+          FILTER(?completed = true)
+        }
+        LIMIT 1
+      `,
+      accept: MIME_TYPES.JSON,
       dataset: 'settings',
       webId: 'system'
     });
-    const migrationComplete = markerRows === true || markerRows?.boolean === true || markerRows?.value === true;
+    const migrationComplete = Array.isArray(markerRows) && markerRows.length > 0;
 
     if (!migrationComplete) {
       const accounts = await this.broker.call('auth.account.find');
