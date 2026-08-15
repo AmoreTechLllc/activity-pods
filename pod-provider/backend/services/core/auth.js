@@ -265,13 +265,14 @@ module.exports = {
     after: {
       async signup(ctx, res) {
         const forceCompleteSignupBootstrap = process.env.APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP === 'true';
-        const deferCompleteSignupBootstrap = process.env.APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP === 'true';
+        const deferCompleteSignupBootstrap =
+          process.env.NODE_ENV !== 'production' && process.env.APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP === 'true';
         if (process.env.NODE_ENV !== 'production' && !forceCompleteSignupBootstrap) return res;
 
-        // Deferral is intentionally benchmark-only: it requires the explicit
-        // forced-completeness mode and merely moves the exact same authoritative
-        // barrier to the fixture runner. Production can never opt into it by
-        // setting the defer flag alone.
+        // Deferral is structurally non-production and additionally requires the
+        // explicit forced-completeness mode. Production always executes the
+        // authoritative barrier in the request lifecycle even if a defer flag
+        // is accidentally present in its environment.
         if (forceCompleteSignupBootstrap && deferCompleteSignupBootstrap) return res;
 
         const allowIncompleteSignupBootstrap =
