@@ -1,5 +1,8 @@
 services:
   backend:
+    # Stable tag lets the dedicated workflow load a BuildKit-cached image once
+    # and reuse it for all backend recreations in the canonical matrix.
+    image: apdm-phase8-backend:local
     environment:
       # Phase 8 measures ActivityPub local fan-out. Disable only the unrelated
       # ATProto account projection; Tier 1 Pod/key/ActivityPub bootstrap still
