@@ -91,11 +91,14 @@ describe('APDM Phase 8 real measurement runner', () => {
     expect(signupFn).toHaveBeenCalledTimes(1);
   });
 
-  test('signup implementation uses a single non-replayable request path', () => {
+  test('signup implementation uses a single non-replayable request path with a convergence-safe deadline', () => {
     expect(RUNNER_SOURCE).toContain('async function requestJsonOnce');
     expect(RUNNER_SOURCE).toContain('const body = await requestJsonOnce');
     expect(RUNNER_SOURCE).not.toContain('requestJsonWithRetry');
     expect(RUNNER_SOURCE).toContain('Never replay 5xx/408/429');
+    expect(RUNNER_SOURCE).toContain('const DEFAULT_SIGNUP_TIMEOUT_MS = 900_000;');
+    expect(RUNNER_SOURCE).toContain('process.env.APDM_P8_SIGNUP_TIMEOUT_MS');
+    expect(RUNNER_SOURCE).toContain('{ timeoutMs: signupTimeoutMs }');
   });
 
   test('does not regenerate on unrelated signup failures', async () => {
