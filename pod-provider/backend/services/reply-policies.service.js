@@ -281,15 +281,11 @@ module.exports = {
       const uri = normalizeIri(resourceUri);
       if (!uri) return null;
 
-      try {
-        await ctx.call('ldp.remote.store', {
-          resourceUri: uri,
-          webId: webId || 'system'
-        });
-      } catch (error) {
-        this.logger.debug('[reply-policies] remote store skipped', { resourceUri: uri, error: error.message });
-      }
-
+      // `ldp.resource.get` is already the authoritative locality/cache
+      // abstraction in SemApps: local URIs stay on the local LDP path, while
+      // remote URIs delegate to `ldp.remote.get` with its configured cache /
+      // network strategy. Calling `ldp.remote.store` first forced an extra
+      // network fetch plus triplestore delete/insert cycle before this read.
       try {
         const resource = await ctx.call('ldp.resource.get', {
           resourceUri: uri,
