@@ -24,6 +24,7 @@ function createServiceContext(overrides = {}) {
     reconcileActivity: service.methods.reconcileActivity,
     expandConcreteRecipients: service.methods.expandConcreteRecipients,
     listAccountPage: service.methods.listAccountPage,
+    listOutboxActivityPage: service.methods.listOutboxActivityPage,
     acquireDistributedLease: jest.fn(async () => 'lease-token'),
     releaseDistributedLease: jest.fn(async () => true),
     getAccountCursor: jest.fn(async () => accountCursor),
@@ -75,7 +76,8 @@ function createContext({ includeRemote = true, unresolvedFollowers = false } = {
           throw new Error(`Unexpected predicate ${params.predicate}`);
         case 'triplestore.query':
           expect(params.query).toContain('LIMIT 50');
-          expect(params.query).toContain('OFFSET 0');
+          expect(params.query).not.toContain('OFFSET');
+          expect(params.query).toContain('ORDER BY DESC(STR(?published)) ASC(STR(?activityUri))');
           expect(params.dataset).toBe('alice');
           return [{ activityUri: { value: activity.id }, published: { value: activity.published } }];
         case 'activitypub.activity.get':
@@ -195,20 +197,24 @@ describe('APDM Phase 4 delivery reconciliation', () => {
       published: new Date(now - index * 1000).toISOString()
     }));
     const enqueued = [];
-    const offsets = [];
+    const cursors = [];
+    serviceContext.listOutboxActivityPage = jest.fn(async (_ctx, { cursor }) => {
+      cursors.push(cursor);
+      const start = cursor ? 2 : 0;
+      const page = activities.slice(start, start + 2);
+      return {
+        rows: page.map(activity => ({
+          activityUri: { value: activity.id },
+          published: { value: activity.published }
+        })),
+        nextCursor: page.length
+          ? { published: page[page.length - 1].published, activityUri: page[page.length - 1].id }
+          : cursor
+      };
+    });
     const ctx = {
       async call(action, params) {
         if (action === 'activitypub.actor.getCollectionUri') return 'https://pods.example/alice/outbox';
-        if (action === 'triplestore.query') {
-          const match = params.query.match(/OFFSET (\d+)/u);
-          const offset = Number(match?.[1] || 0);
-          offsets.push(offset);
-          const page = activities.slice(offset, offset + 2);
-          return page.map(activity => ({
-            activityUri: { value: activity.id },
-            published: { value: activity.published }
-          }));
-        }
         if (action === 'activitypub.activity.get') {
           return activities.find(activity => activity.id === params.resourceUri);
         }
@@ -230,7 +236,10 @@ describe('APDM Phase 4 delivery reconciliation', () => {
       { webId: 'https://pods.example/alice', username: 'alice' }
     );
 
-    expect(offsets).toEqual([0, 2]);
+    expect(cursors).toEqual([
+      null,
+      { published: activities[1].published, activityUri: activities[1].id }
+    ]);
     expect(result).toEqual({ activitiesScanned: 3, handoffsRequeued: 3, failures: 0 });
     expect(enqueued).toEqual(activities.map(activity => activity.id));
   });
