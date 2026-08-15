@@ -7,6 +7,8 @@ jest.mock('@semapps/ldp', () => ({
 }));
 jest.mock('../config/transport', () => ({}));
 
+process.env.SEMAPPS_AVAILABLE_LOCALES ||= 'en';
+
 const service = require('../services/mail-notifications');
 
 const RECIPIENT_URI = 'https://pod.example/alice';
