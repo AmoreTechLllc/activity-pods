@@ -5,9 +5,14 @@ jest.mock('@semapps/ldp', () => ({
   arrayOf: value => (value === undefined || value === null ? [] : Array.isArray(value) ? value : [value]),
   isObject: value => value !== null && typeof value === 'object' && !Array.isArray(value)
 }));
+jest.mock('../config/config', () => ({
+  QUEUE_SERVICE_URL: 'redis://localhost:6379',
+  FRONTEND_URL: 'https://pod.example',
+  FROM_NAME: 'ActivityPods',
+  FROM_EMAIL: 'notifications@pod.example',
+  COLOR_PRIMARY: '#000000'
+}));
 jest.mock('../config/transport', () => ({}));
-
-process.env.SEMAPPS_AVAILABLE_LOCALES ||= 'en';
 
 const service = require('../services/mail-notifications');
 
