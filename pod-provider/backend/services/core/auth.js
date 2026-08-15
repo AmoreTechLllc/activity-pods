@@ -275,28 +275,35 @@ module.exports = {
         const { webId } = res;
 
         try {
-          await callBootstrapReadiness('auth-agent.waitForResourceCreation', { webId });
-          await callBootstrapReadiness('agent-registry.waitForResourceCreation', { webId });
-          await callBootstrapReadiness('auth-registry.waitForResourceCreation', { webId });
-          await callBootstrapReadiness('data-registry.waitForResourceCreation', { webId });
+          // These are observation-only readiness barriers over independently
+          // event-created resources. Waiting for them serially multiplied the
+          // slowest poll latency by the number of resources without creating a
+          // dependency between them. Keep every condition mandatory, but let
+          // independent barriers converge concurrently.
+          await Promise.all([
+            callBootstrapReadiness('auth-agent.waitForResourceCreation', { webId }),
+            callBootstrapReadiness('agent-registry.waitForResourceCreation', { webId }),
+            callBootstrapReadiness('auth-registry.waitForResourceCreation', { webId }),
+            callBootstrapReadiness('data-registry.waitForResourceCreation', { webId }),
+            callBootstrapReadiness('activitypub.actor.awaitCreateComplete', {
+              actorUri: webId,
+              additionalKeys: [
+                'pim:storage',
+                'pim:preferencesFile',
+                'interop:hasAuthorizationAgent',
+                'interop:hasRegistrySet',
+                'solid:publicTypeIndex'
+              ]
+            })
+          ]);
 
-          await callBootstrapReadiness('activitypub.actor.awaitCreateComplete', {
-            actorUri: webId,
-            additionalKeys: [
-              'pim:storage',
-              'pim:preferencesFile',
-              'interop:hasAuthorizationAgent',
-              'interop:hasRegistrySet',
-              'solid:publicTypeIndex'
-            ]
-          });
-
-          // Wait until all data and type registrations are created.
-          // The benchmark may retry only timeout-shaped waits, preserving the
-          // exact production readiness conditions while allowing a loaded CI
-          // fixture more time to converge.
-          await callBootstrapReadiness('data-registry.awaitCreateComplete', { webId });
-          await callBootstrapReadiness('type-indexes.awaitCreateComplete', { webId });
+          // Data/type registration completion is likewise independent once the
+          // resource-presence barrier above has passed. Preserve both exact
+          // SemApps completeness checks while avoiding another serial wait.
+          await Promise.all([
+            callBootstrapReadiness('data-registry.awaitCreateComplete', { webId }),
+            callBootstrapReadiness('type-indexes.awaitCreateComplete', { webId })
+          ]);
         } catch (e) {
           if (!allowIncompleteSignupBootstrap) throw e;
 
