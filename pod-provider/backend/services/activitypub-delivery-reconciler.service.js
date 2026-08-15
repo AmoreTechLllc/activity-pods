@@ -434,7 +434,7 @@ module.exports = {
       };
     },
 
-    async expandConcreteRecipients(ctx, activity, recipients, dataset, senderFollowersCache = null) {
+    async expandConcreteRecipients(ctx, activity, recipients, dataset, senderFollowersSnapshot = null) {
       const actorUri = actorUriOf(activity);
       const output = [];
       for (const recipientUri of recipients || []) {
@@ -448,11 +448,15 @@ module.exports = {
           throw new Error(`Cannot safely reconcile unresolved remote followers collection ${recipientUri}`);
         }
 
-        const cacheKey = normalizeTrailingSlash(recipientUri);
-        const canCache = senderFollowersCache instanceof Map && isSenderFollowersCollection(recipientUri, actorUri);
+        const snapshotActorUri = senderFollowersSnapshot?.actorUri;
+        const canReuseSnapshot =
+          senderFollowersSnapshot &&
+          typeof senderFollowersSnapshot === 'object' &&
+          normalizeTrailingSlash(actorUri) === normalizeTrailingSlash(snapshotActorUri) &&
+          isSenderFollowersCollection(recipientUri, snapshotActorUri);
         let expanded;
-        if (canCache && senderFollowersCache.has(cacheKey)) {
-          expanded = senderFollowersCache.get(cacheKey);
+        if (canReuseSnapshot && Array.isArray(senderFollowersSnapshot.items)) {
+          expanded = senderFollowersSnapshot.items;
         } else {
           const collection = await ctx.call(
             'activitypub.collection.get',
@@ -460,7 +464,7 @@ module.exports = {
             { meta: { dataset } }
           );
           expanded = collectionItemUris(collection);
-          if (canCache) senderFollowersCache.set(cacheKey, Object.freeze([...expanded]));
+          if (canReuseSnapshot) senderFollowersSnapshot.items = Object.freeze([...expanded]);
           if (expanded.length === 0) {
             this.logger.debug?.('ActivityPub reconciliation expanded an empty followers collection', { recipientUri });
           }
@@ -470,7 +474,7 @@ module.exports = {
       return [...new Set(output)];
     },
 
-    async reconcileActivity(ctx, activity, dataset, senderFollowersCache = null) {
+    async reconcileActivity(ctx, activity, dataset, senderFollowersSnapshot = null) {
       const blindSnapshot = typeof this.loadBlindRecipientSnapshot === 'function'
         ? await this.loadBlindRecipientSnapshot(activity)
         : null;
@@ -481,7 +485,7 @@ module.exports = {
         routingActivity,
         recipients,
         dataset,
-        senderFollowersCache
+        senderFollowersSnapshot
       );
       const localRecipientUris = [];
       const remoteRecipientUris = [];
@@ -524,7 +528,7 @@ module.exports = {
         const cutoffMs = Date.now() - Math.max(60000, Number(this.settings.lookbackMs) || 900000);
         const cutoffPublished = new Date(cutoffMs).toISOString();
         const pageSize = Math.max(1, Math.min(1000, Math.floor(Number(this.settings.maxActivitiesPerAccount) || 50)));
-        const senderFollowersCache = new Map();
+        const senderFollowersSnapshot = { actorUri: account.webId, items: null };
         let activityCursor = null;
         let reachedCutoff = false;
 
@@ -555,7 +559,7 @@ module.exports = {
                 break;
               }
 
-              const deliveryPlan = await this.reconcileActivity(ctx, activity, dataset, senderFollowersCache);
+              const deliveryPlan = await this.reconcileActivity(ctx, activity, dataset, senderFollowersSnapshot);
               if (!deliveryPlan) continue;
 
               await ctx.call('activitypub.outbox.enqueueDeliveryHandoff', { deliveryPlan });
