@@ -128,6 +128,9 @@ describe('activitypub-muted-collection service', () => {
 
     const ctx = {
       call: jest.fn(async action => {
+        if (action === 'auth.account.findByWebId') {
+          return { webId: 'https://fed.example.com/users/alice', username: 'alice' };
+        }
         if (action === 'activitypub.actor.get') {
           return {
             outbox: 'https://fed.example.com/users/alice/outbox'
