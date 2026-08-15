@@ -27,6 +27,13 @@ services:
       APDM_P8_SIGNUP_TIMEOUT_MS: '900000'
       APODS_HTTP_SERVER_TIMEOUT_MS: '960000'
 
+      # Custom ActivityPods services (for example private realtime emission and
+      # viewership history) use the generic REDIS_URL rather than the SemApps
+      # per-purpose Redis settings. Inside Docker, localhost is the backend
+      # container itself, so make their Redis dependency explicit and consistent
+      # with the shared test stack instead of allowing the localhost fallback.
+      REDIS_URL: 'redis://redis:6379'
+
       # Keep the benchmark local-only and suppress the transitional sidecar
       # observer so unrelated failed HTTP attempts cannot contaminate samples.
       SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: native
