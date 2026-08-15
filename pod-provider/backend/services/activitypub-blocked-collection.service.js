@@ -244,7 +244,10 @@ module.exports = {
           item: followerUri
         });
 
-        const ownerActor = await ctx.call('activitypub.actor.get', { actorUri: ownerActorUri });
+        const ownerActor = await ctx.call('activitypub.actor.get', {
+          actorUri: ownerActorUri,
+          webId: ownerActorUri
+        });
         if (!ownerActor?.outbox) {
           this.logger.warn('[blocked] unable to accept blocked-collection follow because owner outbox is missing', {
             ownerActorUri,
@@ -343,6 +346,14 @@ module.exports = {
         return null;
       }
       return collectionUri.replace(/\/blocked$/, '');
+    },
+    async resolveActorDataset(ctx, actorUri) {
+      const account = await ctx.call('auth.account.findByWebId', { webId: actorUri });
+      const dataset = account?.username;
+      if (!dataset) {
+        throw new Error(`[activitypub.blocked] Unable to resolve dataset for actor ${actorUri}`);
+      }
+      return dataset;
     },
     async runMatcher(matcher, activity, fetcher) {
       if (typeof matcher === 'function') {
@@ -454,19 +465,19 @@ module.exports = {
       }
     },
     async resolveBlockedCollectionUri(ctx, actorUri) {
-      const actor = await ctx.call('activitypub.actor.get', { actorUri });
+      const actor = await ctx.call('activitypub.actor.get', { actorUri, webId: actorUri });
       if (!actor || typeof actor !== 'object') return null;
 
       return actor.blocked || actor['bl:blocked'] || actor[BLOCKED_PREDICATE] || null;
     },
     async resolveBlocksCollectionUri(ctx, actorUri) {
-      const actor = await ctx.call('activitypub.actor.get', { actorUri });
+      const actor = await ctx.call('activitypub.actor.get', { actorUri, webId: actorUri });
       if (!actor || typeof actor !== 'object') return null;
 
       return actor.blocks || actor['bl:blocks'] || actor[BLOCKS_PREDICATE] || null;
     },
     async resolveBlockCollectionUris(ctx, actorUri) {
-      const actor = await ctx.call('activitypub.actor.get', { actorUri });
+      const actor = await ctx.call('activitypub.actor.get', { actorUri, webId: actorUri });
       if (!actor || typeof actor !== 'object') return [];
 
       return [
@@ -475,6 +486,8 @@ module.exports = {
       ].filter(Boolean);
     },
     async ensureCollectionsForActor(ctx, actorUri) {
+      const dataset = await this.resolveActorDataset(ctx, actorUri);
+
       await ctx.call('activitypub.collections-registry.createAndAttachCollection', {
         objectUri: actorUri,
         collection: this.settings.blockedCollectionOptions
@@ -487,20 +500,26 @@ module.exports = {
       const blockedCollectionUri = (await this.resolveBlockedCollectionUri(ctx, actorUri)) || `${actorUri}/blocked`;
       const blocksCollectionUri = (await this.resolveBlocksCollectionUri(ctx, actorUri)) || `${actorUri}/blocks`;
 
-      await this.ensureCollectionMetadata(ctx, blockedCollectionUri, actorUri, BLOCKED_OF_PREDICATE);
-      await this.ensureCollectionMetadata(ctx, blocksCollectionUri, actorUri, BLOCKS_OF_PREDICATE);
+      await this.ensureCollectionMetadata(ctx, blockedCollectionUri, actorUri, BLOCKED_OF_PREDICATE, dataset);
+      await this.ensureCollectionMetadata(ctx, blocksCollectionUri, actorUri, BLOCKS_OF_PREDICATE, dataset);
 
-      const blockedState = await this.getBlockedCollectionSharingStateByCollectionUri(ctx, blockedCollectionUri);
+      const blockedState = await this.getBlockedCollectionSharingStateByCollectionUri(
+        ctx,
+        blockedCollectionUri,
+        dataset
+      );
       if (blockedState.public) {
         await this.ensureBlockedFollowersCollection(ctx, blockedCollectionUri, actorUri);
         await this.ensurePublicReadOnBlockedCollection(ctx, blockedCollectionUri, actorUri, true);
       }
     },
-    async ensureCollectionMetadata(ctx, collectionUri, actorUri, inversePredicate) {
+    async ensureCollectionMetadata(ctx, collectionUri, actorUri, inversePredicate, dataset) {
+      const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));
       await ctx.call(
         'ldp.resource.patch',
         {
           resourceUri: collectionUri,
+          webId: actorUri,
           triplesToAdd: [
             quad(namedNode(collectionUri), namedNode(AS_ATTRIBUTED_TO_PREDICATE), namedNode(actorUri)),
             quad(namedNode(collectionUri), namedNode(inversePredicate), namedNode(actorUri))
@@ -508,6 +527,7 @@ module.exports = {
         },
         {
           meta: {
+            dataset: resolvedDataset,
             skipObjectsWatcher: true
           }
         }
@@ -638,7 +658,15 @@ module.exports = {
       const blockedCollectionUri = (await this.resolveBlockedCollectionUri(ctx, actorUri)) || `${actorUri}/blocked`;
       return this.getBlockedCollectionSharingStateByCollectionUri(ctx, blockedCollectionUri);
     },
-    async getBlockedCollectionSharingStateByCollectionUri(ctx, blockedCollectionUri) {
+    async getBlockedCollectionSharingStateByCollectionUri(ctx, blockedCollectionUri, dataset) {
+      const actorUri = this.getBlockedCollectionOwnerUri(blockedCollectionUri);
+      if (!actorUri) {
+        throw new Error(
+          `[activitypub.blocked] Unable to resolve dataset owner for collection ${blockedCollectionUri}`
+        );
+      }
+      const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));
+
       const rows = await ctx.call('triplestore.query', {
         query: sanitizeSparqlQuery`
           SELECT ?public ?followersCollectionUri
@@ -647,7 +675,8 @@ module.exports = {
             OPTIONAL { <${blockedCollectionUri}> <${AS_FOLLOWERS_PREDICATE}> ?followersCollectionUri . }
           }
         `,
-        webId: 'system'
+        webId: 'system',
+        dataset: resolvedDataset
       });
 
       const first = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
@@ -698,7 +727,7 @@ module.exports = {
       const targetActor = undoActivity?.object?.object;
       if (!targetActor) return null;
 
-      const actor = await ctx.call('activitypub.actor.get', { actorUri });
+      const actor = await ctx.call('activitypub.actor.get', { actorUri, webId: actorUri });
       const outboxUri = actor?.outbox;
       if (!outboxUri) return null;
 
