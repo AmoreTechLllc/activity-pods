@@ -54,7 +54,9 @@ function bindMethods(serviceDefinition) {
 
 describe('ActivityPub collection service dataset context', () => {
   test.each([
-    ['blocked', blockedService, 'resolveBlockedCollectionUri'],
+    ['blocked primary', blockedService, 'resolveBlockedCollectionUri'],
+    ['blocked inverse', blockedService, 'resolveBlocksCollectionUri'],
+    ['blocked delivery', blockedService, 'resolveBlockCollectionUris'],
     ['muted', mutedService, 'resolveMutedCollectionUri']
   ])('%s actor resolution supplies the actor WebID', async (_name, service, methodName) => {
     const { ctx, calls } = makeContext();
@@ -122,17 +124,35 @@ describe('ActivityPub collection service dataset context', () => {
   });
 
   test.each([
-    ['blocked', blockedService, 'getBlockedCollectionSharingStateByCollectionUri', `${ACTOR_URI}/blocked`],
-    ['muted', mutedService, 'getMutedCollectionSharingStateByCollectionUri', `${ACTOR_URI}/muted`]
-  ])('%s sharing-state fails closed when the owner dataset cannot be resolved', async (_name, service, methodName, collectionUri) => {
-    const { ctx } = makeContext({
-      async call(action) {
-        if (action === 'auth.account.findByWebId') return null;
-        throw new Error(`unexpected action after missing dataset: ${action}`);
-      }
-    });
-    const methods = bindMethods(service);
+    [
+      'blocked',
+      blockedService,
+      'getBlockedCollectionSharingStateByCollectionUri',
+      `${ACTOR_URI}/blocked`,
+      /\[activitypub\.blocked\] Unable to resolve dataset for actor/
+    ],
+    [
+      'muted',
+      mutedService,
+      'getMutedCollectionSharingStateByCollectionUri',
+      `${ACTOR_URI}/muted`,
+      /\[activitypub\.muted\] Unable to resolve dataset for actor/
+    ]
+  ])(
+    '%s sharing-state fails closed when the owner dataset cannot be resolved',
+    async (_name, service, methodName, collectionUri, expectedError) => {
+      const downstreamCalls = [];
+      const { ctx } = makeContext({
+        async call(action, params, options) {
+          if (action === 'auth.account.findByWebId') return null;
+          downstreamCalls.push({ action, params, options });
+          throw new Error('UNEXPECTED_DOWNSTREAM_ACTION');
+        }
+      });
+      const methods = bindMethods(service);
 
-    await expect(methods[methodName](ctx, collectionUri)).rejects.toThrow(/dataset/i);
-  });
+      await expect(methods[methodName](ctx, collectionUri)).rejects.toThrow(expectedError);
+      expect(downstreamCalls).toEqual([]);
+    }
+  );
 });
