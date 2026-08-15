@@ -8,7 +8,10 @@ const CONFIG = require('../config/config');
 module.exports = {
   mixins: [ApiGatewayService, WebSocketMixin],
   settings: {
-    httpServerTimeout: 300000,
+    // Preserve the production default while allowing isolated benchmark runs
+    // that intentionally wait for full signup bootstrap to extend the gateway
+    // deadline beyond the benchmark client's non-replayable request timeout.
+    httpServerTimeout: Number(process.env.APODS_HTTP_SERVER_TIMEOUT_MS || 300000),
     baseUrl: CONFIG.BASE_URL,
     port: CONFIG.PORT,
     cors: {
