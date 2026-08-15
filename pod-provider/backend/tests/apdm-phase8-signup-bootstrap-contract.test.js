@@ -36,9 +36,9 @@ describe('APDM Phase 8 signup bootstrap contract', () => {
     expect(AUTH_SOURCE).toContain("await Promise.all([\n          callBootstrapReadiness('data-registry.awaitCreateComplete', { webId })");
   });
 
-  test('normal signup uses the shared barrier while benchmark-only deferral requires forced completeness', () => {
+  test('normal signup uses the shared barrier while deferral is structurally non-production', () => {
     expect(AUTH_SOURCE).toContain("process.env.APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP === 'true'");
-    expect(AUTH_SOURCE).toContain("process.env.APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP === 'true'");
+    expect(AUTH_SOURCE).toContain("process.env.NODE_ENV !== 'production' && process.env.APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP === 'true'");
     expect(AUTH_SOURCE).toContain('if (forceCompleteSignupBootstrap && deferCompleteSignupBootstrap) return res;');
     expect(AUTH_SOURCE).toContain("await ctx.call('auth.awaitBootstrapComplete', { webId: res.webId });");
   });
