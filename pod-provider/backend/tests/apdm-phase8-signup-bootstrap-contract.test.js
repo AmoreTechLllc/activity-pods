@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 const AUTH_SOURCE = fs.readFileSync(path.join(__dirname, '../services/core/auth.js'), 'utf8');
+const API_SOURCE = fs.readFileSync(path.join(__dirname, '../services/api.js'), 'utf8');
 const PHASE8_COMPOSE = fs.readFileSync(path.join(__dirname, '../../docker-compose-phase8.yml'), 'utf8');
 
 describe('APDM Phase 8 signup bootstrap contract', () => {
@@ -34,10 +35,16 @@ describe('APDM Phase 8 signup bootstrap contract', () => {
     expect(AUTH_SOURCE).toContain('attempt >= forcedBootstrapReadinessAttempts');
   });
 
+  test('gateway keeps the production timeout default while allowing a benchmark override', () => {
+    expect(API_SOURCE).toContain('process.env.APODS_HTTP_SERVER_TIMEOUT_MS || 300000');
+  });
+
   test('Phase 8 overlay disables only ATProto and forces full local signup bootstrap', () => {
     expect(PHASE8_COMPOSE).toContain("APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'");
     expect(PHASE8_COMPOSE).toContain("APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'");
     expect(PHASE8_COMPOSE).toContain("APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'");
     expect(PHASE8_COMPOSE).toContain("APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP_ATTEMPTS: '3'");
+    expect(PHASE8_COMPOSE).toContain("APDM_P8_SIGNUP_TIMEOUT_MS: '900000'");
+    expect(PHASE8_COMPOSE).toContain("APODS_HTTP_SERVER_TIMEOUT_MS: '960000'");
   });
 });
