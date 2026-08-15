@@ -54,6 +54,26 @@ describe('follower domain projection scalability', () => {
     expect(calls[0].params.query).not.toContain('as:items');
   });
 
+  test('readiness lookup uses SELECT bindings compatible with SemApps triplestore.query', async () => {
+    const collectionUri = 'https://example.test/users/alice/followers';
+    const queries = [];
+    const service = createService({
+      triQuery: jest.fn(async (_ctx, query) => {
+        queries.push(query);
+        return [{ ready: { value: 'true' } }];
+      })
+    });
+
+    const ready = await service.isReady({ call: jest.fn() }, collectionUri);
+
+    expect(ready).toBe(true);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('SELECT ?ready');
+    expect(queries[0]).toContain('FILTER(?ready = true)');
+    expect(queries[0]).toContain('LIMIT 1');
+    expect(queries[0]).not.toContain('ASK');
+  });
+
   test('ready domain lookup starts from exact collection and domain and validates only candidates', async () => {
     const collectionUri = 'https://example.test/users/alice/followers';
     const followerUri = 'https://remote.example/users/bob';
