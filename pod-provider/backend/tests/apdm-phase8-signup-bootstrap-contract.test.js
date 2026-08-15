@@ -3,10 +3,19 @@
 const fs = require('fs');
 const path = require('path');
 
-// Phase 8 production prerequisite is now merged: blocked/muted ActivityPub
-// collection bootstrap must carry the owning actor WebID and dataset context.
+// Phase 8 production prerequisites are merged: blocked/muted ActivityPub
+// collection bootstrap carries owning actor context and warm backend restarts
+// must not repeat the legacy O(accounts) compatibility walk.
 const AUTH_SOURCE = fs.readFileSync(path.join(__dirname, '../services/core/auth.js'), 'utf8');
 const API_SOURCE = fs.readFileSync(path.join(__dirname, '../services/api.js'), 'utf8');
+const BLOCKED_SOURCE = fs.readFileSync(
+  path.join(__dirname, '../services/activitypub-blocked-collection.service.js'),
+  'utf8'
+);
+const MUTED_SOURCE = fs.readFileSync(
+  path.join(__dirname, '../services/activitypub-muted-collection.service.js'),
+  'utf8'
+);
 const PHASE8_COMPOSE = fs.readFileSync(path.join(__dirname, '../../docker-compose-phase8.yml'), 'utf8');
 
 describe('APDM Phase 8 signup bootstrap contract', () => {
@@ -54,6 +63,18 @@ describe('APDM Phase 8 signup bootstrap contract', () => {
 
   test('gateway keeps the production timeout default while allowing a benchmark override', () => {
     expect(API_SOURCE).toContain('process.env.APODS_HTTP_SERVER_TIMEOUT_MS || 300000');
+  });
+
+  test('Phase 8 warm restarts inherit durable one-time blocked and muted migrations', () => {
+    for (const [source, marker] of [
+      [BLOCKED_SOURCE, 'urn:activitypods:migration:blocked-collections-v1'],
+      [MUTED_SOURCE, 'urn:activitypods:migration:muted-collections-v1']
+    ]) {
+      expect(source).toContain(marker);
+      expect(source).toContain('SELECT ?completed');
+      expect(source).toContain('FILTER(?completed = true)');
+      expect(source).toContain('const migrationComplete = Array.isArray(markerRows) && markerRows.length > 0;');
+    }
   });
 
   test('Phase 8 overlay defers but does not skip full local bootstrap', () => {
