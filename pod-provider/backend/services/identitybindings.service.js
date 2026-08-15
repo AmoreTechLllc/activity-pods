@@ -322,6 +322,7 @@ module.exports = {
     _isNotFoundError(error) {
       if (!error) return false;
       if (Number(error.code) === 404) return true;
+      if (error.code !== undefined && error.code !== null) return false;
       return ['NOT_FOUND', 'RESOURCE_NOT_FOUND', 'LDP_RESOURCE_NOT_FOUND'].includes(error.type);
     },
 
@@ -416,8 +417,9 @@ module.exports = {
       const predicate = predicates[field];
       if (!predicate) throw new Error(`Unsupported identity index field: ${field}`);
 
+      let rows;
       try {
-        const rows = await ctx.call('triplestore.query', {
+        rows = await ctx.call('triplestore.query', {
           query: `
             PREFIX apods: <${APODS}>
             SELECT ?canonicalAccountId
@@ -431,23 +433,6 @@ module.exports = {
           dataset: 'settings',
           webId: 'system'
         });
-
-        const canonicalAccountId = this._readQueryBinding(rows?.[0], 'canonicalAccountId');
-        if (!canonicalAccountId) return null;
-
-        const binding = await ctx.call(
-          'identitybindings.getByCanonicalAccountId',
-          { canonicalAccountId },
-          { parentCtx: ctx }
-        );
-        if (!binding) return null;
-
-        const normalize = value => {
-          const normalized = String(value || '').trim();
-          return field === 'atprotoHandle' ? normalized.toLowerCase() : normalized;
-        };
-        if (normalize(binding[field]) !== normalize(expectedValue)) return null;
-        return binding;
       } catch (err) {
         this.logger.debug('Selective identity index lookup failed', {
           field,
@@ -455,6 +440,25 @@ module.exports = {
         });
         return null;
       }
+
+      const canonicalAccountId = this._readQueryBinding(rows?.[0], 'canonicalAccountId');
+      if (!canonicalAccountId) return null;
+
+      // The LDP binding is authoritative. Do not downgrade an infrastructure or
+      // authorization failure here into an expensive population fallback.
+      const binding = await ctx.call(
+        'identitybindings.getByCanonicalAccountId',
+        { canonicalAccountId },
+        { parentCtx: ctx }
+      );
+      if (!binding) return null;
+
+      const normalize = value => {
+        const normalized = String(value || '').trim();
+        return field === 'atprotoHandle' ? normalized.toLowerCase() : normalized;
+      };
+      if (normalize(binding[field]) !== normalize(expectedValue)) return null;
+      return binding;
     },
 
     async _syncBindingIndex(ctx, binding) {
