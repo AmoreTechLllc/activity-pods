@@ -41,10 +41,14 @@ function createBenchmarkUsername({ runId, role, index = 0, attempt = 0 }) {
   const roleToken = role === 'sender' ? 's' : 'r';
   const seed = `${normalizeRunId(runId)}:${roleToken}:${index}:${attempt}`;
   const digest = crypto.createHash('sha256').update(seed).digest('hex');
-  // Numeric-only entropy avoids accidentally forming moderation dictionary
-  // words while still traversing the normal moderation action on every signup.
   const numeric = (BigInt(`0x${digest.slice(0, 16)}`) % 10_000_000_000_000_000n).toString().padStart(16, '0');
   return `p8m${roleToken}${numeric}`;
+}
+
+function createMeasurementRequestId(manifest, label) {
+  const runId = normalizeRunId(manifest?.runId);
+  const nonce = crypto.randomBytes(8).toString('hex');
+  return `apdm-p8-${runId}-${label}-${nonce}`;
 }
 
 function isUsernameNotAllowed(error) {
@@ -235,9 +239,6 @@ async function provisionActors({
     let completed = 0;
 
     for (const indexBatch of chunk(indexes, batchSize)) {
-      // Signup releases after Tier-1 key + ActivityPub provisioning in the
-      // benchmark overlay. Event-created Pod resources then overlap only within
-      // this bounded window, preventing an unbounded Fuseki/LDP backlog.
       const signedUp = await boundedMap(indexBatch, concurrency, index =>
         signupWithCandidateRetries({ baseUrl, password, runId: prefix, role: 'recipient', index })
       );
@@ -281,8 +282,21 @@ async function waitForRecordCount(outputPath, expectedCount, timeoutMs) {
   throw new Error(`Timed out waiting for ${expectedCount} measurement record(s) in ${outputPath}`);
 }
 
-function assertUsableRecord(record, recipientCount) {
+async function waitForRecordByRequestId(outputPath, requestId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const record = readJsonLines(outputPath).find(candidate => candidate?.requestId === requestId);
+    if (record) return record;
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for measurement requestId=${requestId} in ${outputPath}`);
+}
+
+function assertUsableRecord(record, recipientCount, expectedRequestId) {
   if (!record || record.phase !== 'APDM-P8-A') throw new Error('Missing APDM-P8-A measurement record');
+  if (expectedRequestId && record.requestId !== expectedRequestId) {
+    throw new Error(`Measurement record requestId=${record.requestId} does not match ${expectedRequestId}`);
+  }
   if (Number(record.recipientCount) !== recipientCount) {
     throw new Error(`Measurement record recipientCount=${record.recipientCount} does not match ${recipientCount}`);
   }
@@ -292,6 +306,7 @@ function assertUsableRecord(record, recipientCount) {
 }
 
 async function postMeasuredActivity(broker, manifest, recipients, label) {
+  const requestId = createMeasurementRequestId(manifest, label);
   const result = await broker.call(
     'activitypub.outbox.post',
     {
@@ -301,10 +316,13 @@ async function postMeasuredActivity(broker, manifest, recipients, label) {
       to: recipients.map(recipient => recipient.webId),
       object: { type: 'Note', content: `APDM Phase 8 local fan-out measurement ${label}` }
     },
-    { meta: { webId: manifest.sender.webId, dataset: manifest.sender.username } }
+    {
+      meta: { webId: manifest.sender.webId, dataset: manifest.sender.username },
+      requestID: requestId
+    }
   );
   if (!result || !result.id) throw new Error(`Outbox post ${label} did not return a persisted Activity`);
-  return result;
+  return { requestId, result };
 }
 
 async function measure({ manifestPath, recipientCount, samples, warmups, outputPath, transporterUrl, readyTimeoutMs, sampleTimeoutMs }) {
@@ -330,23 +348,39 @@ async function measure({ manifestPath, recipientCount, samples, warmups, outputP
   try {
     await broker.waitForServices(['activitypub.outbox', 'activitypub.actor'], readyTimeoutMs);
     fs.rmSync(outputPath, { force: true });
+
     for (let index = 0; index < warmups; index += 1) {
-      await postMeasuredActivity(broker, manifest, recipients, `warmup-${recipientCount}-${index + 1}`);
-      const records = await waitForRecordCount(outputPath, index + 1, sampleTimeoutMs);
-      assertUsableRecord(records[index], recipientCount);
+      const { requestId } = await postMeasuredActivity(
+        broker,
+        manifest,
+        recipients,
+        `warmup-${recipientCount}-${index + 1}`
+      );
+      const record = await waitForRecordByRequestId(outputPath, requestId, sampleTimeoutMs);
+      assertUsableRecord(record, recipientCount, requestId);
     }
+
     fs.rmSync(outputPath, { force: true });
+
+    const expectedRequestIds = [];
     for (let index = 0; index < samples; index += 1) {
-      await postMeasuredActivity(broker, manifest, recipients, `sample-${recipientCount}-${index + 1}`);
-      const records = await waitForRecordCount(outputPath, index + 1, sampleTimeoutMs);
-      assertUsableRecord(records[index], recipientCount);
+      const { requestId } = await postMeasuredActivity(
+        broker,
+        manifest,
+        recipients,
+        `sample-${recipientCount}-${index + 1}`
+      );
+      expectedRequestIds.push(requestId);
+      const record = await waitForRecordByRequestId(outputPath, requestId, sampleTimeoutMs);
+      assertUsableRecord(record, recipientCount, requestId);
       process.stdout.write(`[APDM-P8] completed sample ${index + 1}/${samples} at N=${recipientCount}\n`);
     }
+
     const records = readJsonLines(outputPath);
     if (records.length !== samples) {
       throw new Error(`Expected exactly ${samples} measured records at N=${recipientCount}, found ${records.length}`);
     }
-    records.forEach(record => assertUsableRecord(record, recipientCount));
+    records.forEach((record, index) => assertUsableRecord(record, recipientCount, expectedRequestIds[index]));
     return records;
   } finally {
     await broker.stop();
@@ -438,11 +472,14 @@ module.exports = {
   boundedMap,
   chunk,
   createBenchmarkUsername,
+  createMeasurementRequestId,
   isUsernameNotAllowed,
   normalizeRunId,
   positiveInteger,
+  postMeasuredActivity,
   readJsonLines,
   requestJsonOnce,
   signupWithCandidateRetries,
+  waitForRecordByRequestId,
   waitForRecordCount
 };
