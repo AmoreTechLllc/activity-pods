@@ -53,12 +53,13 @@ module.exports = {
       try {
         return await ctx.call(actionName, params);
       } catch (error) {
-        if (
-          error &&
-          (error.code === 404 ||
-            error.type === 'NOT_FOUND' ||
-            error.type === 'IDENTITY_BINDING_NOT_FOUND')
-        ) {
+        if (error && Number(error.code) === 404) {
+          return null;
+        }
+        if (error && error.code !== undefined && error.code !== null) {
+          throw error;
+        }
+        if (error && ['NOT_FOUND', 'IDENTITY_BINDING_NOT_FOUND'].includes(error.type)) {
           return null;
         }
 
