@@ -1,3 +1,17 @@
+jest.mock('@semapps/activitypub', () => ({
+  ActivitiesHandlerMixin: {},
+  ACTIVITY_TYPES: {
+    BLOCK: 'Block',
+    UNDO: 'Undo',
+    FOLLOW: 'Follow',
+    ACCEPT: 'Accept'
+  },
+  ACTOR_TYPES: {
+    PERSON: 'Person',
+    APPLICATION: 'Application'
+  }
+}));
+
 const blockedService = require('../services/activitypub-blocked-collection.service');
 const mutedService = require('../services/activitypub-muted-collection.service');
 
@@ -30,6 +44,14 @@ function makeContext(overrides = {}) {
   return { ctx, calls };
 }
 
+function bindMethods(serviceDefinition) {
+  const methods = { ...serviceDefinition.methods };
+  for (const [name, fn] of Object.entries(methods)) {
+    if (typeof fn === 'function') methods[name] = fn.bind(methods);
+  }
+  return methods;
+}
+
 describe('ActivityPub collection service dataset context', () => {
   test.each([
     ['blocked', blockedService, 'resolveBlockedCollectionUri'],
@@ -52,10 +74,7 @@ describe('ActivityPub collection service dataset context', () => {
     ['muted', mutedService, 'getMutedCollectionSharingStateByCollectionUri', `${ACTOR_URI}/muted`]
   ])('%s sharing-state query resolves and supplies the owning dataset', async (_name, service, methodName, collectionUri) => {
     const { ctx, calls } = makeContext();
-    const methods = { ...service.methods };
-    for (const [name, fn] of Object.entries(methods)) {
-      if (typeof fn === 'function') methods[name] = fn.bind(methods);
-    }
+    const methods = bindMethods(service);
 
     await methods[methodName](ctx, collectionUri);
 
@@ -78,10 +97,7 @@ describe('ActivityPub collection service dataset context', () => {
     ['muted', mutedService]
   ])('%s metadata patch carries least-privilege WebID and dataset meta', async (_name, service) => {
     const { ctx, calls } = makeContext();
-    const methods = { ...service.methods };
-    for (const [name, fn] of Object.entries(methods)) {
-      if (typeof fn === 'function') methods[name] = fn.bind(methods);
-    }
+    const methods = bindMethods(service);
 
     await methods.ensureCollectionMetadata(
       ctx,
@@ -115,10 +131,7 @@ describe('ActivityPub collection service dataset context', () => {
         throw new Error(`unexpected action after missing dataset: ${action}`);
       }
     });
-    const methods = { ...service.methods };
-    for (const [name, fn] of Object.entries(methods)) {
-      if (typeof fn === 'function') methods[name] = fn.bind(methods);
-    }
+    const methods = bindMethods(service);
 
     await expect(methods[methodName](ctx, collectionUri)).rejects.toThrow(/dataset/i);
   });
