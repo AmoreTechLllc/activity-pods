@@ -45,7 +45,10 @@ function makeContext(overrides = {}) {
 }
 
 function bindMethods(serviceDefinition) {
-  const methods = { ...serviceDefinition.methods };
+  const methods = {
+    settings: serviceDefinition.settings,
+    ...serviceDefinition.methods
+  };
   for (const [name, fn] of Object.entries(methods)) {
     if (typeof fn === 'function') methods[name] = fn.bind(methods);
   }
