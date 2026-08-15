@@ -15,6 +15,12 @@ services:
       APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'
       APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP_ATTEMPTS: '3'
 
+      # Signup is intentionally non-replayable. Keep both HTTP deadlines above
+      # the forced-bootstrap convergence window, with the server slightly longer
+      # than the client so the client owns the bounded ambiguous-timeout edge.
+      APDM_P8_SIGNUP_TIMEOUT_MS: '900000'
+      APODS_HTTP_SERVER_TIMEOUT_MS: '960000'
+
       # Keep the benchmark local-only and suppress the transitional sidecar
       # observer so unrelated failed HTTP attempts cannot contaminate samples.
       SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: native
