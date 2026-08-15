@@ -26,16 +26,20 @@ function coerceBoolean(value) {
 function parseCursor(cursor) {
   if (!cursor) return null;
 
-  const parsed = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8'));
-  if (
-    typeof parsed?.updatedAt !== 'string' ||
-    parsed.updatedAt.length === 0 ||
-    typeof parsed?.canonicalAccountId !== 'string' ||
-    parsed.canonicalAccountId.length === 0
-  ) {
+  try {
+    const parsed = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8'));
+    if (
+      typeof parsed?.updatedAt !== 'string' ||
+      parsed.updatedAt.length === 0 ||
+      typeof parsed?.canonicalAccountId !== 'string' ||
+      parsed.canonicalAccountId.length === 0
+    ) {
+      throw new Error('invalid');
+    }
+    return parsed;
+  } catch (_err) {
     throw new Error('Invalid identity binding cursor');
   }
-  return parsed;
 }
 
 function encodeCursor(entry) {
