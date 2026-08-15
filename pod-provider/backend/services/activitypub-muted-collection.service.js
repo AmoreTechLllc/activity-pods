@@ -433,18 +433,22 @@ module.exports = {
     async ensureCollectionsForActor(ctx, actorUri) {
       const dataset = await this.resolveActorDataset(ctx, actorUri);
 
-      await ctx.call('activitypub.collections-registry.createAndAttachCollection', {
-        objectUri: actorUri,
-        collection: this.settings.mutedCollectionOptions
-      });
+      await ctx.call(
+        'activitypub.collections-registry.createAndAttachCollection',
+        {
+          objectUri: actorUri,
+          collection: this.settings.mutedCollectionOptions
+        },
+        { meta: { dataset } }
+      );
 
       const mutedCollectionUri = (await this.resolveMutedCollectionUri(ctx, actorUri)) || `${actorUri}/muted`;
       await this.ensureCollectionMetadata(ctx, mutedCollectionUri, actorUri, MUTED_OF_PREDICATE, dataset);
 
       const mutedState = await this.getMutedCollectionSharingStateByCollectionUri(ctx, mutedCollectionUri, dataset);
       if (mutedState.public) {
-        await this.ensureMutedFollowersCollection(ctx, mutedCollectionUri, actorUri);
-        await this.ensurePublicReadOnMutedCollection(ctx, mutedCollectionUri, actorUri, true);
+        await this.ensureMutedFollowersCollection(ctx, mutedCollectionUri, actorUri, dataset);
+        await this.ensurePublicReadOnMutedCollection(ctx, mutedCollectionUri, actorUri, true, dataset);
       }
     },
     async ensureCollectionMetadata(ctx, collectionUri, actorUri, inversePredicate, dataset) {
@@ -467,16 +471,25 @@ module.exports = {
         }
       );
     },
-    async ensureMutedFollowersCollection(ctx, mutedCollectionUri, actorUri) {
-      const existingState = await this.getMutedCollectionSharingStateByCollectionUri(ctx, mutedCollectionUri);
+    async ensureMutedFollowersCollection(ctx, mutedCollectionUri, actorUri, dataset) {
+      const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));
+      const existingState = await this.getMutedCollectionSharingStateByCollectionUri(
+        ctx,
+        mutedCollectionUri,
+        resolvedDataset
+      );
       const followersCollectionUri =
         existingState.followersCollectionUri ||
         `${mutedCollectionUri}${this.settings.mutedFollowersCollectionOptions.path}`;
 
-      const exists = await ctx.call('activitypub.collection.exist', {
-        resourceUri: followersCollectionUri,
-        webId: 'system'
-      });
+      const exists = await ctx.call(
+        'activitypub.collection.exist',
+        {
+          resourceUri: followersCollectionUri,
+          webId: 'system'
+        },
+        { meta: { dataset: resolvedDataset } }
+      );
 
       if (!exists) {
         await ctx.call(
@@ -493,6 +506,7 @@ module.exports = {
           },
           {
             meta: {
+              dataset: resolvedDataset,
               forcedResourceUri: followersCollectionUri
             }
           }
@@ -503,12 +517,14 @@ module.exports = {
         'ldp.resource.patch',
         {
           resourceUri: mutedCollectionUri,
+          webId: actorUri,
           triplesToAdd: [
             quad(namedNode(mutedCollectionUri), namedNode(AS_FOLLOWERS_PREDICATE), namedNode(followersCollectionUri))
           ]
         },
         {
           meta: {
+            dataset: resolvedDataset,
             skipObjectsWatcher: true
           }
         }
@@ -562,34 +578,43 @@ module.exports = {
         }
       });
     },
-    async ensurePublicReadOnMutedCollection(ctx, mutedCollectionUri, actorUri, isPublic) {
+    async ensurePublicReadOnMutedCollection(ctx, mutedCollectionUri, actorUri, isPublic, dataset) {
+      const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));
       const collectionUri = normalizeResourceUri(mutedCollectionUri);
       if (!collectionUri) {
         return;
       }
 
       if (isPublic) {
-        await ctx.call('webacl.resource.addRights', {
+        await ctx.call(
+          'webacl.resource.addRights',
+          {
+            resourceUri: collectionUri,
+            additionalRights: {
+              anon: {
+                read: true
+              }
+            },
+            webId: actorUri
+          },
+          { meta: { dataset: resolvedDataset } }
+        );
+        return;
+      }
+
+      await ctx.call(
+        'webacl.resource.removeRights',
+        {
           resourceUri: collectionUri,
-          additionalRights: {
+          rights: {
             anon: {
               read: true
             }
           },
           webId: actorUri
-        });
-        return;
-      }
-
-      await ctx.call('webacl.resource.removeRights', {
-        resourceUri: collectionUri,
-        rights: {
-          anon: {
-            read: true
-          }
         },
-        webId: actorUri
-      });
+        { meta: { dataset: resolvedDataset } }
+      );
     },
     async getMutedCollectionSharingStateForActor(ctx, actorUri) {
       const mutedCollectionUri = (await this.resolveMutedCollectionUri(ctx, actorUri)) || `${actorUri}/muted`;

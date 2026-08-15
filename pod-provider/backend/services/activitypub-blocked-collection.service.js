@@ -488,14 +488,22 @@ module.exports = {
     async ensureCollectionsForActor(ctx, actorUri) {
       const dataset = await this.resolveActorDataset(ctx, actorUri);
 
-      await ctx.call('activitypub.collections-registry.createAndAttachCollection', {
-        objectUri: actorUri,
-        collection: this.settings.blockedCollectionOptions
-      });
-      await ctx.call('activitypub.collections-registry.createAndAttachCollection', {
-        objectUri: actorUri,
-        collection: this.settings.blocksCollectionOptions
-      });
+      await ctx.call(
+        'activitypub.collections-registry.createAndAttachCollection',
+        {
+          objectUri: actorUri,
+          collection: this.settings.blockedCollectionOptions
+        },
+        { meta: { dataset } }
+      );
+      await ctx.call(
+        'activitypub.collections-registry.createAndAttachCollection',
+        {
+          objectUri: actorUri,
+          collection: this.settings.blocksCollectionOptions
+        },
+        { meta: { dataset } }
+      );
 
       const blockedCollectionUri = (await this.resolveBlockedCollectionUri(ctx, actorUri)) || `${actorUri}/blocked`;
       const blocksCollectionUri = (await this.resolveBlocksCollectionUri(ctx, actorUri)) || `${actorUri}/blocks`;
@@ -509,8 +517,8 @@ module.exports = {
         dataset
       );
       if (blockedState.public) {
-        await this.ensureBlockedFollowersCollection(ctx, blockedCollectionUri, actorUri);
-        await this.ensurePublicReadOnBlockedCollection(ctx, blockedCollectionUri, actorUri, true);
+        await this.ensureBlockedFollowersCollection(ctx, blockedCollectionUri, actorUri, dataset);
+        await this.ensurePublicReadOnBlockedCollection(ctx, blockedCollectionUri, actorUri, true, dataset);
       }
     },
     async ensureCollectionMetadata(ctx, collectionUri, actorUri, inversePredicate, dataset) {
@@ -533,16 +541,25 @@ module.exports = {
         }
       );
     },
-    async ensureBlockedFollowersCollection(ctx, blockedCollectionUri, actorUri) {
-      const existingState = await this.getBlockedCollectionSharingStateByCollectionUri(ctx, blockedCollectionUri);
+    async ensureBlockedFollowersCollection(ctx, blockedCollectionUri, actorUri, dataset) {
+      const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));
+      const existingState = await this.getBlockedCollectionSharingStateByCollectionUri(
+        ctx,
+        blockedCollectionUri,
+        resolvedDataset
+      );
       const followersCollectionUri =
         existingState.followersCollectionUri ||
         `${blockedCollectionUri}${this.settings.blockedFollowersCollectionOptions.path}`;
 
-      const exists = await ctx.call('activitypub.collection.exist', {
-        resourceUri: followersCollectionUri,
-        webId: 'system'
-      });
+      const exists = await ctx.call(
+        'activitypub.collection.exist',
+        {
+          resourceUri: followersCollectionUri,
+          webId: 'system'
+        },
+        { meta: { dataset: resolvedDataset } }
+      );
 
       if (!exists) {
         await ctx.call(
@@ -559,6 +576,7 @@ module.exports = {
           },
           {
             meta: {
+              dataset: resolvedDataset,
               forcedResourceUri: followersCollectionUri
             }
           }
@@ -569,12 +587,14 @@ module.exports = {
         'ldp.resource.patch',
         {
           resourceUri: blockedCollectionUri,
+          webId: actorUri,
           triplesToAdd: [
             quad(namedNode(blockedCollectionUri), namedNode(AS_FOLLOWERS_PREDICATE), namedNode(followersCollectionUri))
           ]
         },
         {
           meta: {
+            dataset: resolvedDataset,
             skipObjectsWatcher: true
           }
         }
@@ -630,29 +650,38 @@ module.exports = {
         }
       });
     },
-    async ensurePublicReadOnBlockedCollection(ctx, blockedCollectionUri, actorUri, isPublic) {
+    async ensurePublicReadOnBlockedCollection(ctx, blockedCollectionUri, actorUri, isPublic, dataset) {
+      const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));
       if (isPublic) {
-        await ctx.call('webacl.resource.addRights', {
+        await ctx.call(
+          'webacl.resource.addRights',
+          {
+            resourceUri: blockedCollectionUri,
+            additionalRights: {
+              anon: {
+                read: true
+              }
+            },
+            webId: actorUri
+          },
+          { meta: { dataset: resolvedDataset } }
+        );
+        return;
+      }
+
+      await ctx.call(
+        'webacl.resource.removeRights',
+        {
           resourceUri: blockedCollectionUri,
-          additionalRights: {
+          rights: {
             anon: {
               read: true
             }
           },
           webId: actorUri
-        });
-        return;
-      }
-
-      await ctx.call('webacl.resource.removeRights', {
-        resourceUri: blockedCollectionUri,
-        rights: {
-          anon: {
-            read: true
-          }
         },
-        webId: actorUri
-      });
+        { meta: { dataset: resolvedDataset } }
+      );
     },
     async getBlockedCollectionSharingStateForActor(ctx, actorUri) {
       const blockedCollectionUri = (await this.resolveBlockedCollectionUri(ctx, actorUri)) || `${actorUri}/blocked`;

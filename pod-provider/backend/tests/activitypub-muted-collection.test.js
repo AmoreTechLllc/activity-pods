@@ -61,10 +61,14 @@ describe('activitypub-muted-collection service', () => {
       'activitypub.collections-registry.register',
       service.settings.mutedCollectionOptions
     );
-    expect(broker.call).toHaveBeenCalledWith('activitypub.collections-registry.createAndAttachCollection', {
-      objectUri: 'https://fed.example.com/users/alice',
-      collection: service.settings.mutedCollectionOptions
-    });
+    expect(broker.call).toHaveBeenCalledWith(
+      'activitypub.collections-registry.createAndAttachCollection',
+      {
+        objectUri: 'https://fed.example.com/users/alice',
+        collection: service.settings.mutedCollectionOptions
+      },
+      { meta: { dataset: 'alice' } }
+    );
     expect(broker.getLocalService).toHaveBeenCalledWith('activitypub.side-effects');
   });
 

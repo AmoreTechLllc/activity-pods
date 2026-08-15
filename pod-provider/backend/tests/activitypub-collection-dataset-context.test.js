@@ -124,6 +124,55 @@ describe('ActivityPub collection service dataset context', () => {
   });
 
   test.each([
+    ['blocked', blockedService, 2],
+    ['muted', mutedService, 1]
+  ])('%s bootstrap scopes registry collection creation to the owner dataset', async (_name, service, expectedCalls) => {
+    const { ctx, calls } = makeContext();
+    const methods = bindMethods(service);
+
+    await methods.ensureCollectionsForActor(ctx, ACTOR_URI, DATASET);
+
+    const registryCalls = calls.filter(
+      call => call.action === 'activitypub.collections-registry.createAndAttachCollection'
+    );
+    expect(registryCalls).toHaveLength(expectedCalls);
+    for (const call of registryCalls) {
+      expect(call.options).toEqual({ meta: { dataset: DATASET } });
+    }
+  });
+
+  test.each([
+    ['blocked', blockedService, 'ensureBlockedFollowersCollection', `${ACTOR_URI}/blocked`],
+    ['muted', mutedService, 'ensureMutedFollowersCollection', `${ACTOR_URI}/muted`]
+  ])('%s follower bootstrap carries owner context through nested operations', async (_name, service, methodName, collectionUri) => {
+    const { ctx, calls } = makeContext();
+    const methods = bindMethods(service);
+
+    await methods[methodName](ctx, collectionUri, ACTOR_URI, DATASET);
+
+    expect(calls).toContainEqual(
+      expect.objectContaining({
+        action: 'activitypub.collection.exist',
+        options: { meta: { dataset: DATASET } }
+      })
+    );
+    expect(calls).toContainEqual(
+      expect.objectContaining({
+        action: 'activitypub.collection.post',
+        params: expect.objectContaining({ webId: ACTOR_URI }),
+        options: { meta: expect.objectContaining({ dataset: DATASET }) }
+      })
+    );
+    expect(calls).toContainEqual(
+      expect.objectContaining({
+        action: 'ldp.resource.patch',
+        params: expect.objectContaining({ webId: ACTOR_URI }),
+        options: { meta: expect.objectContaining({ dataset: DATASET, skipObjectsWatcher: true }) }
+      })
+    );
+  });
+
+  test.each([
     [
       'blocked',
       blockedService,
