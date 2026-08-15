@@ -243,16 +243,44 @@ module.exports = {
         const allowIncompleteSignupBootstrap =
           !forceCompleteSignupBootstrap &&
           (process.env.SEMAPPS_ALLOW_INCOMPLETE_SIGNUP_BOOTSTRAP === 'true' || process.env.NODE_ENV !== 'production');
+        const forcedBootstrapReadinessAttempts = forceCompleteSignupBootstrap
+          ? Math.max(1, Number(process.env.APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP_ATTEMPTS || 1))
+          : 1;
+
+        const isRetryableBootstrapTimeout = error => {
+          const message = String(error?.message || '');
+          return /after\s+30s|still has not been created after\s+30s|timed out waiting/i.test(message);
+        };
+
+        const callBootstrapReadiness = async (actionName, params) => {
+          for (let attempt = 1; attempt <= forcedBootstrapReadinessAttempts; attempt += 1) {
+            try {
+              return await ctx.call(actionName, params);
+            } catch (error) {
+              if (
+                !forceCompleteSignupBootstrap ||
+                !isRetryableBootstrapTimeout(error) ||
+                attempt >= forcedBootstrapReadinessAttempts
+              ) {
+                throw error;
+              }
+              this.logger.warn(
+                `[Auth] Forced signup bootstrap readiness timed out for ${actionName} (${attempt}/${forcedBootstrapReadinessAttempts}); retrying same readiness condition for ${res.webId}`
+              );
+            }
+          }
+          return undefined;
+        };
 
         const { webId } = res;
 
         try {
-          await ctx.call('auth-agent.waitForResourceCreation', { webId });
-          await ctx.call('agent-registry.waitForResourceCreation', { webId });
-          await ctx.call('auth-registry.waitForResourceCreation', { webId });
-          await ctx.call('data-registry.waitForResourceCreation', { webId });
+          await callBootstrapReadiness('auth-agent.waitForResourceCreation', { webId });
+          await callBootstrapReadiness('agent-registry.waitForResourceCreation', { webId });
+          await callBootstrapReadiness('auth-registry.waitForResourceCreation', { webId });
+          await callBootstrapReadiness('data-registry.waitForResourceCreation', { webId });
 
-          await ctx.call('activitypub.actor.awaitCreateComplete', {
+          await callBootstrapReadiness('activitypub.actor.awaitCreateComplete', {
             actorUri: webId,
             additionalKeys: [
               'pim:storage',
@@ -263,10 +291,12 @@ module.exports = {
             ]
           });
 
-          // Wait until all data and type registrations are created
-          // This is necessary for the data provider to be able to load all containers
-          await ctx.call('data-registry.awaitCreateComplete', { webId });
-          await ctx.call('type-indexes.awaitCreateComplete', { webId });
+          // Wait until all data and type registrations are created.
+          // The benchmark may retry only timeout-shaped waits, preserving the
+          // exact production readiness conditions while allowing a loaded CI
+          // fixture more time to converge.
+          await callBootstrapReadiness('data-registry.awaitCreateComplete', { webId });
+          await callBootstrapReadiness('type-indexes.awaitCreateComplete', { webId });
         } catch (e) {
           if (!allowIncompleteSignupBootstrap) throw e;
 
