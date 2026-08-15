@@ -15,6 +15,7 @@ const PUBLISHED_PREDICATE = 'https://www.w3.org/ns/activitystreams#published';
 const XSD_BOOLEAN = 'http://www.w3.org/2001/XMLSchema#boolean';
 const PATCHED_PROCESSOR_FLAG = '__activitypodsBlockedCollectionProcessorPatched';
 const BLOCKED_COLLECTION_PATH_RE = /^\/users\/([A-Za-z0-9._-]{1,128})\/blocked$/;
+const BLOCKED_BOOTSTRAP_MARKER = 'urn:activitypods:migration:blocked-collections-v1';
 const DEFAULT_GRAPH = {
   termType: 'DefaultGraph',
   value: '',
@@ -118,15 +119,38 @@ module.exports = {
     await this.broker.call('activitypub.collections-registry.register', this.settings.blockedCollectionOptions);
     await this.broker.call('activitypub.collections-registry.register', this.settings.blocksCollectionOptions);
 
-    const accounts = await this.broker.call('auth.account.find');
-    for (const account of accounts) {
-      if (!account?.webId) continue;
-      try {
-        await this.ensureCollectionsForActor(this.broker, account.webId);
-      } catch (error) {
-        this.logger.warn('[activitypub.blocked] blocked collection bootstrap skipped for actor', {
-          actorUri: account.webId,
-          error: error instanceof Error ? error.message : String(error)
+    const markerRows = await this.broker.call('triplestore.query', {
+      query: `ASK { <${BLOCKED_BOOTSTRAP_MARKER}> <http://activitypods.org/ns/core#completed> true }`,
+      dataset: 'settings',
+      webId: 'system'
+    });
+    const migrationComplete = markerRows === true || markerRows?.boolean === true || markerRows?.value === true;
+
+    if (!migrationComplete) {
+      const accounts = await this.broker.call('auth.account.find');
+      const failures = [];
+      for (const account of accounts) {
+        if (!account?.webId) continue;
+        try {
+          await this.ensureCollectionsForActor(this.broker, account.webId);
+        } catch (error) {
+          failures.push(account.webId);
+          this.logger.warn('[activitypub.blocked] blocked collection bootstrap skipped for actor', {
+            actorUri: account.webId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+
+      if (failures.length === 0) {
+        await this.broker.call('triplestore.update', {
+          query: `INSERT DATA { <${BLOCKED_BOOTSTRAP_MARKER}> <http://activitypods.org/ns/core#completed> true }`,
+          dataset: 'settings',
+          webId: 'system'
+        });
+      } else {
+        this.logger.warn('[activitypub.blocked] legacy collection migration remains incomplete', {
+          failureCount: failures.length
         });
       }
     }
