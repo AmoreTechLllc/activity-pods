@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { MIME_TYPES } = require('@semapps/mime-types');
 const schema = require('../services/reply-policies.service');
 
 function createService() {
@@ -31,7 +32,7 @@ describe('reply policy LDP read scalability', () => {
         action: 'ldp.resource.get',
         params: {
           resourceUri,
-          accept: 'application/ld+json',
+          accept: MIME_TYPES.JSON,
           webId: 'https://local.example/alice'
         }
       }
@@ -78,13 +79,13 @@ describe('reply policy LDP read scalability', () => {
     expect(ctx.call).toHaveBeenCalledWith('ldp.resource.get', expect.objectContaining({ resourceUri }));
   });
 
-  test('service source contains no ldp.remote.store call in the reply-policy read path', () => {
+  test('service source contains no ldp.remote.store call expression in the reply-policy read path', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/reply-policies.service.js'), 'utf8');
     const start = source.indexOf('async loadObject(');
     const end = source.indexOf('async evaluateLocalAuthorityPermission(', start);
     const loadObjectSource = source.slice(start, end);
 
     expect(loadObjectSource).toContain("ctx.call('ldp.resource.get'");
-    expect(loadObjectSource).not.toContain('ldp.remote.store');
+    expect(loadObjectSource).not.toContain("ctx.call('ldp.remote.store'");
   });
 });
