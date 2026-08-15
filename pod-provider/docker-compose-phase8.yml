@@ -8,9 +8,12 @@ services:
       APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
 
       # Provisioning 1,001 fully bootstrapped Pod actors is setup, not measured
-      # load. Keep the same key-container readiness condition but allow more
-      # time than the production default while the benchmark fixture is built.
+      # load. Keep the same readiness conditions but allow more time than the
+      # production defaults while the benchmark fixture is built. The forced
+      # signup hook retries only timeout-shaped readiness failures and never
+      # skips a missing registration or retries non-timeout errors.
       APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'
+      APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP_ATTEMPTS: '3'
 
       # Keep the benchmark local-only and suppress the transitional sidecar
       # observer so unrelated failed HTTP attempts cannot contaminate samples.
