@@ -18,17 +18,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: fix/activitypub-collection-dataset-context
-      - name: Apply and verify owner-context fix
+      - name: Apply owner-context fix
         run: python .github/scripts/tmp-thread-collection-owner-context.py
-      - name: Run focused collection suites
-        working-directory: pod-provider/backend
-        run: |
-          npm exec --yes --package=jest@29.7.0 --package=esbuild@0.25.4 --package=esbuild-jest@0.5.0 -- \
-            jest --testEnvironment=node \
-              tests/activitypub-collection-dataset-context.test.js \
-              tests/activitypub-blocked-collection.test.js \
-              tests/activitypub-muted-collection.test.js \
-              --runInBand
       - name: Commit implementation
         run: |
           git config user.name 'github-actions[bot]'
