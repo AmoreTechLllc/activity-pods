@@ -9,7 +9,9 @@ const { ServiceBroker } = require('moleculer');
 const REQUIRED_RECIPIENT_COUNTS = [1, 10, 100, 200, 1000];
 const DEFAULT_BASE_URL = 'http://localhost:3000';
 const DEFAULT_TRANSPORTER_URL = 'redis://redis:6379/12';
-const DEFAULT_PROVISION_CONCURRENCY = 12;
+const DEFAULT_PROVISION_CONCURRENCY = 4;
+const DEFAULT_PROVISION_BATCH_SIZE = 24;
+const DEFAULT_BOOTSTRAP_CONCURRENCY = 8;
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_SIGNUP_TIMEOUT_MS = 900_000;
 const DEFAULT_SAMPLE_TIMEOUT_MS = 900_000;
@@ -39,7 +41,10 @@ function createBenchmarkUsername({ runId, role, index = 0, attempt = 0 }) {
   const roleToken = role === 'sender' ? 's' : 'r';
   const seed = `${normalizeRunId(runId)}:${roleToken}:${index}:${attempt}`;
   const digest = crypto.createHash('sha256').update(seed).digest('hex');
-  return `p8m${roleToken}${digest.slice(0, 16)}`;
+  // Numeric-only entropy avoids accidentally forming moderation dictionary
+  // words while still traversing the normal moderation action on every signup.
+  const numeric = (BigInt(`0x${digest.slice(0, 16)}`) % 10_000_000_000_000_000n).toString().padStart(16, '0');
+  return `p8m${roleToken}${numeric}`;
 }
 
 function isUsernameNotAllowed(error) {
@@ -78,6 +83,12 @@ async function boundedMap(items, concurrency, worker) {
   return results;
 }
 
+function chunk(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
+  return chunks;
+}
+
 async function requestJsonOnce(url, options, { timeoutMs = DEFAULT_READY_TIMEOUT_MS } = {}) {
   let response;
   try {
@@ -101,9 +112,6 @@ async function requestJsonOnce(url, options, { timeoutMs = DEFAULT_READY_TIMEOUT
     const error = new Error(`HTTP ${response.status}: ${JSON.stringify(body)}`);
     error.status = response.status;
     error.body = body;
-    // Signup is non-idempotent. Never replay 5xx/408/429 either: the account may
-    // already have committed before the response failed. A failed benchmark run
-    // is torn down and restarted with a fresh APDM_P8_RUN_ID instead.
     if (response.status >= 500 || response.status === 408 || response.status === 429) error.ambiguous = true;
     throw error;
   }
@@ -122,11 +130,7 @@ async function signup(baseUrl, username, password) {
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username,
-        email: `${username}@example.invalid`,
-        password
-      })
+      body: JSON.stringify({ username, email: `${username}@example.invalid`, password })
     },
     { timeoutMs: signupTimeoutMs }
   );
@@ -194,29 +198,71 @@ async function waitForCollection(broker, actor, predicate, timeoutMs) {
   throw new Error(`Timed out waiting for ${predicate} of ${actor.webId}${lastError ? `: ${lastError.message}` : ''}`);
 }
 
-async function provisionActors({ manifestPath, recipientCount, baseUrl, transporterUrl, concurrency, readyTimeoutMs, runId }) {
+async function awaitActorBootstrap(broker, actor, predicate, readyTimeoutMs) {
+  await broker.call(
+    'auth.awaitBootstrapComplete',
+    { webId: actor.webId },
+    { meta: { dataset: actor.username, webId: actor.webId }, timeout: readyTimeoutMs * 4 }
+  );
+  actor[predicate] = await waitForCollection(broker, actor, predicate, readyTimeoutMs);
+  return actor;
+}
+
+async function provisionActors({
+  manifestPath,
+  recipientCount,
+  baseUrl,
+  transporterUrl,
+  concurrency,
+  batchSize,
+  bootstrapConcurrency,
+  readyTimeoutMs,
+  runId
+}) {
   const broker = createRemoteBroker(transporterUrl);
   await broker.start();
   try {
-    await broker.waitForServices(['activitypub.outbox', 'activitypub.actor'], readyTimeoutMs);
+    await broker.waitForServices(['auth', 'activitypub.outbox', 'activitypub.actor'], readyTimeoutMs);
     const prefix = normalizeRunId(runId);
     const password = process.env.APDM_P8_SIGNUP_PASSWORD || 'Phase8MeasurePass123!';
+    const startedAt = Date.now();
+
     const sender = await signupWithCandidateRetries({ baseUrl, password, runId: prefix, role: 'sender' });
-    sender.outbox = await waitForCollection(broker, sender, 'outbox', readyTimeoutMs);
+    await awaitActorBootstrap(broker, sender, 'outbox', readyTimeoutMs);
 
     const indexes = Array.from({ length: recipientCount }, (_, index) => index + 1);
+    const recipients = [];
     let completed = 0;
-    const recipients = await boundedMap(indexes, concurrency, async index => {
-      const recipient = await signupWithCandidateRetries({ baseUrl, password, runId: prefix, role: 'recipient', index });
-      recipient.inbox = await waitForCollection(broker, recipient, 'inbox', readyTimeoutMs);
-      completed += 1;
-      if (completed === recipientCount || completed % 50 === 0) {
-        process.stdout.write(`[APDM-P8] provisioned ${completed}/${recipientCount} recipients\n`);
-      }
-      return recipient;
-    });
 
-    const manifest = { version: 1, phase: 'APDM-P8-A', createdAt: new Date().toISOString(), runId: prefix, sender, recipients };
+    for (const indexBatch of chunk(indexes, batchSize)) {
+      // Signup releases after Tier-1 key + ActivityPub provisioning in the
+      // benchmark overlay. Event-created Pod resources then overlap only within
+      // this bounded window, preventing an unbounded Fuseki/LDP backlog.
+      const signedUp = await boundedMap(indexBatch, concurrency, index =>
+        signupWithCandidateRetries({ baseUrl, password, runId: prefix, role: 'recipient', index })
+      );
+
+      const completedBatch = await boundedMap(signedUp, bootstrapConcurrency, actor =>
+        awaitActorBootstrap(broker, actor, 'inbox', readyTimeoutMs)
+      );
+      recipients.push(...completedBatch);
+      completed += completedBatch.length;
+
+      const elapsedSeconds = Math.max(0.001, (Date.now() - startedAt) / 1000);
+      const rate = completed / elapsedSeconds;
+      process.stdout.write(
+        `[APDM-P8] provisioned ${completed}/${recipientCount} recipients elapsed=${elapsedSeconds.toFixed(1)}s rate=${rate.toFixed(2)}/s\n`
+      );
+    }
+
+    const manifest = {
+      version: 1,
+      phase: 'APDM-P8-A',
+      createdAt: new Date().toISOString(),
+      runId: prefix,
+      sender,
+      recipients
+    };
     fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
     return manifest;
@@ -297,7 +343,9 @@ async function measure({ manifestPath, recipientCount, samples, warmups, outputP
       process.stdout.write(`[APDM-P8] completed sample ${index + 1}/${samples} at N=${recipientCount}\n`);
     }
     const records = readJsonLines(outputPath);
-    if (records.length !== samples) throw new Error(`Expected exactly ${samples} measured records at N=${recipientCount}, found ${records.length}`);
+    if (records.length !== samples) {
+      throw new Error(`Expected exactly ${samples} measured records at N=${recipientCount}, found ${records.length}`);
+    }
     records.forEach(record => assertUsableRecord(record, recipientCount));
     return records;
   } finally {
@@ -314,9 +362,35 @@ async function main(argv = process.argv.slice(2)) {
   if (command === 'provision') {
     const manifestPath = path.resolve(argv[1] || './measurements/apdm-p8-actors.json');
     const recipientCount = positiveInteger(argv[2], 1000, 'recipient count');
-    const concurrency = positiveInteger(process.env.APDM_P8_PROVISION_CONCURRENCY, DEFAULT_PROVISION_CONCURRENCY, 'provision concurrency');
-    const manifest = await provisionActors({ manifestPath, recipientCount, baseUrl, transporterUrl, concurrency, readyTimeoutMs, runId: process.env.APDM_P8_RUN_ID });
-    process.stdout.write(`${JSON.stringify({ ok: true, command, manifestPath, recipients: manifest.recipients.length, sender: manifest.sender.webId })}\n`);
+    const concurrency = positiveInteger(
+      process.env.APDM_P8_PROVISION_CONCURRENCY,
+      DEFAULT_PROVISION_CONCURRENCY,
+      'provision concurrency'
+    );
+    const batchSize = positiveInteger(
+      process.env.APDM_P8_PROVISION_BATCH_SIZE,
+      DEFAULT_PROVISION_BATCH_SIZE,
+      'provision batch size'
+    );
+    const bootstrapConcurrency = positiveInteger(
+      process.env.APDM_P8_BOOTSTRAP_CONCURRENCY,
+      DEFAULT_BOOTSTRAP_CONCURRENCY,
+      'bootstrap concurrency'
+    );
+    const manifest = await provisionActors({
+      manifestPath,
+      recipientCount,
+      baseUrl,
+      transporterUrl,
+      concurrency,
+      batchSize,
+      bootstrapConcurrency,
+      readyTimeoutMs,
+      runId: process.env.APDM_P8_RUN_ID
+    });
+    process.stdout.write(
+      `${JSON.stringify({ ok: true, command, manifestPath, recipients: manifest.recipients.length, sender: manifest.sender.webId })}\n`
+    );
     return;
   }
 
@@ -325,9 +399,24 @@ async function main(argv = process.argv.slice(2)) {
     const recipientCount = positiveInteger(argv[2], undefined, 'recipient count');
     const samples = positiveInteger(process.env.APDM_P8_SAMPLES, DEFAULT_SAMPLES, 'samples');
     const warmups = positiveInteger(process.env.APDM_P8_WARMUPS, DEFAULT_WARMUPS, 'warmups');
-    const sampleTimeoutMs = positiveInteger(process.env.APDM_P8_SAMPLE_TIMEOUT_MS, DEFAULT_SAMPLE_TIMEOUT_MS, 'sample timeout');
-    const outputPath = path.resolve(process.env.SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT || `./measurements/apdm-p8-${recipientCount}.jsonl`);
-    const records = await measure({ manifestPath, recipientCount, samples, warmups, outputPath, transporterUrl, readyTimeoutMs, sampleTimeoutMs });
+    const sampleTimeoutMs = positiveInteger(
+      process.env.APDM_P8_SAMPLE_TIMEOUT_MS,
+      DEFAULT_SAMPLE_TIMEOUT_MS,
+      'sample timeout'
+    );
+    const outputPath = path.resolve(
+      process.env.SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT || `./measurements/apdm-p8-${recipientCount}.jsonl`
+    );
+    const records = await measure({
+      manifestPath,
+      recipientCount,
+      samples,
+      warmups,
+      outputPath,
+      transporterUrl,
+      readyTimeoutMs,
+      sampleTimeoutMs
+    });
     process.stdout.write(`${JSON.stringify({ ok: true, command, recipientCount, samples: records.length, outputPath })}\n`);
     return;
   }
@@ -345,7 +434,9 @@ if (require.main === module) {
 module.exports = {
   REQUIRED_RECIPIENT_COUNTS,
   assertUsableRecord,
+  awaitActorBootstrap,
   boundedMap,
+  chunk,
   createBenchmarkUsername,
   isUsernameNotAllowed,
   normalizeRunId,
