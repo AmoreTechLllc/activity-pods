@@ -33,7 +33,7 @@ module.exports = {
         const indexed = await this.lookupIndexedBinding(ctx, 'atprotoDid', atprotoDid);
         if (indexed) return this.normalize(indexed);
 
-        // Compatibility fallback for legacy or partially indexed bindings.
+        // Compatibility fallback for legacy, missing or stale index state.
         const binding = await this.lookupBinding(ctx, 'identitybindings.getByDid', {
           atprotoDid
         });
@@ -95,8 +95,8 @@ module.exports = {
             PREFIX apods: <${APODS}>
             SELECT ?canonicalAccountId
             WHERE {
-              ?binding a ${INDEX_TYPE} ;
-                       apods:${predicate} ${JSON.stringify(String(expectedValue))} ;
+              ?binding apods:${predicate} ${JSON.stringify(String(expectedValue))} ;
+                       a ${INDEX_TYPE} ;
                        apods:canonicalAccountId ?canonicalAccountId .
             }
             LIMIT 1
@@ -108,9 +108,25 @@ module.exports = {
         const canonicalAccountId = this.readQueryBinding(rows?.[0], 'canonicalAccountId');
         if (!canonicalAccountId) return null;
 
-        return await this.lookupBinding(ctx, 'identitybindings.getByCanonicalAccountId', {
+        const binding = await this.lookupBinding(ctx, 'identitybindings.getByCanonicalAccountId', {
           canonicalAccountId
         });
+        if (!binding) return null;
+
+        // The settings index is a performance projection, not identity authority.
+        // A failed index sync may leave an old DID/handle pointing at an otherwise
+        // valid canonical binding, so verify the authoritative LDP value before
+        // accepting the index hit. A mismatch deliberately falls back to the
+        // compatibility lookup rather than returning the wrong current identity.
+        const normalizeLookupValue = value => {
+          const normalized = String(value || '').trim();
+          return field === 'atprotoHandle' ? normalized.toLowerCase() : normalized;
+        };
+        if (normalizeLookupValue(binding[field]) !== normalizeLookupValue(expectedValue)) {
+          return null;
+        }
+
+        return binding;
       } catch (error) {
         // The LDP binding remains authoritative and the previous lookup path is
         // retained by callers. An unavailable/stale settings index must degrade
