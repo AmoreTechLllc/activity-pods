@@ -488,12 +488,16 @@ module.exports = {
         senderFollowersSnapshot
       );
       const localRecipientUris = [];
+      const localRecipientAccounts = new Map();
       const remoteRecipientUris = [];
 
       for (const recipientUri of concreteRecipients) {
         if (recipientUri.startsWith(this.settings.baseUri)) {
           const localAccount = await ctx.call('auth.account.findByWebId', { webId: recipientUri });
-          if (localAccount) localRecipientUris.push(recipientUri);
+          if (localAccount) {
+            localRecipientUris.push(recipientUri);
+            localRecipientAccounts.set(recipientUri, localAccount);
+          }
         } else {
           remoteRecipientUris.push(recipientUri);
         }
@@ -505,6 +509,7 @@ module.exports = {
         activity,
         localRecipientUris,
         remoteRecipientUris,
+        localRecipientAccounts,
         podProvider: true
       });
     },
@@ -575,7 +580,12 @@ module.exports = {
           }
 
           if (reachedCutoff || page.length < pageSize) break;
-          if (!nextCursor || (activityCursor && nextCursor.published === activityCursor.published && nextCursor.activityUri === activityCursor.activityUri)) {
+          if (
+            !nextCursor ||
+            (activityCursor &&
+              nextCursor.published === activityCursor.published &&
+              nextCursor.activityUri === activityCursor.activityUri)
+          ) {
             failures += 1;
             this.logger.warn('ActivityPub delivery reconciliation outbox cursor failed to advance', {
               actorUri: account.webId,
