@@ -39,6 +39,9 @@ describe('activitypub-blocked-collection service', () => {
         if (action === 'auth.account.find') {
           return [{ webId: 'https://fed.example.com/users/alice' }];
         }
+        if (action === 'auth.account.findByWebId') {
+          return { webId: 'https://fed.example.com/users/alice', username: 'alice' };
+        }
         if (action === 'activitypub.actor.get') {
           return {
             blocked: 'https://fed.example.com/users/alice/blocked',
