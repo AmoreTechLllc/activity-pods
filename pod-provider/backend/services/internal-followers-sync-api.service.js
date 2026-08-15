@@ -235,9 +235,9 @@ module.exports = {
         }
 
         // Query across all datasets (webId: 'system') to find every local actor
-        // whose `following` collection contains the remote actor URI.
-        //
-        // SPARQL pattern:  ?actorUri as:following ?col .  ?col as:items <remoteActorUri>
+        // whose `following` collection contains the remote actor URI. Lead with
+        // the bound predicate/object membership pattern so TDB2 can use the
+        // selective object index before joining back to owning actors.
         //
         // This works in pod-provider mode because triplestore queries with
         // webId: 'system' have cross-dataset read access (same as collection.getOwner).
@@ -248,8 +248,8 @@ module.exports = {
               PREFIX as: <https://www.w3.org/ns/activitystreams#>
               SELECT DISTINCT ?actorUri
               WHERE {
-                ?actorUri as:following ?followingUri .
                 ?followingUri as:items <${remoteActorUri}> .
+                ?actorUri as:following ?followingUri .
               }
             `,
             accept: MIME_TYPES.JSON,
