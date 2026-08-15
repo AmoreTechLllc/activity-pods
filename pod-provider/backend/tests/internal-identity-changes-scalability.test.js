@@ -11,7 +11,7 @@ function createService(overrides = {}) {
 }
 
 describe('internal identity change feed scalability', () => {
-  test('selects only cursor fields with keyset pagination before authoritative reads', async () => {
+  test('selects a bounded coherent projection page with keyset pagination', async () => {
     const service = createService();
     const ctx = {
       call: jest.fn(async (action, params) => {
@@ -20,13 +20,16 @@ describe('internal identity change feed scalability', () => {
           expect(params.webId).toBe('system');
           expect(params.query).toContain('apods:updatedAt ?updatedAt');
           expect(params.query).toContain('apods:canonicalAccountId ?canonicalAccountId');
+          expect(params.query).toContain('?atprotoDid');
+          expect(params.query).toContain('?repoRootCid');
           expect(params.query).toContain('ORDER BY ?updatedAt ?canonicalAccountId');
           expect(params.query).toContain('LIMIT 25');
-          expect(params.query).not.toContain('?atprotoDid');
-          expect(params.query).not.toContain('?repoRootCid');
           return [
             {
               canonicalAccountId: { value: 'https://example.test/alice' },
+              webId: { value: 'https://example.test/alice' },
+              atprotoDid: { value: 'did:plc:alice' },
+              status: { value: 'active' },
               updatedAt: { value: '2026-08-15T10:00:00.000Z' }
             }
           ];
@@ -36,15 +39,17 @@ describe('internal identity change feed scalability', () => {
     };
 
     const rows = await service.selectChangePage(ctx, null, 25);
-    expect(rows).toEqual([
-      {
-        canonicalAccountId: 'https://example.test/alice',
-        updatedAt: '2026-08-15T10:00:00.000Z'
-      }
-    ]);
+    expect(rows[0]).toMatchObject({
+      canonicalAccountId: 'https://example.test/alice',
+      webId: 'https://example.test/alice',
+      atprotoDid: 'did:plc:alice',
+      status: 'active',
+      updatedAt: '2026-08-15T10:00:00.000Z'
+    });
+    expect(ctx.call).toHaveBeenCalledTimes(1);
   });
 
-  test('cursor filter is strict and tie-breaks on canonical account id', async () => {
+  test('v2 cursor filter is strict and tie-breaks on canonical account id', async () => {
     const service = createService();
     let query = '';
     const ctx = {
@@ -57,6 +62,7 @@ describe('internal identity change feed scalability', () => {
     await service.selectChangePage(
       ctx,
       {
+        version: 2,
         updatedAt: '2026-08-15T10:00:00.000Z',
         canonicalAccountId: 'https://example.test/alice'
       },
@@ -68,46 +74,77 @@ describe('internal identity change feed scalability', () => {
     expect(query).toContain('?canonicalAccountId > "https://example.test/alice"');
   });
 
-  test('advances past stale index rows without getting stuck', async () => {
+  test('new drain returns projection snapshots directly and a versioned cursor', async () => {
     const service = createService();
-    const calls = [];
     const ctx = {
       params: { limit: 2 },
-      call: jest.fn(async (action, params) => {
-        calls.push({ action, params });
+      call: jest.fn(async action => {
         if (action === 'triplestore.query') {
           return [
             {
-              canonicalAccountId: { value: 'https://example.test/stale' },
+              canonicalAccountId: { value: 'https://example.test/alice' },
+              webId: { value: 'https://example.test/alice' },
+              status: { value: 'active' },
               updatedAt: { value: '2026-08-15T10:00:00.000Z' }
             },
             {
               canonicalAccountId: { value: 'https://example.test/bob' },
+              webId: { value: 'https://example.test/bob' },
+              status: { value: 'active' },
               updatedAt: { value: '2026-08-15T10:00:01.000Z' }
             }
           ];
-        }
-        if (action === 'identitybindings.getByCanonicalAccountId') {
-          if (params.canonicalAccountId.endsWith('/stale')) return null;
-          return {
-            canonicalAccountId: params.canonicalAccountId,
-            webId: params.canonicalAccountId,
-            updatedAt: '2026-08-15T10:00:01.000Z',
-            status: 'active'
-          };
         }
         throw new Error(`unexpected action ${action}`);
       })
     };
 
     const result = await schema.actions.listChanges.handler.call(service, ctx);
-    expect(result.items).toHaveLength(1);
-    expect(result.items[0].canonicalAccountId).toBe('https://example.test/bob');
+    expect(result.items).toHaveLength(2);
+    expect(result.items.map(item => item.canonicalAccountId)).toEqual([
+      'https://example.test/alice',
+      'https://example.test/bob'
+    ]);
     expect(service.parseCursor(result.nextCursor)).toEqual({
+      version: 2,
       updatedAt: '2026-08-15T10:00:01.000Z',
       canonicalAccountId: 'https://example.test/bob'
     });
-    expect(calls.filter(call => call.action === 'identitybindings.getByCanonicalAccountId')).toHaveLength(2);
+    expect(ctx.call).toHaveBeenCalledTimes(1);
+  });
+
+  test('legacy cursors retain localeCompare-compatible identitybindings path', async () => {
+    const service = createService();
+    const legacyCursor = Buffer.from(
+      JSON.stringify({
+        updatedAt: '2026-08-15T10:00:00.000Z',
+        canonicalAccountId: 'https://example.test/Alice'
+      }),
+      'utf8'
+    ).toString('base64url');
+    const ctx = {
+      params: { since: legacyCursor, limit: 20 },
+      call: jest.fn(async (action, params) => {
+        expect(action).toBe('identitybindings.list');
+        expect(params).toEqual({ since: legacyCursor, limit: 20 });
+        return {
+          items: [
+            {
+              canonicalAccountId: 'https://example.test/bob',
+              webId: 'https://example.test/bob',
+              status: 'active',
+              updatedAt: '2026-08-15T10:00:01.000Z'
+            }
+          ],
+          nextCursor: 'legacy-next'
+        };
+      })
+    };
+
+    const result = await schema.actions.listChanges.handler.call(service, ctx);
+    expect(result.items[0].canonicalAccountId).toBe('https://example.test/bob');
+    expect(result.nextCursor).toBe('legacy-next');
+    expect(ctx.call).toHaveBeenCalledTimes(1);
   });
 
   test('rejects malformed cursors', () => {
