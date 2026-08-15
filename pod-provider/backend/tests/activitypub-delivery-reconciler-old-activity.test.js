@@ -40,6 +40,7 @@ test('APDM P4 reconciler skips persisted activities outside the lookback window'
     },
     reconcileActivity: service.methods.reconcileActivity,
     expandConcreteRecipients: service.methods.expandConcreteRecipients,
+    listOutboxActivityPage: service.methods.listOutboxActivityPage,
     logger: { warn: jest.fn() }
   };
 
