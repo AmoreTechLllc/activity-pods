@@ -68,8 +68,11 @@ function createDeliveryIntentId({ activityId, actorUri, localRecipientUris, remo
   return computeDeliveryPlanIntentId({ activityId, actorUri, localRecipientUris, remoteRecipientUris });
 }
 
-async function resolveLocalDeliveryTarget(ctx, actorUri, podProvider) {
-  const account = await ctx.call('auth.account.findByWebId', { webId: actorUri });
+async function resolveLocalDeliveryTarget(ctx, actorUri, podProvider, preResolvedAccount) {
+  const account =
+    preResolvedAccount === undefined
+      ? await ctx.call('auth.account.findByWebId', { webId: actorUri })
+      : preResolvedAccount;
   if (!account) throw new Error(`Unable to resolve local ActivityPub account for ${actorUri}`);
 
   const dataset = podProvider ? account.username : account.username || account.dataset;
@@ -156,6 +159,7 @@ async function buildDeliveryPlanV1(
     activity,
     localRecipientUris = [],
     remoteRecipientUris = [],
+    localRecipientAccounts,
     podProvider = true,
     concurrency = DEFAULT_TARGET_RESOLUTION_CONCURRENCY
   }
@@ -184,9 +188,17 @@ async function buildDeliveryPlanV1(
   ];
   const resolvedTargets = await mapWithConcurrency(taggedTargets, concurrency, async target => ({
     classification: target.classification,
-    value: target.classification === 'local'
-      ? await resolveLocalDeliveryTarget(ctx, target.actor, podProvider)
-      : await resolveRemoteDeliveryTarget(ctx, target.actor)
+    value:
+      target.classification === 'local'
+        ? await resolveLocalDeliveryTarget(
+            ctx,
+            target.actor,
+            podProvider,
+            localRecipientAccounts instanceof Map && localRecipientAccounts.has(target.actor)
+              ? localRecipientAccounts.get(target.actor)
+              : undefined
+          )
+        : await resolveRemoteDeliveryTarget(ctx, target.actor)
   }));
   const localRecipients = resolvedTargets
     .filter(target => target.classification === 'local')
