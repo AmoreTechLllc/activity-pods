@@ -1,6 +1,20 @@
 const fs = require('fs');
 const path = require('path');
 
+jest.mock('@semapps/activitypub', () => ({
+  ActivitiesHandlerMixin: {},
+  ACTIVITY_TYPES: {
+    BLOCK: 'Block',
+    UNDO: 'Undo',
+    FOLLOW: 'Follow',
+    ACCEPT: 'Accept'
+  },
+  ACTOR_TYPES: {
+    PERSON: 'Person',
+    APPLICATION: 'Application'
+  }
+}));
+
 const schema = require('../services/activitypub-blocked-collection.service');
 
 const source = fs.readFileSync(
