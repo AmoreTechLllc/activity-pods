@@ -333,7 +333,7 @@ module.exports = {
 
     async listAccountPage(ctx, { cursor, limit }) {
       const boundedLimit = Math.max(1, Math.min(5000, Math.floor(Number(limit) || 500)));
-      const cursorFilter = cursor ? sanitizeSparqlQuery`FILTER(STR(?accountUri) > ${cursor})` : '';
+      const cursorFilter = cursor ? sanitizeSparqlQuery`FILTER(STR(?accountUri) > "${cursor}")` : '';
       const queryBody = `
         PREFIX semapps: <http://semapps.org/ns/core#>
         SELECT ?accountUri ?webId ?username
