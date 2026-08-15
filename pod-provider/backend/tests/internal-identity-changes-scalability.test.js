@@ -65,7 +65,7 @@ describe('internal identity change scalability', () => {
       expect(result.items[0].repo.initialized).toBe(true);
       expect(result.nextCursor).toEqual(expect.any(String));
       expect(triplestoreQuery).toHaveBeenCalledTimes(1);
-      expect(triplestoreQuery.mock.calls[0][0].query).toContain('LIMIT 25');
+      expect(triplestoreQuery.mock.calls[0][0].params.query).toContain('LIMIT 25');
       expect(legacyList).not.toHaveBeenCalled();
     } finally {
       await broker.stop();
