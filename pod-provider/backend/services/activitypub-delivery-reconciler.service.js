@@ -7,7 +7,7 @@ const { sanitizeSparqlQuery } = require('@semapps/triplestore');
 const CONFIG = require('../config/config');
 const { buildDeliveryPlanV1, mapWithConcurrency } = require('../utils/activitypub-delivery-planner');
 
-const ACCOUNT_CURSOR_KEY = 'apdm:delivery-reconciliation:account-offset:v1';
+const ACCOUNT_CURSOR_KEY = 'apdm:delivery-reconciliation:account-keyset:v2';
 const RECONCILIATION_LOCK_KEY = 'apdm:delivery-reconciliation:lock:v1';
 const BLIND_SNAPSHOT_PREFIX = 'apdm:delivery-reconciliation:blind:v1:';
 const BLIND_SNAPSHOT_TTL_SECONDS = 259200;
@@ -97,6 +97,7 @@ module.exports = {
     accountBatchSize: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_ACCOUNT_BATCH_SIZE,
     maxActivitiesPerAccount: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_MAX_ACTIVITIES_PER_ACCOUNT,
     concurrency: CONFIG.ACTIVITYPUB_DELIVERY_RECONCILIATION_CONCURRENCY,
+    accountsDataset: CONFIG.AUTH_ACCOUNTS_DATASET,
     accountCursorKey: ACCOUNT_CURSOR_KEY,
     reconciliationLockKey: RECONCILIATION_LOCK_KEY,
     blindSnapshotPrefix: BLIND_SNAPSHOT_PREFIX,
@@ -115,6 +116,7 @@ module.exports = {
       handoffsRequeued: 0,
       failures: 0,
       accountOffset: 0,
+      accountCursor: null,
       distributedLockSkips: 0,
       lastRunStartedAt: null,
       lastRunCompletedAt: null,
@@ -129,6 +131,9 @@ module.exports = {
     }
     if (typeof this.settings.queueServiceUrl !== 'string' || this.settings.queueServiceUrl.length === 0) {
       throw new Error('ActivityPub delivery reconciliation requires SEMAPPS_QUEUE_SERVICE_URL');
+    }
+    if (typeof this.settings.accountsDataset !== 'string' || this.settings.accountsDataset.length === 0) {
+      throw new Error('ActivityPub delivery reconciliation requires SEMAPPS_AUTH_ACCOUNTS_DATASET');
     }
 
     this.reconciliationRedis = new Redis(this.settings.queueServiceUrl, {
@@ -207,19 +212,15 @@ module.exports = {
 
         try {
           const batchSize = Math.max(1, Math.min(5000, Math.floor(Number(this.settings.accountBatchSize) || 500)));
-          let offset = await this.getAccountOffset();
-          let accounts = await ctx.call('auth.account.find', { limit: batchSize, offset });
+          let cursor = await this.getAccountCursor();
+          let page = await this.listAccountPage(ctx, { cursor, limit: batchSize });
 
-          if ((!Array.isArray(accounts) || accounts.length === 0) && offset > 0) {
-            offset = 0;
-            accounts = await ctx.call('auth.account.find', { limit: batchSize, offset: 0 });
+          if (page.accounts.length === 0 && cursor) {
+            cursor = null;
+            page = await this.listAccountPage(ctx, { cursor: null, limit: batchSize });
           }
 
-          const rawAccounts = Array.isArray(accounts) ? accounts : [];
-          const activeAccounts = rawAccounts.filter(
-            account => account && !account.deletedAt && typeof account.webId === 'string' && typeof account.username === 'string'
-          );
-
+          const activeAccounts = page.accounts;
           const results = await mapWithConcurrency(
             activeAccounts,
             Math.max(1, Math.floor(Number(this.settings.concurrency) || 4)),
@@ -236,18 +237,19 @@ module.exports = {
             { accountsScanned: 0, activitiesScanned: 0, handoffsRequeued: 0, failures: 0 }
           );
 
-          const nextOffset = rawAccounts.length < batchSize ? 0 : offset + rawAccounts.length;
-          await this.setAccountOffset(nextOffset);
+          const nextCursor = activeAccounts.length < batchSize ? null : page.nextCursor;
+          await this.setAccountCursor(nextCursor);
 
           this.reconciliationStats.accountsScanned += summary.accountsScanned;
           this.reconciliationStats.activitiesScanned += summary.activitiesScanned;
           this.reconciliationStats.handoffsRequeued += summary.handoffsRequeued;
           this.reconciliationStats.failures += summary.failures;
-          this.reconciliationStats.accountOffset = nextOffset;
+          this.reconciliationStats.accountOffset = 0;
+          this.reconciliationStats.accountCursor = nextCursor;
           this.reconciliationStats.lastRunCompletedAt = new Date().toISOString();
 
-          this.logger.info('ActivityPub delivery reconciliation completed', { ...summary, nextAccountOffset: nextOffset });
-          return { ...summary, nextAccountOffset: nextOffset };
+          this.logger.info('ActivityPub delivery reconciliation completed', { ...summary, nextAccountCursor: nextCursor });
+          return { ...summary, nextAccountOffset: 0, nextAccountCursor: nextCursor };
         } catch (error) {
           this.reconciliationStats.failures += 1;
           this.reconciliationStats.lastError = error.message;
@@ -314,16 +316,60 @@ module.exports = {
       return result === 1;
     },
 
-    async getAccountOffset() {
+    async getAccountCursor() {
       if (!this.reconciliationRedis) throw new Error('ActivityPub reconciliation Redis is not initialized');
       const raw = await this.reconciliationRedis.get(this.settings.accountCursorKey);
-      const parsed = Number.parseInt(raw || '0', 10);
-      return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+      return typeof raw === 'string' && raw.length > 0 ? raw : null;
     },
 
-    async setAccountOffset(offset) {
+    async setAccountCursor(cursor) {
       if (!this.reconciliationRedis) throw new Error('ActivityPub reconciliation Redis is not initialized');
-      await this.reconciliationRedis.set(this.settings.accountCursorKey, String(Math.max(0, Math.floor(offset))));
+      if (!cursor) {
+        await this.reconciliationRedis.del(this.settings.accountCursorKey);
+        return;
+      }
+      await this.reconciliationRedis.set(this.settings.accountCursorKey, cursor);
+    },
+
+    async listAccountPage(ctx, { cursor, limit }) {
+      const boundedLimit = Math.max(1, Math.min(5000, Math.floor(Number(limit) || 500)));
+      const cursorFilter = cursor ? sanitizeSparqlQuery`FILTER(STR(?accountUri) > ${cursor})` : '';
+      const queryBody = `
+        PREFIX semapps: <http://semapps.org/ns/core#>
+        SELECT ?accountUri ?webId ?username
+        WHERE {
+          ?accountUri a semapps:AuthAccount ;
+            semapps:webId ?webId ;
+            semapps:username ?username .
+          FILTER NOT EXISTS { ?accountUri semapps:deletedAt ?deletedAt . }
+          ${cursorFilter}
+        }
+        ORDER BY STR(?accountUri)
+      `;
+      const rows = await ctx.call('triplestore.query', {
+        query: `${queryBody}\nLIMIT ${boundedLimit}`,
+        accept: MIME_TYPES.JSON,
+        dataset: this.settings.accountsDataset,
+        webId: 'system'
+      });
+      const rawRows = Array.isArray(rows) ? rows : [];
+      const accounts = rawRows
+        .map(row => ({
+          '@id': row?.accountUri?.value,
+          webId: row?.webId?.value,
+          username: row?.username?.value
+        }))
+        .filter(
+          account =>
+            typeof account['@id'] === 'string' &&
+            typeof account.webId === 'string' &&
+            typeof account.username === 'string'
+        );
+      const lastAccountUri = rawRows[rawRows.length - 1]?.accountUri?.value;
+      return {
+        accounts,
+        nextCursor: typeof lastAccountUri === 'string' && lastAccountUri.length > 0 ? lastAccountUri : cursor || null
+      };
     },
 
     async expandConcreteRecipients(ctx, activity, recipients, dataset) {
