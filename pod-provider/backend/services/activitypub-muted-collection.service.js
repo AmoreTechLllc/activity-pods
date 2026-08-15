@@ -193,7 +193,10 @@ module.exports = {
           item: followerUri
         });
 
-        const ownerActor = await ctx.call('activitypub.actor.get', { actorUri: ownerActorUri });
+        const ownerActor = await ctx.call('activitypub.actor.get', {
+          actorUri: ownerActorUri,
+          webId: ownerActorUri
+        });
         if (!ownerActor?.outbox) {
           this.logger.warn('[muted] unable to accept muted-collection follow because owner outbox is missing', {
             ownerActorUri,
@@ -298,6 +301,14 @@ module.exports = {
         return null;
       }
       return collectionUri.replace(/\/muted$/, '');
+    },
+    async resolveActorDataset(ctx, actorUri) {
+      const account = await ctx.call('auth.account.findByWebId', { webId: actorUri });
+      const dataset = account?.username;
+      if (!dataset) {
+        throw new Error(`[activitypub.muted] Unable to resolve dataset for actor ${actorUri}`);
+      }
+      return dataset;
     },
     async runMatcher(matcher, activity, fetcher) {
       if (typeof matcher === 'function') {
@@ -409,7 +420,7 @@ module.exports = {
       }
     },
     async resolveMutedCollectionUri(ctx, actorUri) {
-      const actor = await ctx.call('activitypub.actor.get', { actorUri });
+      const actor = await ctx.call('activitypub.actor.get', { actorUri, webId: actorUri });
       if (!actor || typeof actor !== 'object') return null;
 
       return (
@@ -420,25 +431,29 @@ module.exports = {
       );
     },
     async ensureCollectionsForActor(ctx, actorUri) {
+      const dataset = await this.resolveActorDataset(ctx, actorUri);
+
       await ctx.call('activitypub.collections-registry.createAndAttachCollection', {
         objectUri: actorUri,
         collection: this.settings.mutedCollectionOptions
       });
 
       const mutedCollectionUri = (await this.resolveMutedCollectionUri(ctx, actorUri)) || `${actorUri}/muted`;
-      await this.ensureCollectionMetadata(ctx, mutedCollectionUri, actorUri, MUTED_OF_PREDICATE);
+      await this.ensureCollectionMetadata(ctx, mutedCollectionUri, actorUri, MUTED_OF_PREDICATE, dataset);
 
-      const mutedState = await this.getMutedCollectionSharingStateByCollectionUri(ctx, mutedCollectionUri);
+      const mutedState = await this.getMutedCollectionSharingStateByCollectionUri(ctx, mutedCollectionUri, dataset);
       if (mutedState.public) {
         await this.ensureMutedFollowersCollection(ctx, mutedCollectionUri, actorUri);
         await this.ensurePublicReadOnMutedCollection(ctx, mutedCollectionUri, actorUri, true);
       }
     },
-    async ensureCollectionMetadata(ctx, collectionUri, actorUri, inversePredicate) {
+    async ensureCollectionMetadata(ctx, collectionUri, actorUri, inversePredicate, dataset) {
+      const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));
       await ctx.call(
         'ldp.resource.patch',
         {
           resourceUri: collectionUri,
+          webId: actorUri,
           triplesToAdd: [
             quad(namedNode(collectionUri), namedNode(AS_ATTRIBUTED_TO_PREDICATE), namedNode(actorUri)),
             quad(namedNode(collectionUri), namedNode(inversePredicate), namedNode(actorUri))
@@ -446,6 +461,7 @@ module.exports = {
         },
         {
           meta: {
+            dataset: resolvedDataset,
             skipObjectsWatcher: true
           }
         }
@@ -579,7 +595,7 @@ module.exports = {
       const mutedCollectionUri = (await this.resolveMutedCollectionUri(ctx, actorUri)) || `${actorUri}/muted`;
       return this.getMutedCollectionSharingStateByCollectionUri(ctx, mutedCollectionUri);
     },
-    async getMutedCollectionSharingStateByCollectionUri(ctx, mutedCollectionUri) {
+    async getMutedCollectionSharingStateByCollectionUri(ctx, mutedCollectionUri, dataset) {
       const collectionUri = normalizeResourceUri(mutedCollectionUri);
       if (!collectionUri) {
         return {
@@ -589,6 +605,12 @@ module.exports = {
         };
       }
 
+      const actorUri = this.getMutedCollectionOwnerUri(collectionUri);
+      if (!actorUri) {
+        throw new Error(`[activitypub.muted] Unable to resolve dataset owner for collection ${collectionUri}`);
+      }
+      const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));
+
       const rows = await ctx.call('triplestore.query', {
         query: sanitizeSparqlQuery`
           SELECT ?public ?followersCollectionUri
@@ -597,7 +619,8 @@ module.exports = {
             OPTIONAL { <${collectionUri}> <${AS_FOLLOWERS_PREDICATE}> ?followersCollectionUri . }
           }
         `,
-        webId: 'system'
+        webId: 'system',
+        dataset: resolvedDataset
       });
 
       const first = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
