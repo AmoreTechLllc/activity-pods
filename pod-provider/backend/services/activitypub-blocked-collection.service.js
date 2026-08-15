@@ -237,7 +237,9 @@ module.exports = {
         const followersCollectionUri = await this.ensureBlockedFollowersCollection(
           ctx,
           targetCollectionUri,
-          ownerActorUri
+          ownerActorUri,
+          undefined,
+          state
         );
         await ctx.call('activitypub.collection.add', {
           collectionUri: followersCollectionUri,
@@ -505,8 +507,11 @@ module.exports = {
         { meta: { webId: actorUri, dataset } }
       );
 
-      const blockedCollectionUri = (await this.resolveBlockedCollectionUri(ctx, actorUri)) || `${actorUri}/blocked`;
-      const blocksCollectionUri = (await this.resolveBlocksCollectionUri(ctx, actorUri)) || `${actorUri}/blocks`;
+      const actor = await ctx.call('activitypub.actor.get', { actorUri, webId: actorUri });
+      const blockedCollectionUri =
+        actor?.blocked || actor?.['bl:blocked'] || actor?.[BLOCKED_PREDICATE] || `${actorUri}/blocked`;
+      const blocksCollectionUri =
+        actor?.blocks || actor?.['bl:blocks'] || actor?.[BLOCKS_PREDICATE] || `${actorUri}/blocks`;
 
       await this.ensureCollectionMetadata(ctx, blockedCollectionUri, actorUri, BLOCKED_OF_PREDICATE, dataset);
       await this.ensureCollectionMetadata(ctx, blocksCollectionUri, actorUri, BLOCKS_OF_PREDICATE, dataset);
@@ -517,9 +522,17 @@ module.exports = {
         dataset
       );
       if (blockedState.public) {
-        await this.ensureBlockedFollowersCollection(ctx, blockedCollectionUri, actorUri, dataset);
+        await this.ensureBlockedFollowersCollection(
+          ctx,
+          blockedCollectionUri,
+          actorUri,
+          dataset,
+          blockedState
+        );
         await this.ensurePublicReadOnBlockedCollection(ctx, blockedCollectionUri, actorUri, true, dataset);
       }
+
+      return { blockedCollectionUri, blocksCollectionUri, dataset };
     },
     async ensureCollectionMetadata(ctx, collectionUri, actorUri, inversePredicate, dataset) {
       const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));
@@ -541,13 +554,11 @@ module.exports = {
         }
       );
     },
-    async ensureBlockedFollowersCollection(ctx, blockedCollectionUri, actorUri, dataset) {
+    async ensureBlockedFollowersCollection(ctx, blockedCollectionUri, actorUri, dataset, knownState) {
       const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));
-      const existingState = await this.getBlockedCollectionSharingStateByCollectionUri(
-        ctx,
-        blockedCollectionUri,
-        resolvedDataset
-      );
+      const existingState =
+        knownState ||
+        (await this.getBlockedCollectionSharingStateByCollectionUri(ctx, blockedCollectionUri, resolvedDataset));
       const followersCollectionUri =
         existingState.followersCollectionUri ||
         `${blockedCollectionUri}${this.settings.blockedFollowersCollectionOptions.path}`;
@@ -720,19 +731,20 @@ module.exports = {
       };
     },
     async setBlockedCollectionPublicState(ctx, actorUri, isPublic) {
-      await this.ensureCollectionsForActor(ctx, actorUri);
+      const ensured = await this.ensureCollectionsForActor(ctx, actorUri);
+      const blockedCollectionUri = ensured.blockedCollectionUri;
+      const dataset = ensured.dataset;
 
-      const blockedCollectionUri = (await this.resolveBlockedCollectionUri(ctx, actorUri)) || `${actorUri}/blocked`;
       if (isPublic) {
-        await this.ensureBlockedFollowersCollection(ctx, blockedCollectionUri, actorUri);
+        await this.ensureBlockedFollowersCollection(ctx, blockedCollectionUri, actorUri, dataset);
       } else {
         await this.detachBlockedFollowersCollection(ctx, blockedCollectionUri);
       }
 
       await this.setBlockedCollectionPublicFlag(ctx, blockedCollectionUri, isPublic);
-      await this.ensurePublicReadOnBlockedCollection(ctx, blockedCollectionUri, actorUri, isPublic);
+      await this.ensurePublicReadOnBlockedCollection(ctx, blockedCollectionUri, actorUri, isPublic, dataset);
 
-      return this.getBlockedCollectionSharingStateByCollectionUri(ctx, blockedCollectionUri);
+      return this.getBlockedCollectionSharingStateByCollectionUri(ctx, blockedCollectionUri, dataset);
     },
     async mutateBlockCollections(ctx, actorUri, itemUri, operation) {
       const collectionUris = await this.resolveBlockCollectionUris(ctx, actorUri);
