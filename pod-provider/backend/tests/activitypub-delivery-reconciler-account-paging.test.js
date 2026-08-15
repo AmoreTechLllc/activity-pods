@@ -25,7 +25,7 @@ test('delivery reconciliation account paging is bounded and keyset-based in Fuse
     expect(params.query).toContain('LIMIT 2');
     expect(params.query).toContain('ORDER BY STR(?accountUri)');
     expect(params.query).toContain('FILTER NOT EXISTS');
-    expect(params.query).toContain('STR(?accountUri) >');
+    expect(params.query).toContain('STR(?accountUri) > "urn:AuthAccount:001"');
     expect(params.query).not.toContain('OFFSET');
     return [
       {
@@ -77,6 +77,19 @@ test('delivery reconciliation account paging enforces its configured hard maximu
   });
 
   expect(result).toEqual({ accounts: [], nextCursor: null });
+});
+
+test('delivery reconciliation rejects a quoted/tampered persisted cursor before Fuseki', async () => {
+  const call = jest.fn();
+
+  await expect(
+    service.methods.listAccountPage.call(methodContext(), { call }, {
+      cursor: 'urn:AuthAccount:001" ) . ?s ?p ?o . #',
+      limit: 50
+    })
+  ).rejects.toThrow(/SPARQL injection/u);
+
+  expect(call).not.toHaveBeenCalled();
 });
 
 test('delivery reconciler no longer delegates provider paging to SemApps auth.account.find', () => {
