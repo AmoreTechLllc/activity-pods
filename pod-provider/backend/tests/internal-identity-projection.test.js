@@ -110,6 +110,22 @@ describe('internal-identity-projection', () => {
     expect(getByCanonicalAccountId).not.toHaveBeenCalled();
   });
 
+  test('does not mask an infrastructure failure carrying a misleading NOT_FOUND type', async () => {
+    const infrastructureFailure = Object.assign(new Error('settings/LDP unavailable'), {
+      code: 503,
+      type: 'NOT_FOUND'
+    });
+    getByDid.mockImplementationOnce(async () => {
+      throw infrastructureFailure;
+    });
+
+    await expect(
+      broker.call('internal-identity-projection.getByDid', { atprotoDid: 'did:plc:error' })
+    ).rejects.toMatchObject({ code: 503 });
+    expect(getByDid).toHaveBeenCalledTimes(1);
+    expect(getByCanonicalAccountId).not.toHaveBeenCalled();
+  });
+
   test('does not depend directly on triplestore', () => {
     const schema = require('../services/internal-identity-projection.service');
     expect(schema.dependencies).toEqual(['identitybindings']);
