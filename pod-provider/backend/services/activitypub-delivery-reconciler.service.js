@@ -75,6 +75,16 @@ function collectionItemUris(collection) {
     .filter(uri => typeof uri === 'string' && uri.length > 0);
 }
 
+function normalizeTrailingSlash(value) {
+  return typeof value === 'string' ? value.replace(/\/+$/u, '') : '';
+}
+
+function isSenderFollowersCollection(recipientUri, actorUri) {
+  const normalizedRecipient = normalizeTrailingSlash(recipientUri);
+  const normalizedActor = normalizeTrailingSlash(actorUri);
+  return normalizedRecipient.length > 0 && normalizedActor.length > 0 && normalizedRecipient === `${normalizedActor}/followers`;
+}
+
 module.exports = {
   name: 'activitypub-delivery-reconciler',
 
@@ -424,7 +434,7 @@ module.exports = {
       };
     },
 
-    async expandConcreteRecipients(ctx, activity, recipients, dataset) {
+    async expandConcreteRecipients(ctx, activity, recipients, dataset, senderFollowersCache = null) {
       const actorUri = actorUriOf(activity);
       const output = [];
       for (const recipientUri of recipients || []) {
@@ -438,27 +448,41 @@ module.exports = {
           throw new Error(`Cannot safely reconcile unresolved remote followers collection ${recipientUri}`);
         }
 
-        const collection = await ctx.call(
-          'activitypub.collection.get',
-          { resourceUri: recipientUri, webId: actorUri || 'system' },
-          { meta: { dataset } }
-        );
-        const expanded = collectionItemUris(collection);
-        if (expanded.length === 0) {
-          this.logger.debug?.('ActivityPub reconciliation expanded an empty followers collection', { recipientUri });
+        const cacheKey = normalizeTrailingSlash(recipientUri);
+        const canCache = senderFollowersCache instanceof Map && isSenderFollowersCollection(recipientUri, actorUri);
+        let expanded;
+        if (canCache && senderFollowersCache.has(cacheKey)) {
+          expanded = senderFollowersCache.get(cacheKey);
+        } else {
+          const collection = await ctx.call(
+            'activitypub.collection.get',
+            { resourceUri: recipientUri, webId: actorUri || 'system' },
+            { meta: { dataset } }
+          );
+          expanded = collectionItemUris(collection);
+          if (canCache) senderFollowersCache.set(cacheKey, Object.freeze([...expanded]));
+          if (expanded.length === 0) {
+            this.logger.debug?.('ActivityPub reconciliation expanded an empty followers collection', { recipientUri });
+          }
         }
         output.push(...expanded);
       }
       return [...new Set(output)];
     },
 
-    async reconcileActivity(ctx, activity, dataset) {
+    async reconcileActivity(ctx, activity, dataset, senderFollowersCache = null) {
       const blindSnapshot = typeof this.loadBlindRecipientSnapshot === 'function'
         ? await this.loadBlindRecipientSnapshot(activity)
         : null;
       const routingActivity = blindSnapshot ? { ...activity, ...blindSnapshot } : activity;
       const recipients = await ctx.call('activitypub.activity.getRecipients', { activity: routingActivity });
-      const concreteRecipients = await this.expandConcreteRecipients(ctx, routingActivity, recipients, dataset);
+      const concreteRecipients = await this.expandConcreteRecipients(
+        ctx,
+        routingActivity,
+        recipients,
+        dataset,
+        senderFollowersCache
+      );
       const localRecipientUris = [];
       const remoteRecipientUris = [];
 
@@ -500,6 +524,7 @@ module.exports = {
         const cutoffMs = Date.now() - Math.max(60000, Number(this.settings.lookbackMs) || 900000);
         const cutoffPublished = new Date(cutoffMs).toISOString();
         const pageSize = Math.max(1, Math.min(1000, Math.floor(Number(this.settings.maxActivitiesPerAccount) || 50)));
+        const senderFollowersCache = new Map();
         let activityCursor = null;
         let reachedCutoff = false;
 
@@ -530,7 +555,7 @@ module.exports = {
                 break;
               }
 
-              const deliveryPlan = await this.reconcileActivity(ctx, activity, dataset);
+              const deliveryPlan = await this.reconcileActivity(ctx, activity, dataset, senderFollowersCache);
               if (!deliveryPlan) continue;
 
               await ctx.call('activitypub.outbox.enqueueDeliveryHandoff', { deliveryPlan });
