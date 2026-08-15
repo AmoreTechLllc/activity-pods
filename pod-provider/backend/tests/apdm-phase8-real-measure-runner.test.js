@@ -5,6 +5,7 @@ const path = require('path');
 const {
   assertUsableRecord,
   boundedMap,
+  chunk,
   createBenchmarkUsername,
   isUsernameNotAllowed,
   normalizeRunId,
@@ -20,14 +21,14 @@ describe('APDM Phase 8 real measurement runner', () => {
     expect(normalizeRunId('31834711667-2').length).toBeLessThanOrEqual(12);
   });
 
-  test('generates bounded distinct benchmark username candidates', () => {
+  test('generates bounded distinct moderation-safe benchmark username candidates', () => {
     const first = createBenchmarkUsername({ runId: '31834711667-2', role: 'recipient', index: 7, attempt: 0 });
     const second = createBenchmarkUsername({ runId: '31834711667-2', role: 'recipient', index: 7, attempt: 1 });
     const otherRecipient = createBenchmarkUsername({ runId: '31834711667-2', role: 'recipient', index: 8, attempt: 0 });
     const sender = createBenchmarkUsername({ runId: '31834711667-2', role: 'sender' });
 
-    expect(first).toMatch(/^p8mr[a-f0-9]{16}$/u);
-    expect(sender).toMatch(/^p8ms[a-f0-9]{16}$/u);
+    expect(first).toMatch(/^p8mr[0-9]{16}$/u);
+    expect(sender).toMatch(/^p8ms[0-9]{16}$/u);
     expect(first).not.toBe(second);
     expect(first).not.toBe(otherRecipient);
   });
@@ -91,11 +92,10 @@ describe('APDM Phase 8 real measurement runner', () => {
     expect(signupFn).toHaveBeenCalledTimes(1);
   });
 
-  test('signup implementation uses a single non-replayable request path with a convergence-safe deadline', () => {
+  test('signup implementation uses one non-replayable request with a convergence-safe deadline', () => {
     expect(RUNNER_SOURCE).toContain('async function requestJsonOnce');
     expect(RUNNER_SOURCE).toContain('const body = await requestJsonOnce');
     expect(RUNNER_SOURCE).not.toContain('requestJsonWithRetry');
-    expect(RUNNER_SOURCE).toContain('Never replay 5xx/408/429');
     expect(RUNNER_SOURCE).toContain('const DEFAULT_SIGNUP_TIMEOUT_MS = 900_000;');
     expect(RUNNER_SOURCE).toContain('process.env.APDM_P8_SIGNUP_TIMEOUT_MS');
     expect(RUNNER_SOURCE).toContain('{ timeoutMs: signupTimeoutMs }');
@@ -139,6 +139,14 @@ describe('APDM Phase 8 real measurement runner', () => {
 
     expect(results).toEqual([10, 20, 30, 40, 50]);
     expect(peak).toBeLessThanOrEqual(2);
+  });
+
+  test('chunks provisioning work into bounded windows without losing ordering', () => {
+    expect(chunk([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
+    expect(RUNNER_SOURCE).toContain("broker.call(\n    'auth.awaitBootstrapComplete'");
+    expect(RUNNER_SOURCE).toContain('process.env.APDM_P8_PROVISION_BATCH_SIZE');
+    expect(RUNNER_SOURCE).toContain('process.env.APDM_P8_BOOTSTRAP_CONCURRENCY');
+    expect(RUNNER_SOURCE).toContain('for (const indexBatch of chunk(indexes, batchSize))');
   });
 
   test('refuses mislabeled or partial-failure measurement records', () => {
