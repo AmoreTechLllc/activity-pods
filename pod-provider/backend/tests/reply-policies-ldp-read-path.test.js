@@ -1,7 +1,6 @@
 'use strict';
 
-process.env.SEMAPPS_AVAILABLE_LOCALES = process.env.SEMAPPS_AVAILABLE_LOCALES || 'en';
-process.env.SEMAPPS_HOME_URL = process.env.SEMAPPS_HOME_URL || 'https://local.example';
+jest.mock('../config/config', () => ({ BASE_URL: 'https://local.example' }));
 
 const fs = require('fs');
 const path = require('path');
