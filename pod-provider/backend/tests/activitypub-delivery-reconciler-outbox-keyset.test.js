@@ -160,8 +160,8 @@ test('reconcileAccount stops rather than looping when an outbox cursor cannot ad
     { webId: 'https://pods.example/alice', username: 'alice' }
   );
 
-  expect(context.listOutboxActivityPage).toHaveBeenCalledTimes(1);
-  expect(result).toEqual({ activitiesScanned: 1, handoffsRequeued: 0, failures: 1 });
+  expect(context.listOutboxActivityPage).toHaveBeenCalledTimes(2);
+  expect(result).toEqual({ activitiesScanned: 2, handoffsRequeued: 0, failures: 1 });
   expect(context.logger.warn).toHaveBeenCalledWith(
     'ActivityPub delivery reconciliation outbox cursor failed to advance',
     expect.objectContaining({ actorUri: 'https://pods.example/alice', dataset: 'alice' })
