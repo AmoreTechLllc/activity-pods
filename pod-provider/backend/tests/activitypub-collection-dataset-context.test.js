@@ -140,7 +140,7 @@ describe('ActivityPub collection service dataset context', () => {
     );
     expect(registryCalls).toHaveLength(expectedCalls);
     for (const call of registryCalls) {
-      expect(call.options).toEqual({ meta: { dataset: DATASET } });
+      expect(call.options).toEqual({ meta: { webId: ACTOR_URI, dataset: DATASET } });
     }
   });
 

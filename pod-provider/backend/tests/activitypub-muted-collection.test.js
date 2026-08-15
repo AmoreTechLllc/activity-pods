@@ -67,7 +67,7 @@ describe('activitypub-muted-collection service', () => {
         objectUri: 'https://fed.example.com/users/alice',
         collection: service.settings.mutedCollectionOptions
       },
-      { meta: { dataset: 'alice' } }
+      { meta: { webId: 'https://fed.example.com/users/alice', dataset: 'alice' } }
     );
     expect(broker.getLocalService).toHaveBeenCalledWith('activitypub.side-effects');
   });

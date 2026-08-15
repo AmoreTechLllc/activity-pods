@@ -73,7 +73,7 @@ describe('activitypub-blocked-collection service', () => {
         objectUri: 'https://fed.example.com/users/alice',
         collection: service.settings.blockedCollectionOptions
       },
-      { meta: { dataset: 'alice' } }
+      { meta: { webId: 'https://fed.example.com/users/alice', dataset: 'alice' } }
     );
     expect(broker.call).toHaveBeenCalledWith(
       'activitypub.collections-registry.createAndAttachCollection',
@@ -81,7 +81,7 @@ describe('activitypub-blocked-collection service', () => {
         objectUri: 'https://fed.example.com/users/alice',
         collection: service.settings.blocksCollectionOptions
       },
-      { meta: { dataset: 'alice' } }
+      { meta: { webId: 'https://fed.example.com/users/alice', dataset: 'alice' } }
     );
     expect(broker.getLocalService).toHaveBeenCalledWith('activitypub.side-effects');
   });

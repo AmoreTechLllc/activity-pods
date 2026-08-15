@@ -439,7 +439,7 @@ module.exports = {
           objectUri: actorUri,
           collection: this.settings.mutedCollectionOptions
         },
-        { meta: { dataset } }
+        { meta: { webId: actorUri, dataset } }
       );
 
       const mutedCollectionUri = (await this.resolveMutedCollectionUri(ctx, actorUri)) || `${actorUri}/muted`;

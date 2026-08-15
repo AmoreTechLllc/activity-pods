@@ -494,7 +494,7 @@ module.exports = {
           objectUri: actorUri,
           collection: this.settings.blockedCollectionOptions
         },
-        { meta: { dataset } }
+        { meta: { webId: actorUri, dataset } }
       );
       await ctx.call(
         'activitypub.collections-registry.createAndAttachCollection',
@@ -502,7 +502,7 @@ module.exports = {
           objectUri: actorUri,
           collection: this.settings.blocksCollectionOptions
         },
-        { meta: { dataset } }
+        { meta: { webId: actorUri, dataset } }
       );
 
       const blockedCollectionUri = (await this.resolveBlockedCollectionUri(ctx, actorUri)) || `${actorUri}/blocked`;
