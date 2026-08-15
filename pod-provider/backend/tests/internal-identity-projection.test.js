@@ -38,7 +38,13 @@ describe('internal-identity-projection', () => {
       if (query.includes('did:plc:alice123')) {
         return [{ canonicalAccountId: { value: 'http://localhost:3000/alice/profile/card#me' } }];
       }
+      if (query.includes('did:plc:stale')) {
+        return [{ canonicalAccountId: { value: 'http://localhost:3000/alice/profile/card#me' } }];
+      }
       if (query.includes('bob.test')) {
+        return [{ canonicalAccountId: { value: 'http://localhost:3000/bob/profile/card#me' } }];
+      }
+      if (query.includes('stale.test')) {
         return [{ canonicalAccountId: { value: 'http://localhost:3000/bob/profile/card#me' } }];
       }
       return [];
@@ -87,7 +93,10 @@ describe('internal-identity-projection', () => {
     expect(result.atprotoDid).toBe('did:plc:alice123');
     expect(triplestoreQuery).toHaveBeenCalledTimes(1);
     const query = triplestoreQuery.mock.calls[0][0].params.query;
-    expect(query).toContain('apods:atprotoDid "did:plc:alice123"');
+    const selective = query.indexOf('apods:atprotoDid "did:plc:alice123"');
+    const typeCheck = query.indexOf('a apods:AtprotoIdentityBindingIndex');
+    expect(selective).toBeGreaterThan(-1);
+    expect(typeCheck).toBeGreaterThan(selective);
     expect(query).toContain('apods:canonicalAccountId ?canonicalAccountId');
     expect(query).toContain('LIMIT 1');
     expect(query).not.toContain('ORDER BY');
@@ -102,7 +111,9 @@ describe('internal-identity-projection', () => {
     expect(result.canonicalAccountId).toBe('http://localhost:3000/bob/profile/card#me');
     expect(result.atprotoHandle).toBe('bob.test');
     const query = triplestoreQuery.mock.calls[0][0].params.query;
-    expect(query).toContain('apods:atprotoHandle "bob.test"');
+    expect(query.indexOf('apods:atprotoHandle "bob.test"')).toBeLessThan(
+      query.indexOf('a apods:AtprotoIdentityBindingIndex')
+    );
     expect(getByHandle).not.toHaveBeenCalled();
   });
 
@@ -123,6 +134,46 @@ describe('internal-identity-projection', () => {
 
     expect(result.atprotoDid).toBe('did:plc:legacy');
     expect(getByDid).toHaveBeenCalledTimes(1);
+  });
+
+  test('rejects a stale DID index hit and falls back to authoritative lookup', async () => {
+    getByDid.mockImplementationOnce(async ctx => ({
+      canonicalAccountId: 'http://localhost:3000/legacy/profile/card#me',
+      webId: 'http://localhost:3000/legacy/profile/card#me',
+      atprotoDid: ctx.params.atprotoDid,
+      atprotoHandle: 'legacy.test',
+      atSigningKeyRef: 'key:commit',
+      atRotationKeyRef: 'key:rotation',
+      status: 'active'
+    }));
+
+    const result = await broker.call('internal-identity-projection.getByDid', {
+      atprotoDid: 'did:plc:stale'
+    });
+
+    expect(result.atprotoDid).toBe('did:plc:stale');
+    expect(getByCanonicalAccountId).toHaveBeenCalledTimes(1);
+    expect(getByDid).toHaveBeenCalledTimes(1);
+  });
+
+  test('rejects a stale handle index hit after case normalization and falls back', async () => {
+    getByHandle.mockImplementationOnce(async ctx => ({
+      canonicalAccountId: 'http://localhost:3000/legacy/profile/card#me',
+      webId: 'http://localhost:3000/legacy/profile/card#me',
+      atprotoDid: 'did:plc:legacy',
+      atprotoHandle: ctx.params.atprotoHandle,
+      atSigningKeyRef: 'key:commit',
+      atRotationKeyRef: 'key:rotation',
+      status: 'active'
+    }));
+
+    const result = await broker.call('internal-identity-projection.getByHandle', {
+      atprotoHandle: 'STALE.TEST'
+    });
+
+    expect(result.atprotoHandle).toBe('stale.test');
+    expect(getByCanonicalAccountId).toHaveBeenCalledTimes(1);
+    expect(getByHandle).toHaveBeenCalledTimes(1);
   });
 
   test('escapes exact index values as SPARQL string literals', async () => {
