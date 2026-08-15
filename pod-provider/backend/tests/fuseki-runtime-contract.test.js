@@ -18,7 +18,12 @@ describe('Fuseki runtime scalability contract', () => {
     expect(COMPOSE_SOURCE).not.toMatch(/healthcheck:[\s\S]*\/sparql/);
   });
 
-  test('healthcheck expands the container admin password rather than embedding another credential', () => {
-    expect(COMPOSE_SOURCE).toContain('--password="$${ADMIN_PASSWORD}"');
+  test('healthcheck stays compatible with BusyBox wget and does not expose credentials', () => {
+    expect(COMPOSE_SOURCE).toContain(
+      "wget -q -O /dev/null http://localhost:3030/$$/ping || exit 1"
+    );
+    expect(COMPOSE_SOURCE).not.toMatch(/healthcheck:[\s\S]*--user=/);
+    expect(COMPOSE_SOURCE).not.toMatch(/healthcheck:[\s\S]*--password=/);
+    expect(COMPOSE_SOURCE).not.toMatch(/healthcheck:[\s\S]*ADMIN_PASSWORD/);
   });
 });
