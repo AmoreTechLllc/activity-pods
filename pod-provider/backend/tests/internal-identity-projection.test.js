@@ -2,7 +2,6 @@ const { ServiceBroker } = require('moleculer');
 
 describe('internal-identity-projection', () => {
   let broker;
-  let triplestoreQuery;
   let getByDid;
   let getByHandle;
   let getByCanonicalAccountId;
@@ -13,16 +12,32 @@ describe('internal-identity-projection', () => {
     getByCanonicalAccountId = jest.fn(async ctx => ({
       canonicalAccountId: ctx.params.canonicalAccountId,
       webId: ctx.params.canonicalAccountId,
-      atprotoDid: ctx.params.canonicalAccountId.includes('bob') ? 'did:plc:bob123' : 'did:plc:alice123',
-      atprotoHandle: ctx.params.canonicalAccountId.includes('bob') ? 'bob.test' : 'alice.test',
+      atprotoDid: 'did:plc:alice123',
+      atprotoHandle: 'alice.test',
       atSigningKeyRef: 'key:commit',
       atRotationKeyRef: 'key:rotation',
       status: 'active',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     }));
-    getByDid = jest.fn(async () => null);
-    getByHandle = jest.fn(async () => null);
+    getByDid = jest.fn(async ctx => ({
+      canonicalAccountId: 'http://localhost:3000/alice/profile/card#me',
+      webId: 'http://localhost:3000/alice/profile/card#me',
+      atprotoDid: ctx.params.atprotoDid,
+      atprotoHandle: 'alice.test',
+      atSigningKeyRef: 'key:commit',
+      atRotationKeyRef: 'key:rotation',
+      status: 'active'
+    }));
+    getByHandle = jest.fn(async ctx => ({
+      canonicalAccountId: 'http://localhost:3000/bob/profile/card#me',
+      webId: 'http://localhost:3000/bob/profile/card#me',
+      atprotoDid: 'did:plc:bob123',
+      atprotoHandle: ctx.params.atprotoHandle,
+      atSigningKeyRef: 'key:commit',
+      atRotationKeyRef: 'key:rotation',
+      status: 'active'
+    }));
 
     broker.createService({
       name: 'identitybindings',
@@ -30,30 +45,6 @@ describe('internal-identity-projection', () => {
         getByCanonicalAccountId,
         getByDid,
         getByHandle
-      }
-    });
-
-    triplestoreQuery = jest.fn(async ctx => {
-      const query = ctx.params.query;
-      if (query.includes('did:plc:alice123')) {
-        return [{ canonicalAccountId: { value: 'http://localhost:3000/alice/profile/card#me' } }];
-      }
-      if (query.includes('did:plc:stale')) {
-        return [{ canonicalAccountId: { value: 'http://localhost:3000/alice/profile/card#me' } }];
-      }
-      if (query.includes('bob.test')) {
-        return [{ canonicalAccountId: { value: 'http://localhost:3000/bob/profile/card#me' } }];
-      }
-      if (query.includes('stale.test')) {
-        return [{ canonicalAccountId: { value: 'http://localhost:3000/bob/profile/card#me' } }];
-      }
-      return [];
-    });
-
-    broker.createService({
-      name: 'triplestore',
-      actions: {
-        query: triplestoreQuery
       }
     });
 
@@ -82,106 +73,47 @@ describe('internal-identity-projection', () => {
     expect(result.atSigningKeyRef).toBe('key:commit');
     expect(result.atRotationKeyRef).toBe('key:rotation');
     expect(result.status).toBe('active');
+    expect(getByCanonicalAccountId).toHaveBeenCalledTimes(1);
   });
 
-  test('resolves DID through a predicate/object index query without population scan fallback', async () => {
+  test('delegates DID resolution once to the authoritative identitybindings lookup', async () => {
     const result = await broker.call('internal-identity-projection.getByDid', {
-      atprotoDid: 'did:plc:alice123'
+      atprotoDid: ' did:plc:alice123 '
     });
 
-    expect(result.canonicalAccountId).toBe('http://localhost:3000/alice/profile/card#me');
     expect(result.atprotoDid).toBe('did:plc:alice123');
-    expect(triplestoreQuery).toHaveBeenCalledTimes(1);
-    const query = triplestoreQuery.mock.calls[0][0].params.query;
-    const selective = query.indexOf('apods:atprotoDid "did:plc:alice123"');
-    const typeCheck = query.indexOf('a apods:AtprotoIdentityBindingIndex');
-    expect(selective).toBeGreaterThan(-1);
-    expect(typeCheck).toBeGreaterThan(selective);
-    expect(query).toContain('apods:canonicalAccountId ?canonicalAccountId');
-    expect(query).toContain('LIMIT 1');
-    expect(query).not.toContain('ORDER BY');
-    expect(getByDid).not.toHaveBeenCalled();
+    expect(getByDid).toHaveBeenCalledTimes(1);
+    expect(getByDid.mock.calls[0][0].params).toEqual({ atprotoDid: 'did:plc:alice123' });
+    expect(getByCanonicalAccountId).not.toHaveBeenCalled();
   });
 
-  test('resolves normalized handle through the exact index before compatibility fallback', async () => {
+  test('delegates normalized handle resolution once to identitybindings', async () => {
     const result = await broker.call('internal-identity-projection.getByHandle', {
-      atprotoHandle: 'BOB.TEST'
+      atprotoHandle: ' BOB.TEST '
     });
 
-    expect(result.canonicalAccountId).toBe('http://localhost:3000/bob/profile/card#me');
     expect(result.atprotoHandle).toBe('bob.test');
-    const query = triplestoreQuery.mock.calls[0][0].params.query;
-    expect(query.indexOf('apods:atprotoHandle "bob.test"')).toBeLessThan(
-      query.indexOf('a apods:AtprotoIdentityBindingIndex')
-    );
-    expect(getByHandle).not.toHaveBeenCalled();
-  });
-
-  test('retains legacy DID fallback when the exact index has no match', async () => {
-    getByDid.mockImplementationOnce(async ctx => ({
-      canonicalAccountId: 'http://localhost:3000/legacy/profile/card#me',
-      webId: 'http://localhost:3000/legacy/profile/card#me',
-      atprotoDid: ctx.params.atprotoDid,
-      atprotoHandle: 'legacy.test',
-      atSigningKeyRef: 'key:commit',
-      atRotationKeyRef: 'key:rotation',
-      status: 'active'
-    }));
-
-    const result = await broker.call('internal-identity-projection.getByDid', {
-      atprotoDid: 'did:plc:legacy'
-    });
-
-    expect(result.atprotoDid).toBe('did:plc:legacy');
-    expect(getByDid).toHaveBeenCalledTimes(1);
-  });
-
-  test('rejects a stale DID index hit and falls back to authoritative lookup', async () => {
-    getByDid.mockImplementationOnce(async ctx => ({
-      canonicalAccountId: 'http://localhost:3000/legacy/profile/card#me',
-      webId: 'http://localhost:3000/legacy/profile/card#me',
-      atprotoDid: ctx.params.atprotoDid,
-      atprotoHandle: 'legacy.test',
-      atSigningKeyRef: 'key:commit',
-      atRotationKeyRef: 'key:rotation',
-      status: 'active'
-    }));
-
-    const result = await broker.call('internal-identity-projection.getByDid', {
-      atprotoDid: 'did:plc:stale'
-    });
-
-    expect(result.atprotoDid).toBe('did:plc:stale');
-    expect(getByCanonicalAccountId).toHaveBeenCalledTimes(1);
-    expect(getByDid).toHaveBeenCalledTimes(1);
-  });
-
-  test('rejects a stale handle index hit after case normalization and falls back', async () => {
-    getByHandle.mockImplementationOnce(async ctx => ({
-      canonicalAccountId: 'http://localhost:3000/legacy/profile/card#me',
-      webId: 'http://localhost:3000/legacy/profile/card#me',
-      atprotoDid: 'did:plc:legacy',
-      atprotoHandle: ctx.params.atprotoHandle,
-      atSigningKeyRef: 'key:commit',
-      atRotationKeyRef: 'key:rotation',
-      status: 'active'
-    }));
-
-    const result = await broker.call('internal-identity-projection.getByHandle', {
-      atprotoHandle: 'STALE.TEST'
-    });
-
-    expect(result.atprotoHandle).toBe('stale.test');
-    expect(getByCanonicalAccountId).toHaveBeenCalledTimes(1);
     expect(getByHandle).toHaveBeenCalledTimes(1);
+    expect(getByHandle.mock.calls[0][0].params).toEqual({ atprotoHandle: 'bob.test' });
+    expect(getByCanonicalAccountId).not.toHaveBeenCalled();
   });
 
-  test('escapes exact index values as SPARQL string literals', async () => {
-    const hostile = 'did:plc:quote"\\newline\nvalue';
-    await broker.call('internal-identity-projection.getByDid', { atprotoDid: hostile });
+  test('returns null for not-found identitybindings results without a second lookup path', async () => {
+    getByDid.mockImplementationOnce(async () => null);
 
-    const query = triplestoreQuery.mock.calls[0][0].params.query;
-    expect(query).toContain(JSON.stringify(hostile));
+    const result = await broker.call('internal-identity-projection.getByDid', {
+      atprotoDid: 'did:plc:missing'
+    });
+
+    expect(result).toBeNull();
     expect(getByDid).toHaveBeenCalledTimes(1);
+    expect(getByCanonicalAccountId).not.toHaveBeenCalled();
+  });
+
+  test('does not depend directly on triplestore', () => {
+    const schema = require('../services/internal-identity-projection.service');
+    expect(schema.dependencies).toEqual(['identitybindings']);
+    expect(schema.methods.lookupIndexedBinding).toBeUndefined();
+    expect(schema.methods.readQueryBinding).toBeUndefined();
   });
 });
