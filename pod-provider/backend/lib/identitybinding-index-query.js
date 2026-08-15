@@ -1,4 +1,6 @@
 const APODS = 'http://activitypods.org/ns/core#';
+const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
+const MAX_CURSOR_LENGTH = 2048;
 
 function sparqlLiteral(value) {
   return JSON.stringify(String(value));
@@ -27,7 +29,21 @@ function parseCursor(cursor) {
   if (!cursor) return null;
 
   try {
-    const parsed = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8'));
+    const encoded = String(cursor);
+    if (
+      encoded.length === 0 ||
+      encoded.length > MAX_CURSOR_LENGTH ||
+      !BASE64URL_RE.test(encoded)
+    ) {
+      throw new Error('invalid');
+    }
+
+    const decoded = Buffer.from(encoded, 'base64url');
+    if (decoded.toString('base64url') !== encoded) {
+      throw new Error('invalid');
+    }
+
+    const parsed = JSON.parse(decoded.toString('utf8'));
     if (
       typeof parsed?.updatedAt !== 'string' ||
       parsed.updatedAt.length === 0 ||
