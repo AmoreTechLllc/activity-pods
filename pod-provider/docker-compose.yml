@@ -40,13 +40,11 @@ services:
       # operators to tune from observed JVM + host page-cache pressure.
       JVM_ARGS: '${FUSEKI_JVM_ARGS:--Xmx1200M}'
     healthcheck:
-      # BusyBox wget is available in the image's Alpine base. Use Fuseki's
-      # guaranteed-low-cost administrative ping rather than a SPARQL query.
-      test:
-        [
-          'CMD-SHELL',
-          'wget -q -O /dev/null --user=admin --password="$${ADMIN_PASSWORD}" http://localhost:3030/$$/ping || exit 1'
-        ]
+      # BusyBox wget is available in the image's Alpine base. Fuseki's /$/ping
+      # endpoint is intentionally low-cost and anonymously readable in the
+      # standard Fuseki security configuration, so the health probe does not
+      # put credentials on the process command line.
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://localhost:3030/$$/ping || exit 1']
       interval: 15s
       timeout: 5s
       retries: 4
