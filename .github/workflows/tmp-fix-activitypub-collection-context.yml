@@ -1,0 +1,174 @@
+name: Temporary collection context implementation
+
+on:
+  push:
+    branches:
+      - fix/activitypub-collection-dataset-context
+    paths:
+      - '.github/workflows/tmp-fix-activitypub-collection-context.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/activitypub-collection-dataset-context
+
+      - name: Apply exact production context fix
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_exact(text, old, new, label, count=1):
+              actual = text.count(old)
+              if actual != count:
+                  raise SystemExit(f'{label}: expected {count} exact matches, found {actual}')
+              return text.replace(old, new)
+
+          blocked_path = Path('pod-provider/backend/services/activitypub-blocked-collection.service.js')
+          blocked = blocked_path.read_text()
+
+          blocked = replace_exact(
+              blocked,
+              "const ownerActor = await ctx.call('activitypub.actor.get', { actorUri: ownerActorUri });",
+              "const ownerActor = await ctx.call('activitypub.actor.get', {\n          actorUri: ownerActorUri,\n          webId: ownerActorUri\n        });",
+              'blocked follow actor context'
+          )
+          blocked = replace_exact(
+              blocked,
+              "const actor = await ctx.call('activitypub.actor.get', { actorUri });",
+              "const actor = await ctx.call('activitypub.actor.get', { actorUri, webId: actorUri });",
+              'blocked local actor context',
+              count=4
+          )
+          blocked = replace_exact(
+              blocked,
+              "    async runMatcher(matcher, activity, fetcher) {",
+              "    async resolveActorDataset(ctx, actorUri) {\n      const account = await ctx.call('auth.account.findByWebId', { webId: actorUri });\n      const dataset = account?.username;\n      if (!dataset) {\n        throw new Error(`[activitypub.blocked] Unable to resolve dataset for actor ${actorUri}`);\n      }\n      return dataset;\n    },\n    async runMatcher(matcher, activity, fetcher) {",
+              'blocked dataset resolver'
+          )
+          blocked = replace_exact(
+              blocked,
+              "    async ensureCollectionsForActor(ctx, actorUri) {\n      await ctx.call('activitypub.collections-registry.createAndAttachCollection', {",
+              "    async ensureCollectionsForActor(ctx, actorUri) {\n      const dataset = await this.resolveActorDataset(ctx, actorUri);\n\n      await ctx.call('activitypub.collections-registry.createAndAttachCollection', {",
+              'blocked bootstrap dataset resolution'
+          )
+          blocked = replace_exact(
+              blocked,
+              "      await this.ensureCollectionMetadata(ctx, blockedCollectionUri, actorUri, BLOCKED_OF_PREDICATE);\n      await this.ensureCollectionMetadata(ctx, blocksCollectionUri, actorUri, BLOCKS_OF_PREDICATE);\n\n      const blockedState = await this.getBlockedCollectionSharingStateByCollectionUri(ctx, blockedCollectionUri);",
+              "      await this.ensureCollectionMetadata(ctx, blockedCollectionUri, actorUri, BLOCKED_OF_PREDICATE, dataset);\n      await this.ensureCollectionMetadata(ctx, blocksCollectionUri, actorUri, BLOCKS_OF_PREDICATE, dataset);\n\n      const blockedState = await this.getBlockedCollectionSharingStateByCollectionUri(\n        ctx,\n        blockedCollectionUri,\n        dataset\n      );",
+              'blocked bootstrap context threading'
+          )
+          blocked = replace_exact(
+              blocked,
+              "    async ensureCollectionMetadata(ctx, collectionUri, actorUri, inversePredicate) {\n      await ctx.call(\n        'ldp.resource.patch',\n        {\n          resourceUri: collectionUri,",
+              "    async ensureCollectionMetadata(ctx, collectionUri, actorUri, inversePredicate, dataset) {\n      const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));\n      await ctx.call(\n        'ldp.resource.patch',\n        {\n          resourceUri: collectionUri,\n          webId: actorUri,",
+              'blocked metadata identity context'
+          )
+          blocked = replace_exact(
+              blocked,
+              "          meta: {\n            skipObjectsWatcher: true\n          }\n        }\n      );\n    },\n    async ensureBlockedFollowersCollection",
+              "          meta: {\n            dataset: resolvedDataset,\n            skipObjectsWatcher: true\n          }\n        }\n      );\n    },\n    async ensureBlockedFollowersCollection",
+              'blocked metadata dataset context'
+          )
+          blocked = replace_exact(
+              blocked,
+              "    async getBlockedCollectionSharingStateByCollectionUri(ctx, blockedCollectionUri) {\n      const rows = await ctx.call('triplestore.query', {",
+              "    async getBlockedCollectionSharingStateByCollectionUri(ctx, blockedCollectionUri, dataset) {\n      const actorUri = this.getBlockedCollectionOwnerUri(blockedCollectionUri);\n      if (!actorUri) {\n        throw new Error(`[activitypub.blocked] Unable to resolve dataset owner for collection ${blockedCollectionUri}`);\n      }\n      const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));\n\n      const rows = await ctx.call('triplestore.query', {",
+              'blocked sharing owner context'
+          )
+          blocked = replace_exact(
+              blocked,
+              "        webId: 'system'\n      });\n\n      const first = Array.isArray(rows)",
+              "        webId: 'system',\n        dataset: resolvedDataset\n      });\n\n      const first = Array.isArray(rows)",
+              'blocked sharing dataset query'
+          )
+          blocked_path.write_text(blocked)
+
+          muted_path = Path('pod-provider/backend/services/activitypub-muted-collection.service.js')
+          muted = muted_path.read_text()
+
+          muted = replace_exact(
+              muted,
+              "const ownerActor = await ctx.call('activitypub.actor.get', { actorUri: ownerActorUri });",
+              "const ownerActor = await ctx.call('activitypub.actor.get', {\n          actorUri: ownerActorUri,\n          webId: ownerActorUri\n        });",
+              'muted follow actor context'
+          )
+          muted = replace_exact(
+              muted,
+              "const actor = await ctx.call('activitypub.actor.get', { actorUri });",
+              "const actor = await ctx.call('activitypub.actor.get', { actorUri, webId: actorUri });",
+              'muted local actor context'
+          )
+          muted = replace_exact(
+              muted,
+              "    async runMatcher(matcher, activity, fetcher) {",
+              "    async resolveActorDataset(ctx, actorUri) {\n      const account = await ctx.call('auth.account.findByWebId', { webId: actorUri });\n      const dataset = account?.username;\n      if (!dataset) {\n        throw new Error(`[activitypub.muted] Unable to resolve dataset for actor ${actorUri}`);\n      }\n      return dataset;\n    },\n    async runMatcher(matcher, activity, fetcher) {",
+              'muted dataset resolver'
+          )
+          muted = replace_exact(
+              muted,
+              "    async ensureCollectionsForActor(ctx, actorUri) {\n      await ctx.call('activitypub.collections-registry.createAndAttachCollection', {",
+              "    async ensureCollectionsForActor(ctx, actorUri) {\n      const dataset = await this.resolveActorDataset(ctx, actorUri);\n\n      await ctx.call('activitypub.collections-registry.createAndAttachCollection', {",
+              'muted bootstrap dataset resolution'
+          )
+          muted = replace_exact(
+              muted,
+              "      await this.ensureCollectionMetadata(ctx, mutedCollectionUri, actorUri, MUTED_OF_PREDICATE);\n\n      const mutedState = await this.getMutedCollectionSharingStateByCollectionUri(ctx, mutedCollectionUri);",
+              "      await this.ensureCollectionMetadata(ctx, mutedCollectionUri, actorUri, MUTED_OF_PREDICATE, dataset);\n\n      const mutedState = await this.getMutedCollectionSharingStateByCollectionUri(ctx, mutedCollectionUri, dataset);",
+              'muted bootstrap context threading'
+          )
+          muted = replace_exact(
+              muted,
+              "    async ensureCollectionMetadata(ctx, collectionUri, actorUri, inversePredicate) {\n      await ctx.call(\n        'ldp.resource.patch',\n        {\n          resourceUri: collectionUri,",
+              "    async ensureCollectionMetadata(ctx, collectionUri, actorUri, inversePredicate, dataset) {\n      const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));\n      await ctx.call(\n        'ldp.resource.patch',\n        {\n          resourceUri: collectionUri,\n          webId: actorUri,",
+              'muted metadata identity context'
+          )
+          muted = replace_exact(
+              muted,
+              "          meta: {\n            skipObjectsWatcher: true\n          }\n        }\n      );\n    },\n    async ensureMutedFollowersCollection",
+              "          meta: {\n            dataset: resolvedDataset,\n            skipObjectsWatcher: true\n          }\n        }\n      );\n    },\n    async ensureMutedFollowersCollection",
+              'muted metadata dataset context'
+          )
+          muted = replace_exact(
+              muted,
+              "      const rows = await ctx.call('triplestore.query', {",
+              "      const actorUri = this.getMutedCollectionOwnerUri(collectionUri);\n      if (!actorUri) {\n        throw new Error(`[activitypub.muted] Unable to resolve dataset owner for collection ${collectionUri}`);\n      }\n      const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));\n\n      const rows = await ctx.call('triplestore.query', {",
+              'muted sharing owner context'
+          )
+          muted = replace_exact(
+              muted,
+              "    async getMutedCollectionSharingStateByCollectionUri(ctx, mutedCollectionUri) {",
+              "    async getMutedCollectionSharingStateByCollectionUri(ctx, mutedCollectionUri, dataset) {",
+              'muted sharing optional dataset'
+          )
+          muted = replace_exact(
+              muted,
+              "        webId: 'system'\n      });\n\n      const first = Array.isArray(rows)",
+              "        webId: 'system',\n        dataset: resolvedDataset\n      });\n\n      const first = Array.isArray(rows)",
+              'muted sharing dataset query'
+          )
+          muted_path.write_text(muted)
+          PY
+
+      - name: Verify focused regression
+        working-directory: pod-provider/backend
+        run: |
+          npm exec --yes --package=jest@29.7.0 --package=esbuild@0.25.4 --package=esbuild-jest@0.5.0 -- \
+            jest --testEnvironment=node tests/activitypub-collection-dataset-context.test.js --runInBand
+
+      - name: Commit implementation
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            pod-provider/backend/services/activitypub-blocked-collection.service.js \
+            pod-provider/backend/services/activitypub-muted-collection.service.js
+          git diff --cached --check
+          git commit -m 'fix: carry ActivityPub collection dataset context'
+          git push origin HEAD:fix/activitypub-collection-dataset-context
