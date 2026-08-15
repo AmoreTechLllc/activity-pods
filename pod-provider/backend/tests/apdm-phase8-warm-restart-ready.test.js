@@ -2,6 +2,7 @@
 
 const {
   REQUIRED_MIGRATION_MARKERS,
+  REQUIRED_RESTART_SERVICES,
   markerQuery,
   markerValues,
   missingMarkers,
@@ -14,7 +15,7 @@ function createBroker({ rowsByCall = [], queryError = null } = {}) {
     start: jest.fn(async () => {}),
     stop: jest.fn(async () => {}),
     waitForServices: jest.fn(async services => {
-      expect(services).toEqual(['triplestore', 'activitypub.outbox', 'activitypub.actor']);
+      expect(services).toEqual([...REQUIRED_RESTART_SERVICES]);
     }),
     call: jest.fn(async (action, params) => {
       expect(action).toBe('triplestore.query');
@@ -34,6 +35,16 @@ function createBroker({ rowsByCall = [], queryError = null } = {}) {
 }
 
 describe('APDM Phase 8 warm restart readiness gate', () => {
+  test('requires the blocked and muted collection services themselves before marker checks', () => {
+    expect(REQUIRED_RESTART_SERVICES).toEqual([
+      'triplestore',
+      'activitypub.outbox',
+      'activitypub.actor',
+      'activitypub.blocked',
+      'activitypub.muted'
+    ]);
+  });
+
   test('queries exactly the durable blocked and muted migration markers', () => {
     const query = markerQuery();
     for (const marker of REQUIRED_MIGRATION_MARKERS) expect(query).toContain(`<${marker}>`);
@@ -49,7 +60,7 @@ describe('APDM Phase 8 warm restart readiness gate', () => {
     expect(missingMarkers([{ marker: { value: blocked } }, { marker: { value: muted } }])).toEqual([]);
   });
 
-  test('waits until both markers are observable before reporting ready', async () => {
+  test('waits for collection services and then both markers before reporting ready', async () => {
     const [blocked, muted] = REQUIRED_MIGRATION_MARKERS;
     const broker = createBroker({
       rowsByCall: [
@@ -65,9 +76,15 @@ describe('APDM Phase 8 warm restart readiness gate', () => {
       brokerFactory: () => broker
     });
 
-    expect(result).toEqual({ ready: true, markers: [...REQUIRED_MIGRATION_MARKERS] });
+    expect(result).toEqual({
+      ready: true,
+      services: [...REQUIRED_RESTART_SERVICES],
+      markers: [...REQUIRED_MIGRATION_MARKERS]
+    });
+    expect(broker.waitForServices).toHaveBeenCalledTimes(1);
     expect(broker.call).toHaveBeenCalledTimes(2);
     expect(broker.stop).toHaveBeenCalledTimes(1);
+    expect(broker.waitForServices.mock.invocationCallOrder[0]).toBeLessThan(broker.call.mock.invocationCallOrder[0]);
   });
 
   test('fails closed and stops the remote broker when marker checks never converge', async () => {
