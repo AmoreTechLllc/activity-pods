@@ -36,6 +36,21 @@ services:
       - '3030'
     environment:
       ADMIN_PASSWORD: 'admin'
+      # Preserve the image's documented 1200 MiB default while allowing
+      # operators to tune from observed JVM + host page-cache pressure.
+      JVM_ARGS: '${FUSEKI_JVM_ARGS:--Xmx1200M}'
+    healthcheck:
+      # BusyBox wget is available in the image's Alpine base. Use Fuseki's
+      # guaranteed-low-cost administrative ping rather than a SPARQL query.
+      test:
+        [
+          'CMD-SHELL',
+          'wget -q -O /dev/null --user=admin --password="$${ADMIN_PASSWORD}" http://localhost:3030/$$/ping || exit 1'
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
 
   mailcatcher:
     image: dockage/mailcatcher
