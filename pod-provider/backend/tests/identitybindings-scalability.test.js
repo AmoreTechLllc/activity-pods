@@ -58,6 +58,15 @@ describe('identitybindings SPARQL/LDP scalability', () => {
     await expect(
       service._getBindingResourceOrNull('https://example.test/failing', ctx)
     ).rejects.toBe(backendFailure);
+
+    const misleadingTypeFailure = Object.assign(new Error('backend unavailable'), {
+      code: 503,
+      type: 'NOT_FOUND'
+    });
+    get.mockRejectedValueOnce(misleadingTypeFailure);
+    await expect(
+      service._getBindingResourceOrNull('https://example.test/failing-with-type', ctx)
+    ).rejects.toBe(misleadingTypeFailure);
   });
 
   test('DID lookup uses a predicate/object-selective query before the type check', async () => {
@@ -92,6 +101,32 @@ describe('identitybindings SPARQL/LDP scalability', () => {
     expect(query).not.toContain('ORDER BY');
     expect(query).not.toContain('OPTIONAL');
     expect(ctx.call).toHaveBeenCalledTimes(2);
+  });
+
+  test('selective query failure may fall back but authoritative LDP failure propagates', async () => {
+    const canonicalAccountId = 'https://example.test/alice/profile/card#me';
+    const queryFailure = Object.assign(new Error('settings index unavailable'), { code: 503 });
+    const queryCtx = { call: jest.fn(async () => { throw queryFailure; }) };
+    const service = serviceWithMethods();
+
+    await expect(service._findByDidWithSparql(queryCtx, 'did:plc:alice')).resolves.toBeNull();
+
+    const authoritativeFailure = Object.assign(new Error('authoritative LDP unavailable'), { code: 503 });
+    const authoritativeCtx = {
+      call: jest.fn(async action => {
+        if (action === 'triplestore.query') {
+          return [{ canonicalAccountId: { value: canonicalAccountId } }];
+        }
+        if (action === 'identitybindings.getByCanonicalAccountId') {
+          throw authoritativeFailure;
+        }
+        throw new Error(`Unexpected action: ${action}`);
+      })
+    };
+
+    await expect(
+      service._findByDidWithSparql(authoritativeCtx, 'did:plc:alice')
+    ).rejects.toBe(authoritativeFailure);
   });
 
   test('handle lookup normalizes case and rejects a stale index projection', async () => {
