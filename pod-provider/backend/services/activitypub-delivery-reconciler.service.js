@@ -372,6 +372,53 @@ module.exports = {
       };
     },
 
+    async listOutboxActivityPage(ctx, { outboxUri, dataset, cursor, limit }) {
+      const boundedLimit = Math.max(1, Math.min(1000, Math.floor(Number(limit) || 50)));
+      let cursorFilter = '';
+      if (cursor) {
+        const published = cursor.published;
+        const activityUri = cursor.activityUri;
+        if (typeof published !== 'string' || published.length === 0) throw new Error('Invalid outbox activity cursor published value');
+        if (typeof activityUri !== 'string' || activityUri.length === 0) throw new Error('Invalid outbox activity cursor URI');
+        cursorFilter = sanitizeSparqlQuery`
+          FILTER(
+            STR(?published) < "${published}" ||
+            (STR(?published) = "${published}" && STR(?activityUri) > "${activityUri}")
+          )
+        `;
+      }
+      const queryBody = sanitizeSparqlQuery`
+        PREFIX as: <https://www.w3.org/ns/activitystreams#>
+        SELECT ?activityUri ?published
+        WHERE {
+          <${outboxUri}> as:items ?activityUri .
+          ?activityUri as:published ?published .
+          ${cursorFilter}
+        }
+        ORDER BY DESC(STR(?published)) ASC(STR(?activityUri))
+      `;
+      const rows = await ctx.call('triplestore.query', {
+        query: `${queryBody}\nLIMIT ${boundedLimit}`,
+        accept: MIME_TYPES.JSON,
+        dataset,
+        webId: 'system'
+      });
+      const page = Array.isArray(rows) ? rows : [];
+      const lastRow = page[page.length - 1];
+      const lastPublished = lastRow?.published?.value;
+      const lastActivityUri = lastRow?.activityUri?.value;
+      return {
+        rows: page,
+        nextCursor:
+          typeof lastPublished === 'string' &&
+          lastPublished.length > 0 &&
+          typeof lastActivityUri === 'string' &&
+          lastActivityUri.length > 0
+            ? { published: lastPublished, activityUri: lastActivityUri }
+            : cursor || null
+      };
+    },
+
     async expandConcreteRecipients(ctx, activity, recipients, dataset) {
       const actorUri = actorUriOf(activity);
       const output = [];
@@ -447,26 +494,16 @@ module.exports = {
 
         const cutoffMs = Date.now() - Math.max(60000, Number(this.settings.lookbackMs) || 900000);
         const pageSize = Math.max(1, Math.min(1000, Math.floor(Number(this.settings.maxActivitiesPerAccount) || 50)));
-        let activityOffset = 0;
+        let activityCursor = null;
         let reachedCutoff = false;
 
         while (!reachedCutoff) {
-          const queryBody = sanitizeSparqlQuery`
-            PREFIX as: <https://www.w3.org/ns/activitystreams#>
-            SELECT ?activityUri ?published
-            WHERE {
-              <${outboxUri}> as:items ?activityUri .
-              ?activityUri as:published ?published .
-            }
-            ORDER BY DESC(?published) ASC(?activityUri)
-          `;
-          const rows = await ctx.call('triplestore.query', {
-            query: `${queryBody}\nLIMIT ${pageSize}\nOFFSET ${activityOffset}`,
-            accept: MIME_TYPES.JSON,
+          const { rows: page, nextCursor } = await this.listOutboxActivityPage(ctx, {
+            outboxUri,
             dataset,
-            webId: 'system'
+            cursor: activityCursor,
+            limit: pageSize
           });
-          const page = Array.isArray(rows) ? rows : [];
           if (page.length === 0) break;
 
           for (const row of page) {
@@ -502,7 +539,15 @@ module.exports = {
           }
 
           if (reachedCutoff || page.length < pageSize) break;
-          activityOffset += page.length;
+          if (!nextCursor || (activityCursor && nextCursor.published === activityCursor.published && nextCursor.activityUri === activityCursor.activityUri)) {
+            failures += 1;
+            this.logger.warn('ActivityPub delivery reconciliation outbox cursor failed to advance', {
+              actorUri: account.webId,
+              dataset
+            });
+            break;
+          }
+          activityCursor = nextCursor;
         }
       } catch (error) {
         failures += 1;
