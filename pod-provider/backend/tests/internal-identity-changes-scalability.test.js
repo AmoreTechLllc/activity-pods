@@ -127,4 +127,29 @@ describe('internal identity change scalability', () => {
       await broker.stop();
     }
   });
+
+  test('rejects non-base64url corruption even when the decoded JSON would otherwise be valid', async () => {
+    const broker = new ServiceBroker({ logger: false });
+    const legacyList = jest.fn();
+    const triplestoreQuery = jest.fn();
+    const validCursor = encodeCursor({
+      updatedAt: '2026-08-14T20:00:00.000Z',
+      canonicalAccountId: 'https://pod.example/alice/profile/card#me'
+    });
+
+    broker.createService({ name: 'identitybindings', actions: { list: legacyList } });
+    broker.createService({ name: 'triplestore', actions: { query: triplestoreQuery } });
+    broker.createService(require('../services/internal-identity-changes.service'));
+    await broker.start();
+
+    try {
+      await expect(
+        broker.call('internal-identity-changes.listChanges', { since: `${validCursor}!` })
+      ).rejects.toMatchObject({ code: 400, type: 'INVALID_CURSOR' });
+      expect(triplestoreQuery).not.toHaveBeenCalled();
+      expect(legacyList).not.toHaveBeenCalled();
+    } finally {
+      await broker.stop();
+    }
+  });
 });
