@@ -89,6 +89,7 @@ module.exports = {
     'activitypub.blocked',
     'activitypub.muted',
     'activitypub.collection',
+    'activitypub.follower-domain-index',
     'auth.account',
     'triplestore'
   ],
@@ -159,7 +160,9 @@ module.exports = {
         const actorIdentifier = String(
           ctx.params?.actorIdentifier ?? ctx.meta.queryString?.actorIdentifier ?? ''
         ).trim();
-        const domain = String(ctx.params?.domain ?? ctx.meta.queryString?.domain ?? '').trim();
+        const domain = String(ctx.params?.domain ?? ctx.meta.queryString?.domain ?? '')
+          .trim()
+          .toLowerCase();
 
         if (!actorIdentifier) {
           ctx.meta.$statusCode = 400;
@@ -187,21 +190,25 @@ module.exports = {
           return { followers: [] };
         }
 
-        const allFollowers = await this.queryCollectionItems(ctx, actor.followers);
-
-        // Partial followers = those whose URI hostname matches the requested domain
-        const partialFollowers = allFollowers.filter(uri => {
-          try {
-            return new URL(uri).hostname === domain;
-          } catch {
-            return false;
-          }
-        });
+        let partialFollowers;
+        try {
+          partialFollowers = await ctx.call('activitypub.follower-domain-index.getForDomain', {
+            collectionUri: actor.followers,
+            domain
+          });
+        } catch (err) {
+          this.logger.error('[FollowersSyncApi] getPartialCollection: domain projection failed', {
+            actorIdentifier,
+            domain,
+            error: err.message
+          });
+          ctx.meta.$statusCode = 500;
+          return { error: 'internal_error', message: 'Failed to query follower domain projection' };
+        }
 
         this.logger.debug('[FollowersSyncApi] getPartialCollection', {
           actorIdentifier,
           domain,
-          totalFollowers: allFollowers.length,
           partialCount: partialFollowers.length
         });
 
@@ -995,9 +1002,9 @@ module.exports = {
     // -------------------------------------------------------------------------
 
     /**
-     * Return all item URIs stored in an ActivityStreams collection.
-     * Uses a raw triplestore query so it works regardless of WAC permissions
-     * (system-level read).  Returns [] on any error.
+     * Compatibility helper for repair/reconciliation code that still needs a
+     * complete collection scan. FEP-8fcf partial-domain requests no longer use
+     * this population path.
      */
     async queryCollectionItems(ctx, collectionUri) {
       try {
