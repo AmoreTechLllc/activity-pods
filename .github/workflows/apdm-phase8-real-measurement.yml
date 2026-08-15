@@ -54,6 +54,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Phase 8 previously exposed a real ActivityPods collection-context bug:
+      # blocked/muted services performed local actor/dataset work without the
+      # WebID/dataset context required by SemApps. Do not spend ~80 minutes
+      # provisioning the full matrix unless the production regression that
+      # guards that fix has actually landed on this measurement branch.
+      - name: Require ActivityPub collection-context regression
+        run: |
+          test -f backend/tests/activitypub-collection-dataset-context.test.js || {
+            echo 'Phase 8 blocked: merge the production collection-context fix/regression before measuring.' >&2
+            exit 1
+          }
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
