@@ -22,8 +22,12 @@ function createService(broker, overrides = {}) {
 describe('blocked collection legacy bootstrap migration marker', () => {
   test('warm startup skips account enumeration after durable marker is present', async () => {
     const broker = {
-      call: jest.fn(async action => {
-        if (action === 'triplestore.query') return true;
+      call: jest.fn(async (action, params) => {
+        if (action === 'triplestore.query') {
+          expect(params.query).toContain('SELECT ?completed');
+          expect(params.query).toContain('LIMIT 1');
+          return [{ completed: { value: 'true' } }];
+        }
         if (action === 'auth.account.find') throw new Error('warm startup must not enumerate accounts');
         if (action === 'triplestore.update') throw new Error('warm startup must not rewrite marker');
         return undefined;
@@ -47,7 +51,7 @@ describe('blocked collection legacy bootstrap migration marker', () => {
     ];
     const broker = {
       call: jest.fn(async action => {
-        if (action === 'triplestore.query') return false;
+        if (action === 'triplestore.query') return [];
         if (action === 'auth.account.find') return accounts;
         return undefined;
       }),
@@ -73,7 +77,7 @@ describe('blocked collection legacy bootstrap migration marker', () => {
   test('partial migration failure leaves marker absent so next startup retries', async () => {
     const broker = {
       call: jest.fn(async action => {
-        if (action === 'triplestore.query') return false;
+        if (action === 'triplestore.query') return [];
         if (action === 'auth.account.find') {
           return [
             { webId: 'https://example.test/users/alice' },
