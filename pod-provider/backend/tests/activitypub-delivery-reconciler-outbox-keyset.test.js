@@ -4,6 +4,7 @@ process.env.SEMAPPS_AVAILABLE_LOCALES ||= 'en';
 process.env.SEMAPPS_AUTH_RESERVED_USER_NAMES ||= 'admin';
 
 const service = require('../services/activitypub-delivery-reconciler.service');
+const CUTOFF = '2026-08-15T21:45:00.000Z';
 
 function methodContext() {
   return {
@@ -12,7 +13,7 @@ function methodContext() {
   };
 }
 
-test('outbox reconciliation pages with a composite keyset and no OFFSET', async () => {
+test('outbox reconciliation pages with a composite keyset, server-side lookback, and no OFFSET', async () => {
   const published = '2026-08-15T22:00:00.000Z';
   const call = jest.fn(async (action, params) => {
     expect(action).toBe('triplestore.query');
@@ -21,6 +22,7 @@ test('outbox reconciliation pages with a composite keyset and no OFFSET', async 
     expect(params.query).toContain('LIMIT 2');
     expect(params.query).not.toContain('OFFSET');
     expect(params.query).toContain('ORDER BY DESC(STR(?published)) ASC(STR(?activityUri))');
+    expect(params.query).toContain(`FILTER(STR(?published) >= "${CUTOFF}")`);
     expect(params.query).toContain(`STR(?published) < "${published}"`);
     expect(params.query).toContain(`STR(?published) = "${published}"`);
     expect(params.query).toContain('STR(?activityUri) > "https://pods.example/alice/activities/002"');
@@ -43,7 +45,8 @@ test('outbox reconciliation pages with a composite keyset and no OFFSET', async 
       outboxUri: 'https://pods.example/alice/outbox',
       dataset: 'alice',
       cursor: { published, activityUri: 'https://pods.example/alice/activities/002' },
-      limit: 2
+      limit: 2,
+      cutoffPublished: CUTOFF
     }
   );
 
@@ -73,7 +76,8 @@ test('outbox keyset tie-breaks equal timestamps by activity URI', async () => {
       outboxUri: 'https://pods.example/alice/outbox',
       dataset: 'alice',
       cursor: { published, activityUri: 'https://pods.example/alice/activities/a' },
-      limit: 50
+      limit: 50,
+      cutoffPublished: CUTOFF
     }
   );
 
@@ -97,7 +101,8 @@ test('outbox paging enforces the hard page maximum', async () => {
       outboxUri: 'https://pods.example/alice/outbox',
       dataset: 'alice',
       cursor: null,
-      limit: 100000
+      limit: 100000,
+      cutoffPublished: CUTOFF
     }
   );
 
@@ -118,12 +123,76 @@ test.each([
         outboxUri: 'https://pods.example/alice/outbox',
         dataset: 'alice',
         cursor,
-        limit: 50
+        limit: 50,
+        cutoffPublished: CUTOFF
       }
     )
   ).rejects.toThrow(/SPARQL injection/u);
 
   expect(call).not.toHaveBeenCalled();
+});
+
+test('outbox paging rejects a tampered lookback cutoff before Fuseki', async () => {
+  const call = jest.fn();
+
+  await expect(
+    service.methods.listOutboxActivityPage.call(
+      methodContext(),
+      { call },
+      {
+        outboxUri: 'https://pods.example/alice/outbox',
+        dataset: 'alice',
+        cursor: null,
+        limit: 50,
+        cutoffPublished: '2026-08-15T21:45:00.000Z" . ?s ?p ?o . #'
+      }
+    )
+  ).rejects.toThrow(/SPARQL injection/u);
+
+  expect(call).not.toHaveBeenCalled();
+});
+
+test('reconcileAccount passes one stable lookback cutoff across all pages', async () => {
+  const published = new Date().toISOString();
+  const page1 = { published, activityUri: 'https://pods.example/alice/activities/a' };
+  const page2 = { published: new Date(Date.parse(published) - 1000).toISOString(), activityUri: 'https://pods.example/alice/activities/b' };
+  const context = {
+    settings: { lookbackMs: 900000, maxActivitiesPerAccount: 1 },
+    logger: { warn: jest.fn() },
+    listOutboxActivityPage: jest
+      .fn()
+      .mockResolvedValueOnce({
+        rows: [{ activityUri: { value: page1.activityUri }, published: { value: page1.published } }],
+        nextCursor: page1
+      })
+      .mockResolvedValueOnce({
+        rows: [{ activityUri: { value: page2.activityUri }, published: { value: page2.published } }],
+        nextCursor: page2
+      })
+      .mockResolvedValueOnce({ rows: [], nextCursor: page2 }),
+    reconcileActivity: jest.fn(async () => null)
+  };
+  const ctx = {
+    async call(action, params) {
+      if (action === 'activitypub.actor.getCollectionUri') return 'https://pods.example/alice/outbox';
+      if (action === 'activitypub.activity.get') {
+        const found = [page1, page2].find(item => item.activityUri === params.resourceUri);
+        return { id: params.resourceUri, published: found.published, type: 'Create', actor: 'https://pods.example/alice' };
+      }
+      throw new Error(`Unexpected call ${action}`);
+    }
+  };
+
+  await service.methods.reconcileAccount.call(
+    context,
+    ctx,
+    { webId: 'https://pods.example/alice', username: 'alice' }
+  );
+
+  const cutoffs = context.listOutboxActivityPage.mock.calls.map(([, args]) => args.cutoffPublished);
+  expect(cutoffs).toHaveLength(3);
+  expect(new Set(cutoffs).size).toBe(1);
+  expect(Date.parse(cutoffs[0])).toBeGreaterThan(0);
 });
 
 test('reconcileAccount stops rather than looping when an outbox cursor cannot advance', async () => {

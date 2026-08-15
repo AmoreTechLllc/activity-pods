@@ -372,8 +372,12 @@ module.exports = {
       };
     },
 
-    async listOutboxActivityPage(ctx, { outboxUri, dataset, cursor, limit }) {
+    async listOutboxActivityPage(ctx, { outboxUri, dataset, cursor, limit, cutoffPublished }) {
       const boundedLimit = Math.max(1, Math.min(1000, Math.floor(Number(limit) || 50)));
+      if (typeof cutoffPublished !== 'string' || cutoffPublished.length === 0) {
+        throw new Error('Outbox reconciliation requires a cutoff published timestamp');
+      }
+      const cutoffFilter = sanitizeSparqlQuery`FILTER(STR(?published) >= "${cutoffPublished}")`;
       let cursorFilter = '';
       if (cursor) {
         const published = cursor.published;
@@ -393,6 +397,7 @@ module.exports = {
         WHERE {
           <${outboxUri}> as:items ?activityUri .
           ?activityUri as:published ?published .
+          ${cutoffFilter}
           ${cursorFilter}
         }
         ORDER BY DESC(STR(?published)) ASC(STR(?activityUri))
@@ -493,6 +498,7 @@ module.exports = {
         }
 
         const cutoffMs = Date.now() - Math.max(60000, Number(this.settings.lookbackMs) || 900000);
+        const cutoffPublished = new Date(cutoffMs).toISOString();
         const pageSize = Math.max(1, Math.min(1000, Math.floor(Number(this.settings.maxActivitiesPerAccount) || 50)));
         let activityCursor = null;
         let reachedCutoff = false;
@@ -502,7 +508,8 @@ module.exports = {
             outboxUri,
             dataset,
             cursor: activityCursor,
-            limit: pageSize
+            limit: pageSize,
+            cutoffPublished
           });
           if (page.length === 0) break;
 
