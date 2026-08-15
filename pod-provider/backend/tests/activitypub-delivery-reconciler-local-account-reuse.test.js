@@ -67,9 +67,10 @@ test('reconcileActivity resolves each accepted local account once and reuses it 
   expect(calls.filter(call => call.action === 'auth.account.findByWebId')).toHaveLength(1);
 });
 
-test('reconcileActivity still skips a base-URI recipient that has no local account', async () => {
+test('reconcileActivity preserves fail-closed coverage when a directly addressed local-looking recipient has no account', async () => {
   const missing = 'https://pods.example/not-an-account';
   const accountLookup = jest.fn(async () => null);
+  const localInboxLookup = jest.fn();
   const ctx = {
     async call(action, params) {
       if (action === 'activitypub.activity.getRecipients') return [missing, REMOTE];
@@ -78,6 +79,7 @@ test('reconcileActivity still skips a base-URI recipient that has no local accou
         return { id: REMOTE, inbox: `${REMOTE}/inbox` };
       }
       if (action === 'activitypub.actor.getCollectionUri') {
+        localInboxLookup();
         throw new Error('missing local account must never reach local inbox resolution');
       }
       throw new Error(`Unexpected call ${action}`);
@@ -96,9 +98,10 @@ test('reconcileActivity still skips a base-URI recipient that has no local accou
     cc: []
   };
 
-  const plan = await service.methods.reconcileActivity.call(context, ctx, activity, 'alice');
+  await expect(service.methods.reconcileActivity.call(context, ctx, activity, 'alice')).rejects.toThrow(
+    new RegExp(`omitted explicitly addressed recipient ${missing.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u')
+  );
 
   expect(accountLookup).toHaveBeenCalledTimes(1);
-  expect(plan.localRecipients).toEqual([]);
-  expect(plan.remoteRecipients).toHaveLength(1);
+  expect(localInboxLookup).not.toHaveBeenCalled();
 });
