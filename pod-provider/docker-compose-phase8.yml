@@ -3,15 +3,18 @@ services:
     environment:
       # Phase 8 measures ActivityPub local fan-out. Disable only the unrelated
       # ATProto account projection; Tier 1 Pod/key/ActivityPub bootstrap still
-      # runs and the signup hook below waits for the full local registry state.
+      # runs during signup. Full Pod/registry completeness is not skipped: the
+      # benchmark runner calls the same auth.awaitBootstrapComplete barrier in
+      # bounded windows before any measurement or backend recreation.
       APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
       APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+      APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
 
       # Provisioning 1,001 fully bootstrapped Pod actors is setup, not measured
       # load. Keep the same readiness conditions but allow more time than the
-      # production defaults while the benchmark fixture is built. The forced
-      # signup hook retries only timeout-shaped readiness failures and never
-      # skips a missing registration or retries non-timeout errors.
+      # production defaults while the benchmark fixture is built. The shared
+      # barrier retries only timeout-shaped readiness failures and never skips a
+      # missing registration or retries non-timeout errors.
       APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'
       APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP_ATTEMPTS: '3'
 
@@ -34,13 +37,16 @@ services:
       SEMAPPS_APDM_PHASE8_CASE_LABEL: 'real-local-${APDM_P8_COUNT:-0}'
       SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT: '/app/backend/measurements/apdm-p8-${APDM_P8_COUNT:-0}.jsonl'
 
-      # Runner settings are passed into docker compose exec as well. Provision
-      # conservatively so fixture creation does not stress the same Fuseki/Pod
-      # resources Phase 8 is intended to measure later under isolated roots.
+      # Fixture creation is pipelined in bounded windows. Four simultaneous
+      # non-replayable signups cap write pressure; at most 24 actors may have
+      # event-driven Pod bootstrap work outstanding before the runner requires
+      # the exact shared completion barrier, checked eight actors at a time.
       APDM_P8_RUN_ID: '${APDM_P8_RUN_ID:-local}'
       APDM_P8_SAMPLES: '${APDM_P8_SAMPLES:-3}'
       APDM_P8_WARMUPS: '${APDM_P8_WARMUPS:-1}'
       APDM_P8_PROVISION_CONCURRENCY: '${APDM_P8_PROVISION_CONCURRENCY:-4}'
+      APDM_P8_PROVISION_BATCH_SIZE: '${APDM_P8_PROVISION_BATCH_SIZE:-24}'
+      APDM_P8_BOOTSTRAP_CONCURRENCY: '${APDM_P8_BOOTSTRAP_CONCURRENCY:-8}'
 
     volumes:
       - ./measurements:/app/backend/measurements
