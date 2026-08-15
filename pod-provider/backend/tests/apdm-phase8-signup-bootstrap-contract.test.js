@@ -3,6 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 
+// Phase 8 production prerequisite is now merged: blocked/muted ActivityPub
+// collection bootstrap must carry the owning actor WebID and dataset context.
 const AUTH_SOURCE = fs.readFileSync(path.join(__dirname, '../services/core/auth.js'), 'utf8');
 const API_SOURCE = fs.readFileSync(path.join(__dirname, '../services/api.js'), 'utf8');
 const PHASE8_COMPOSE = fs.readFileSync(path.join(__dirname, '../../docker-compose-phase8.yml'), 'utf8');
