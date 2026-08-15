@@ -1,3 +1,11 @@
+const { MoleculerError } = require('moleculer').Errors;
+const {
+  buildIncrementalIdentityBindingQuery,
+  mapIdentityBindingRow,
+  encodeCursor,
+  parseCursor
+} = require('../lib/identitybinding-index-query');
+
 module.exports = {
   name: 'internal-identity-changes',
 
@@ -11,19 +19,55 @@ module.exports = {
       },
       async handler(ctx) {
         const limit = Math.max(1, Math.min(Number(ctx.params.limit) || 100, 500));
-        const result = await ctx.call('identitybindings.list', {
-          since: ctx.params.since || null,
-          limit
-        });
+        const since = ctx.params.since || null;
 
-        return {
-          items: Array.isArray(result?.items)
-            ? result.items.map(binding => this.normalize(binding))
-            : [],
-          nextCursor: typeof result?.nextCursor === 'string' || result?.nextCursor === null
-            ? result.nextCursor
-            : ctx.params.since || null
-        };
+        try {
+          // Validate the opaque cursor before constructing the query so malformed
+          // client input remains a 400 rather than silently falling back to a
+          // full compatibility scan.
+          if (since) parseCursor(since);
+
+          const rows = await ctx.call('triplestore.query', {
+            query: buildIncrementalIdentityBindingQuery({ since, limit }),
+            dataset: 'settings',
+            webId: 'system'
+          });
+          const items = (rows || [])
+            .map(mapIdentityBindingRow)
+            .filter(binding => binding?.canonicalAccountId && binding?.updatedAt);
+          const last = items[items.length - 1];
+
+          return {
+            items: items.map(binding => this.normalize(binding)),
+            nextCursor: last ? encodeCursor(last) : since
+          };
+        } catch (err) {
+          if (err?.message === 'Invalid identity binding cursor') {
+            throw new MoleculerError('Invalid cursor', 400, 'INVALID_CURSOR');
+          }
+
+          // Preserve the existing identitybindings.list implementation as a
+          // compatibility fallback for deployments whose triplestore does not
+          // expose the settings index query path. The optimized path is the
+          // normal provider-scale path; fallback semantics are unchanged.
+          this.logger.warn('Bounded identity index query failed, falling back', {
+            error: err.message
+          });
+          const result = await ctx.call('identitybindings.list', {
+            since,
+            limit
+          });
+
+          return {
+            items: Array.isArray(result?.items)
+              ? result.items.map(binding => this.normalize(binding))
+              : [],
+            nextCursor:
+              typeof result?.nextCursor === 'string' || result?.nextCursor === null
+                ? result.nextCursor
+                : since
+          };
+        }
       }
     }
   },
