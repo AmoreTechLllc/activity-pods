@@ -22,6 +22,7 @@ on:
       - '.github/workflows/apdm-phase8-real-measurement.yml'
       - 'pod-provider/backend/lib/apdm-phase8-tier1-instrumentation.js'
       - 'pod-provider/backend/scripts/apdm-phase8-real-measure.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-warm-restart-ready.js'
       - 'pod-provider/backend/scripts/apdm-phase8-summarize.js'
       - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-delivery.js'
       - 'pod-provider/backend/services/core/auth.js'
@@ -162,6 +163,17 @@ jobs:
               echo "Backend did not become reachable for N=${count}" >&2
               exit 1
             fi
+
+            # HTTP reachability is intentionally not the measurement gate. A
+            # previous canonical N=1 run proved that Moleculer Web can answer
+            # while legacy collection startup work is still active. Require the
+            # durable blocked/muted one-time migration markers over the real
+            # Moleculer -> triplestore -> Fuseki path before issuing any root.
+            docker compose \
+              -f docker-compose-test.yml \
+              -f docker-compose-phase8.yml \
+              exec -T backend \
+              node scripts/apdm-phase8-warm-restart-ready.js
 
             docker compose \
               -f docker-compose-test.yml \
