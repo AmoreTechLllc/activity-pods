@@ -59,9 +59,6 @@ jobs:
         with:
           node-version: 22
 
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Prepare measurement directory
         run: |
           rm -rf measurements
@@ -81,15 +78,16 @@ jobs:
           WAIT_SECONDS: '60'
         run: ./scripts/fuseki-bootstrap.sh
 
-      - name: Build cached benchmark backend image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./pod-provider
-          file: ./pod-provider/docker/backend.dockerfile
-          load: true
-          tags: apdm-phase8-backend:local
-          cache-from: type=gha,scope=apdm-phase8-backend
-          cache-to: type=gha,mode=max,scope=apdm-phase8-backend
+      # The backend Dockerfile already places package/lockfile installation
+      # before the final source layer, so normal Docker layer reuse within this
+      # run is sufficient. A cross-run Buildx/GHA cache was measured slower on
+      # the critical path than this direct Compose build and was removed.
+      - name: Build benchmark backend image
+        run: |
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            build backend
 
       - name: Start backend for actor provisioning
         env:
