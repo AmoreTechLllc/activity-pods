@@ -11,6 +11,7 @@ const DEFAULT_BASE_URL = 'http://localhost:3000';
 const DEFAULT_TRANSPORTER_URL = 'redis://redis:6379/12';
 const DEFAULT_PROVISION_CONCURRENCY = 12;
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
+const DEFAULT_SIGNUP_TIMEOUT_MS = 900_000;
 const DEFAULT_SAMPLE_TIMEOUT_MS = 900_000;
 const DEFAULT_SAMPLES = 3;
 const DEFAULT_WARMUPS = 1;
@@ -111,15 +112,24 @@ async function requestJsonOnce(url, options, { timeoutMs = DEFAULT_READY_TIMEOUT
 }
 
 async function signup(baseUrl, username, password) {
-  const body = await requestJsonOnce(`${baseUrl.replace(/\/$/u, '')}/auth/signup`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      username,
-      email: `${username}@example.invalid`,
-      password
-    })
-  });
+  const signupTimeoutMs = positiveInteger(
+    process.env.APDM_P8_SIGNUP_TIMEOUT_MS,
+    DEFAULT_SIGNUP_TIMEOUT_MS,
+    'signup timeout'
+  );
+  const body = await requestJsonOnce(
+    `${baseUrl.replace(/\/$/u, '')}/auth/signup`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username,
+        email: `${username}@example.invalid`,
+        password
+      })
+    },
+    { timeoutMs: signupTimeoutMs }
+  );
 
   if (!body.webId) throw new Error(`Signup for ${username} did not return webId`);
   return { username, webId: body.webId };
