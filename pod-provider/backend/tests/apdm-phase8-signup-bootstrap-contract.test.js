@@ -22,13 +22,22 @@ describe('APDM Phase 8 signup bootstrap contract', () => {
   test('non-production benchmark can explicitly require production-equivalent local bootstrap completion', () => {
     expect(AUTH_SOURCE).toContain("process.env.APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP === 'true'");
     expect(AUTH_SOURCE).toContain("process.env.NODE_ENV !== 'production' && !forceCompleteSignupBootstrap");
-    expect(AUTH_SOURCE).toContain("await ctx.call('auth-agent.waitForResourceCreation', { webId });");
-    expect(AUTH_SOURCE).toContain("await ctx.call('data-registry.awaitCreateComplete', { webId });");
-    expect(AUTH_SOURCE).toContain("await ctx.call('type-indexes.awaitCreateComplete', { webId });");
+    expect(AUTH_SOURCE).toContain("callBootstrapReadiness('auth-agent.waitForResourceCreation', { webId })");
+    expect(AUTH_SOURCE).toContain("callBootstrapReadiness('data-registry.awaitCreateComplete', { webId })");
+    expect(AUTH_SOURCE).toContain("callBootstrapReadiness('type-indexes.awaitCreateComplete', { webId })");
+  });
+
+  test('forced benchmark retries only timeout-shaped readiness failures', () => {
+    expect(AUTH_SOURCE).toContain('APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP_ATTEMPTS');
+    expect(AUTH_SOURCE).toContain('isRetryableBootstrapTimeout');
+    expect(AUTH_SOURCE).toContain('!isRetryableBootstrapTimeout(error)');
+    expect(AUTH_SOURCE).toContain('attempt >= forcedBootstrapReadinessAttempts');
   });
 
   test('Phase 8 overlay disables only ATProto and forces full local signup bootstrap', () => {
     expect(PHASE8_COMPOSE).toContain("APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'");
     expect(PHASE8_COMPOSE).toContain("APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'");
+    expect(PHASE8_COMPOSE).toContain("APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'");
+    expect(PHASE8_COMPOSE).toContain("APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP_ATTEMPTS: '3'");
   });
 });
