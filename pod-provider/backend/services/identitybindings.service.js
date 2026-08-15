@@ -57,14 +57,7 @@ module.exports = {
       async handler(ctx) {
         const canonicalAccountId = String(ctx.params.canonicalAccountId).trim();
         const { resourceUri } = await this._resolveBindingLocation(canonicalAccountId, ctx);
-
-        const exists = await ctx.call('ldp.resource.exist', { resourceUri, webId: 'system' });
-        if (!exists) return null;
-
-        const resource = await this.actions.get(
-          { resourceUri, webId: 'system', accept: MIME_TYPES.JSON },
-          { parentCtx: ctx }
-        );
+        const resource = await this._getBindingResourceOrNull(resourceUri, ctx);
         return this._toDto(resource);
       }
     },
@@ -116,11 +109,7 @@ module.exports = {
 
         const now = new Date().toISOString();
         const { bindingWebId, slug, resourceUri } = await this._resolveBindingLocation(canonicalAccountId, ctx);
-
-        const exists = await ctx.call('ldp.resource.exist', { resourceUri, webId: 'system' });
-        const existing = exists
-          ? await this.actions.get({ resourceUri, webId: 'system', accept: MIME_TYPES.JSON }, { parentCtx: ctx })
-          : null;
+        const existing = await this._getBindingResourceOrNull(resourceUri, ctx);
 
         const existingValue = key => (existing ? this._readField(existing, key) : null);
         const existingBoolean = key => this._coerceBoolean(existingValue(key));
@@ -157,7 +146,7 @@ module.exports = {
           [PREDICATES.updatedAt]: now
         });
 
-        if (exists) {
+        if (existing) {
           await this.actions.put(
             {
               resourceUri,
@@ -248,9 +237,10 @@ module.exports = {
         atprotoDid: { type: 'string', min: 1 }
       },
       async handler(ctx) {
-        const binding = await this._findByDidWithSparql(ctx, String(ctx.params.atprotoDid).trim());
+        const atprotoDid = String(ctx.params.atprotoDid).trim();
+        const binding = await this._findByDidWithSparql(ctx, atprotoDid);
         if (binding) return binding;
-        return this._findByBindingField(ctx, 'atprotoDid', String(ctx.params.atprotoDid).trim());
+        return this._findByBindingField(ctx, 'atprotoDid', atprotoDid);
       }
     },
 
@@ -315,6 +305,25 @@ module.exports = {
       const slug = this._bindingSlug(canonicalAccountId);
       const resourceUri = urlJoin(containerUri, slug);
       return { bindingWebId, containerUri, slug, resourceUri };
+    },
+
+    async _getBindingResourceOrNull(resourceUri, ctx) {
+      try {
+        return await this.actions.get(
+          { resourceUri, webId: 'system', accept: MIME_TYPES.JSON },
+          { parentCtx: ctx }
+        );
+      } catch (error) {
+        if (this._isNotFoundError(error)) return null;
+        throw error;
+      }
+    },
+
+    _isNotFoundError(error) {
+      if (!error) return false;
+      if (Number(error.code) === 404) return true;
+      if (error.code !== undefined && error.code !== null) return false;
+      return ['NOT_FOUND', 'RESOURCE_NOT_FOUND', 'LDP_RESOURCE_NOT_FOUND'].includes(error.type);
     },
 
     _bindingSlug(canonicalAccountId) {
@@ -392,19 +401,64 @@ module.exports = {
     },
 
     async _findByDidWithSparql(ctx, atprotoDid) {
-      try {
-        const bindings = await this._queryBindingsWithSparql(ctx);
-        const match = bindings.find(binding => binding?.atprotoDid === String(atprotoDid)) || null;
-        if (match) return match;
-      } catch (err) {
-        this.logger.debug('Optimized DID lookup failed', { atprotoDid, error: err.message });
-      }
-      return null;
+      return this._findByIndexedFieldWithSparql(ctx, 'atprotoDid', String(atprotoDid).trim());
     },
 
     _sparqlLiteral(value) {
       if (value === null || value === undefined) return null;
       return JSON.stringify(String(value));
+    },
+
+    async _findByIndexedFieldWithSparql(ctx, field, expectedValue) {
+      const predicates = {
+        atprotoDid: 'atprotoDid',
+        atprotoHandle: 'atprotoHandle'
+      };
+      const predicate = predicates[field];
+      if (!predicate) throw new Error(`Unsupported identity index field: ${field}`);
+
+      let rows;
+      try {
+        rows = await ctx.call('triplestore.query', {
+          query: `
+            PREFIX apods: <${APODS}>
+            SELECT ?canonicalAccountId
+            WHERE {
+              ?binding apods:${predicate} ${this._sparqlLiteral(expectedValue)} ;
+                       a ${INDEX_TYPE} ;
+                       apods:canonicalAccountId ?canonicalAccountId .
+            }
+            LIMIT 1
+          `,
+          dataset: 'settings',
+          webId: 'system'
+        });
+      } catch (err) {
+        this.logger.debug('Selective identity index lookup failed', {
+          field,
+          error: err instanceof Error ? err.message : String(err)
+        });
+        return null;
+      }
+
+      const canonicalAccountId = this._readQueryBinding(rows?.[0], 'canonicalAccountId');
+      if (!canonicalAccountId) return null;
+
+      // The LDP binding is authoritative. Do not downgrade an infrastructure or
+      // authorization failure here into an expensive population fallback.
+      const binding = await ctx.call(
+        'identitybindings.getByCanonicalAccountId',
+        { canonicalAccountId },
+        { parentCtx: ctx }
+      );
+      if (!binding) return null;
+
+      const normalize = value => {
+        const normalized = String(value || '').trim();
+        return field === 'atprotoHandle' ? normalized.toLowerCase() : normalized;
+      };
+      if (normalize(binding[field]) !== normalize(expectedValue)) return null;
+      return binding;
     },
 
     async _syncBindingIndex(ctx, binding) {
@@ -476,16 +530,11 @@ ${insertBody}
     },
 
     async _findByHandleWithSparql(ctx, atprotoHandle) {
-      try {
-        const handleLower = String(atprotoHandle).toLowerCase();
-        const bindings = await this._queryBindingsWithSparql(ctx);
-        const match =
-          bindings.find(binding => String(binding?.atprotoHandle || '').toLowerCase() === handleLower) || null;
-        if (match) return match;
-      } catch (err) {
-        this.logger.debug('Optimized handle lookup failed', { atprotoHandle, error: err.message });
-      }
-      return null;
+      return this._findByIndexedFieldWithSparql(
+        ctx,
+        'atprotoHandle',
+        String(atprotoHandle).trim().toLowerCase()
+      );
     },
 
     async _findByBindingField(ctx, field, expectedValue) {
