@@ -150,7 +150,11 @@ describe('activitypub-blocked-collection service', () => {
 
   test('setBlockedCollectionPublicState enables public read and attaches followers collection', async () => {
     const service = createService({
-      ensureCollectionsForActor: jest.fn(),
+      ensureCollectionsForActor: jest.fn(async () => ({
+        blockedCollectionUri: 'https://fed.example.com/users/alice/blocked',
+        blocksCollectionUri: 'https://fed.example.com/users/alice/blocks',
+        dataset: 'alice'
+      })),
       resolveBlockedCollectionUri: jest.fn(async () => 'https://fed.example.com/users/alice/blocked'),
       ensureBlockedFollowersCollection: jest.fn(async () => 'https://fed.example.com/users/alice/blocked/followers'),
       detachBlockedFollowersCollection: jest.fn(),
@@ -167,10 +171,12 @@ describe('activitypub-blocked-collection service', () => {
     const result = await service.setBlockedCollectionPublicState(ctx, 'https://fed.example.com/users/alice', true);
 
     expect(service.ensureCollectionsForActor).toHaveBeenCalledWith(ctx, 'https://fed.example.com/users/alice');
+    expect(service.resolveBlockedCollectionUri).not.toHaveBeenCalled();
     expect(service.ensureBlockedFollowersCollection).toHaveBeenCalledWith(
       ctx,
       'https://fed.example.com/users/alice/blocked',
-      'https://fed.example.com/users/alice'
+      'https://fed.example.com/users/alice',
+      'alice'
     );
     expect(service.setBlockedCollectionPublicFlag).toHaveBeenCalledWith(
       ctx,
@@ -181,7 +187,13 @@ describe('activitypub-blocked-collection service', () => {
       ctx,
       'https://fed.example.com/users/alice/blocked',
       'https://fed.example.com/users/alice',
-      true
+      true,
+      'alice'
+    );
+    expect(service.getBlockedCollectionSharingStateByCollectionUri).toHaveBeenCalledWith(
+      ctx,
+      'https://fed.example.com/users/alice/blocked',
+      'alice'
     );
     expect(result).toEqual({
       collectionUri: 'https://fed.example.com/users/alice/blocked',
@@ -191,14 +203,15 @@ describe('activitypub-blocked-collection service', () => {
   });
 
   test('followBlockedCollection stores the follower and emits Accept when the list is public', async () => {
+    const sharingState = {
+      collectionUri: 'https://fed.example.com/users/alice/blocked',
+      public: true,
+      followersCollectionUri: 'https://fed.example.com/users/alice/blocked/followers'
+    };
     const service = createService({
       extractFollowTargetCollectionUri: jest.fn(() => 'https://fed.example.com/users/alice/blocked'),
       getBlockedCollectionOwnerUri: jest.fn(() => 'https://fed.example.com/users/alice'),
-      getBlockedCollectionSharingStateByCollectionUri: jest.fn(async () => ({
-        collectionUri: 'https://fed.example.com/users/alice/blocked',
-        public: true,
-        followersCollectionUri: 'https://fed.example.com/users/alice/blocked/followers'
-      })),
+      getBlockedCollectionSharingStateByCollectionUri: jest.fn(async () => sharingState),
       ensureBlockedFollowersCollection: jest.fn(async () => 'https://fed.example.com/users/alice/blocked/followers')
     });
 
@@ -226,6 +239,13 @@ describe('activitypub-blocked-collection service', () => {
       'https://fed.example.com/users/alice'
     );
 
+    expect(service.ensureBlockedFollowersCollection).toHaveBeenCalledWith(
+      ctx,
+      'https://fed.example.com/users/alice/blocked',
+      'https://fed.example.com/users/alice',
+      undefined,
+      sharingState
+    );
     expect(ctx.call).toHaveBeenCalledWith('activitypub.collection.add', {
       collectionUri: 'https://fed.example.com/users/alice/blocked/followers',
       item: 'https://remote.example/users/bob'
