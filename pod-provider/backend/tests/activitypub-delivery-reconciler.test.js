@@ -6,7 +6,7 @@ process.env.SEMAPPS_AUTH_RESERVED_USER_NAMES ||= 'admin';
 const service = require('../services/activitypub-delivery-reconciler.service');
 
 function createServiceContext(overrides = {}) {
-  let accountOffset = 0;
+  let accountCursor = null;
   return {
     settings: {
       enabled: true,
@@ -16,17 +16,19 @@ function createServiceContext(overrides = {}) {
       accountBatchSize: 100,
       maxActivitiesPerAccount: 50,
       concurrency: 2,
+      accountsDataset: 'settings',
       ...overrides
     },
     logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
     reconcileAccount: service.methods.reconcileAccount,
     reconcileActivity: service.methods.reconcileActivity,
     expandConcreteRecipients: service.methods.expandConcreteRecipients,
+    listAccountPage: service.methods.listAccountPage,
     acquireDistributedLease: jest.fn(async () => 'lease-token'),
     releaseDistributedLease: jest.fn(async () => true),
-    getAccountOffset: jest.fn(async () => accountOffset),
-    setAccountOffset: jest.fn(async next => {
-      accountOffset = next;
+    getAccountCursor: jest.fn(async () => accountCursor),
+    setAccountCursor: jest.fn(async next => {
+      accountCursor = next;
     }),
     reconciliationRunning: false,
     reconciliationStats: {
@@ -36,6 +38,7 @@ function createServiceContext(overrides = {}) {
       handoffsRequeued: 0,
       failures: 0,
       accountOffset: 0,
+      accountCursor: null,
       distributedLockSkips: 0,
       lastRunStartedAt: null,
       lastRunCompletedAt: null,
@@ -253,55 +256,54 @@ describe('APDM Phase 4 delivery reconciliation', () => {
     expect(context.reconciliationStats.runs).toBe(0);
   });
 
-  test('run filters tombstones, advances the durable account cursor, and releases its lease', async () => {
+  test('run advances the durable keyset cursor and releases its lease', async () => {
     const context = createServiceContext({ accountBatchSize: 2 });
+    context.getAccountCursor = jest.fn(async () => null);
+    context.listAccountPage = jest.fn(async () => ({
+      accounts: [
+        { '@id': 'urn:AuthAccount:001', webId: 'https://pods.example/alice', username: 'alice' },
+        { '@id': 'urn:AuthAccount:002', webId: 'https://pods.example/bob', username: 'bob' }
+      ],
+      nextCursor: 'urn:AuthAccount:002'
+    }));
     context.reconcileAccount = jest.fn(async () => ({ activitiesScanned: 1, handoffsRequeued: 1, failures: 0 }));
-    const ctx = {
-      call: jest.fn(async (action, params) => {
-        if (action === 'auth.account.find') {
-          expect(params).toEqual({ limit: 2, offset: 0 });
-          return [
-            { webId: 'https://pods.example/alice', username: 'alice' },
-            { webId: 'https://pods.example/deleted', username: 'deleted', deletedAt: new Date().toISOString() }
-          ];
-        }
-        throw new Error(`Unexpected call ${action}`);
-      })
-    };
 
-    const result = await service.actions.run.handler.call(context, ctx);
+    const result = await service.actions.run.handler.call(context, { call: jest.fn() });
 
-    expect(context.reconcileAccount).toHaveBeenCalledTimes(1);
-    expect(context.setAccountOffset).toHaveBeenCalledWith(2);
+    expect(context.listAccountPage).toHaveBeenCalledWith(expect.anything(), { cursor: null, limit: 2 });
+    expect(context.reconcileAccount).toHaveBeenCalledTimes(2);
+    expect(context.setAccountCursor).toHaveBeenCalledWith('urn:AuthAccount:002');
     expect(context.releaseDistributedLease).toHaveBeenCalledWith('lease-token');
     expect(result).toEqual({
-      accountsScanned: 1,
-      activitiesScanned: 1,
-      handoffsRequeued: 1,
+      accountsScanned: 2,
+      activitiesScanned: 2,
+      handoffsRequeued: 2,
       failures: 0,
-      nextAccountOffset: 2
+      nextAccountOffset: 0,
+      nextAccountCursor: 'urn:AuthAccount:002'
     });
   });
 
-  test('run wraps a persisted cursor when it reaches the end of the account table', async () => {
+  test('run wraps a persisted keyset cursor when it reaches the end of the account table', async () => {
     const context = createServiceContext({ accountBatchSize: 2 });
-    context.getAccountOffset = jest.fn(async () => 10);
+    context.getAccountCursor = jest.fn(async () => 'urn:AuthAccount:010');
     context.reconcileAccount = jest.fn(async () => ({ activitiesScanned: 0, handoffsRequeued: 0, failures: 0 }));
-    const calls = [];
-    const ctx = {
-      async call(action, params) {
-        if (action !== 'auth.account.find') throw new Error(`Unexpected call ${action}`);
-        calls.push(params);
-        if (params.offset === 10) return [];
-        return [{ webId: 'https://pods.example/alice', username: 'alice' }];
-      }
-    };
+    context.listAccountPage = jest
+      .fn()
+      .mockResolvedValueOnce({ accounts: [], nextCursor: 'urn:AuthAccount:010' })
+      .mockResolvedValueOnce({
+        accounts: [{ '@id': 'urn:AuthAccount:001', webId: 'https://pods.example/alice', username: 'alice' }],
+        nextCursor: 'urn:AuthAccount:001'
+      });
+    const ctx = { call: jest.fn() };
 
     const result = await service.actions.run.handler.call(context, ctx);
 
-    expect(calls).toEqual([{ limit: 2, offset: 10 }, { limit: 2, offset: 0 }]);
-    expect(context.setAccountOffset).toHaveBeenCalledWith(0);
+    expect(context.listAccountPage).toHaveBeenNthCalledWith(1, ctx, { cursor: 'urn:AuthAccount:010', limit: 2 });
+    expect(context.listAccountPage).toHaveBeenNthCalledWith(2, ctx, { cursor: null, limit: 2 });
+    expect(context.setAccountCursor).toHaveBeenCalledWith(null);
     expect(context.releaseDistributedLease).toHaveBeenCalledWith('lease-token');
     expect(result.nextAccountOffset).toBe(0);
+    expect(result.nextAccountCursor).toBeNull();
   });
 });
