@@ -11,26 +11,6 @@
  * A "conversation" is identified by its sorted participant URI set. When the
  * same participants exchange messages again the existing conversation record is
  * updated rather than a new one being created.
- *
- * Actions:
- *   dm.conversations.upsert({ actorUri, participantUris, messageId?, timestamp? })
- *     → { conversationId, isNew }
- *     Create or update a conversation for `actorUri` with `participantUris`.
- *     `participantUris` must include all parties (the local actor + remote).
- *
- *   dm.conversations.list({ actorUri, limit?, offset? })
- *     → [{ conversationId, participantUris, lastMessageAt, createdAt }]
- *     Newest-first list of conversations for an actor.
- *
- *   dm.conversations.listParticipants({ actorUri, query?, limit? })
- *     → [participantUri]
- *     Unique list of all remote actor URIs this actor has a conversation with.
- *     Optionally filtered by `query` string prefix/substring. Used for
- *     participant-scoped @mention autocomplete in the DM compose UI.
- *
- *   dm.conversations.delete({ actorUri, conversationId })
- *     → void
- *     Remove a conversation record from the actor's store.
  */
 
 const crypto = require('crypto');
@@ -68,10 +48,6 @@ function readBinding(row, key) {
   return null;
 }
 
-/**
- * Compute a stable conversation fingerprint from a sorted participant set.
- * Two conversation records with the same participant URIs share the same fingerprint.
- */
 function participantFingerprint(uris) {
   const sorted = [...uris]
     .map(u => u.trim())
@@ -131,11 +107,6 @@ module.exports = {
   },
 
   actions: {
-    /**
-     * Create or update a DM conversation for a local actor.
-     * If a conversation with the same participant set already exists, its
-     * `lastMessageAt` is bumped. Otherwise a new conversation is created.
-     */
     async upsert(ctx) {
       const { actorUri, participantUris, timestamp } = ctx.params;
 
@@ -147,7 +118,6 @@ module.exports = {
       const dataset = getDatasetFromUri(actorUri);
       const graph = conversationsGraph(actorUri);
 
-      // Check if a conversation with this fingerprint already exists
       const existing = await this.triQuery(
         ctx,
         `
@@ -167,7 +137,6 @@ module.exports = {
       const existingConvId = existingRow ? readBinding(existingRow, 'convId') : null;
 
       if (existingConvId) {
-        // Bump lastMessageAt
         const nodeUri = conversationNodeUri(actorUri, existingConvId);
         await this.triUpdate(
           ctx,
@@ -185,7 +154,6 @@ module.exports = {
         return { conversationId: existingConvId, isNew: false };
       }
 
-      // Create new conversation
       const convId = crypto.randomUUID();
       const nodeUri = conversationNodeUri(actorUri, convId);
 
@@ -217,9 +185,6 @@ module.exports = {
       return { conversationId: convId, isNew: true };
     },
 
-    /**
-     * List conversations for a local actor, newest first.
-     */
     async list(ctx) {
       const { actorUri, limit = 50, offset = 0 } = ctx.params;
       this.requireActorUri(actorUri);
@@ -227,53 +192,63 @@ module.exports = {
       const dataset = getDatasetFromUri(actorUri);
       const graph = conversationsGraph(actorUri);
       const safeLimit = Math.min(Math.max(1, Number(limit) || 50), 200);
-      const safeOffset = Math.max(0, Number(offset) || 0);
+      const safeOffset = Math.max(0, Math.floor(Number(offset) || 0));
 
-      // Fetch conversations with their participants
+      // Select/page conversation nodes in a subquery before expanding their
+      // multi-valued participant relation. This keeps one Fuseki snapshot and
+      // one round trip while removing the old implicit 20-participant paging
+      // assumption and bounding unrelated-row transfer.
       const rows = await this.triQuery(
         ctx,
         `
         PREFIX dm: <${DM_NS}>
         PREFIX dcterms: <${DCTERMS_NS}>
-        SELECT ?convId ?participant ?lastMessageAt ?created WHERE {
+        SELECT ?node ?convId ?participant ?lastMessageAt ?created WHERE {
+          {
+            SELECT ?node ?convId ?lastMessageAt ?created WHERE {
+              GRAPH <${graph}> {
+                ?node a dm:Conversation ;
+                      dm:conversationId ?convId ;
+                      dm:lastMessageAt ?lastMessageAt ;
+                      dcterms:created ?created .
+              }
+            }
+            ORDER BY DESC(?lastMessageAt) ?convId
+            LIMIT ${safeLimit}
+            OFFSET ${safeOffset}
+          }
           GRAPH <${graph}> {
-            ?node a dm:Conversation ;
-                  dm:conversationId ?convId ;
-                  dm:participant ?participant ;
-                  dm:lastMessageAt ?lastMessageAt ;
-                  dcterms:created ?created .
+            ?node dm:participant ?participant .
           }
         }
-        ORDER BY DESC(?lastMessageAt)
-        LIMIT ${safeLimit * 20}
-        OFFSET ${safeOffset * 20}
+        ORDER BY DESC(?lastMessageAt) ?convId
         `,
         dataset
       );
 
-      // Group participants by conversationId
       const convMap = new Map();
       for (const row of Array.isArray(rows) ? rows : []) {
+        const node = readBinding(row, 'node');
         const convId = readBinding(row, 'convId');
         const participant = readBinding(row, 'participant');
         const lastMessageAt = readBinding(row, 'lastMessageAt');
         const createdAt = readBinding(row, 'created');
-        if (!convId || !participant) continue;
+        if (!node || !convId || !participant) continue;
 
-        if (!convMap.has(convId)) {
-          convMap.set(convId, { conversationId: convId, participantUris: [], lastMessageAt, createdAt });
+        if (!convMap.has(node)) {
+          convMap.set(node, {
+            conversationId: convId,
+            participantUris: [],
+            lastMessageAt,
+            createdAt
+          });
         }
-        convMap.get(convId).participantUris.push(participant);
+        convMap.get(node).participantUris.push(participant);
       }
 
-      return [...convMap.values()].slice(0, safeLimit);
+      return [...convMap.values()];
     },
 
-    /**
-     * List unique remote participant URIs for autocomplete.
-     * Returns all actors this local actor has an existing conversation with,
-     * optionally filtered by a query substring.
-     */
     async listParticipants(ctx) {
       const { actorUri, query = '', limit = 20 } = ctx.params;
       this.requireActorUri(actorUri);
@@ -281,7 +256,14 @@ module.exports = {
       const dataset = getDatasetFromUri(actorUri);
       const graph = conversationsGraph(actorUri);
       const safeLimit = Math.min(Math.max(1, Number(limit) || 20), 100);
+      const normalizedQuery = typeof query === 'string' ? query.toLowerCase() : '';
+      const queryFilter = normalizedQuery
+        ? `FILTER(CONTAINS(LCASE(STR(?participant)), ${sparqlStr(normalizedQuery)}))`
+        : '';
 
+      // Apply the autocomplete predicate before LIMIT. The old implementation
+      // fetched an arbitrary limit*10 prefix and filtered in Node, which could
+      // omit valid matches solely because they appeared later in the graph.
       const rows = await this.triQuery(
         ctx,
         `
@@ -291,26 +273,19 @@ module.exports = {
             ?node a dm:Conversation ;
                   dm:participant ?participant .
             FILTER(?participant != <${actorUri}>)
+            ${queryFilter}
           }
         }
-        LIMIT ${safeLimit * 10}
+        LIMIT ${safeLimit}
         `,
         dataset
       );
 
-      const allParticipants = (Array.isArray(rows) ? rows : [])
+      return (Array.isArray(rows) ? rows : [])
         .map(row => readBinding(row, 'participant'))
         .filter(Boolean);
-
-      if (!query) return allParticipants.slice(0, safeLimit);
-
-      const q = query.toLowerCase();
-      return allParticipants.filter(uri => uri.toLowerCase().includes(q)).slice(0, safeLimit);
     },
 
-    /**
-     * Delete a conversation record from an actor's store.
-     */
     async delete(ctx) {
       const { actorUri, conversationId } = ctx.params;
       this.requireActorUri(actorUri);
