@@ -9,8 +9,13 @@ const CUTOFF = '2026-08-15T21:45:00.000Z';
 function methodContext() {
   return {
     settings: { maxActivitiesPerAccount: 50 },
-    logger: { warn: jest.fn() }
+    logger: { warn: jest.fn() },
+    resolveLocalOutboxUri: service.methods.resolveLocalOutboxUri
   };
+}
+
+function selectiveOutboxRow() {
+  return [{ outboxUri: { value: 'https://pods.example/alice/outbox' } }];
 }
 
 test('outbox reconciliation pages with a composite keyset, server-side lookback, and no OFFSET', async () => {
@@ -159,6 +164,7 @@ test('reconcileAccount passes one stable lookback cutoff across all pages', asyn
   const context = {
     settings: { lookbackMs: 900000, maxActivitiesPerAccount: 1 },
     logger: { warn: jest.fn() },
+    resolveLocalOutboxUri: service.methods.resolveLocalOutboxUri,
     listOutboxActivityPage: jest
       .fn()
       .mockResolvedValueOnce({
@@ -174,7 +180,14 @@ test('reconcileAccount passes one stable lookback cutoff across all pages', asyn
   };
   const ctx = {
     async call(action, params) {
-      if (action === 'activitypub.actor.getCollectionUri') return 'https://pods.example/alice/outbox';
+      if (action === 'activitypub.actor.getCollectionUri') {
+        throw new Error('heavy actor materialization path must not be used by reconciliation');
+      }
+      if (action === 'triplestore.query') {
+        expect(params.dataset).toBe('alice');
+        expect(params.webId).toBe('system');
+        return selectiveOutboxRow();
+      }
       if (action === 'activitypub.activity.get') {
         const found = [page1, page2].find(item => item.activityUri === params.resourceUri);
         return { id: params.resourceUri, published: found.published, type: 'Create', actor: 'https://pods.example/alice' };
@@ -201,6 +214,7 @@ test('reconcileAccount stops rather than looping when an outbox cursor cannot ad
   const context = {
     settings: { lookbackMs: 900000, maxActivitiesPerAccount: 1 },
     logger: { warn: jest.fn() },
+    resolveLocalOutboxUri: service.methods.resolveLocalOutboxUri,
     listOutboxActivityPage: jest
       .fn()
       .mockResolvedValueOnce({
@@ -215,7 +229,14 @@ test('reconcileAccount stops rather than looping when an outbox cursor cannot ad
   };
   const ctx = {
     async call(action, params) {
-      if (action === 'activitypub.actor.getCollectionUri') return 'https://pods.example/alice/outbox';
+      if (action === 'activitypub.actor.getCollectionUri') {
+        throw new Error('heavy actor materialization path must not be used by reconciliation');
+      }
+      if (action === 'triplestore.query') {
+        expect(params.dataset).toBe('alice');
+        expect(params.webId).toBe('system');
+        return selectiveOutboxRow();
+      }
       if (action === 'activitypub.activity.get') {
         return { id: params.resourceUri, published, type: 'Create', actor: 'https://pods.example/alice' };
       }
