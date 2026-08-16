@@ -11,12 +11,21 @@ on:
         description: Warmup roots per recipient count
         required: false
         default: '1'
+      evidence_run_id:
+        description: Existing successful measurement run to replay instead of measuring again
+        required: false
+        default: ''
+      evidence_run_attempt:
+        description: Attempt number for evidence_run_id
+        required: false
+        default: '1'
   push:
     branches:
       - agent/apdm-phase9-measurements
     paths:
       - '.github/workflows/apdm-phase9-concurrency-measurement.yml'
       - 'pod-provider/backend/scripts/apdm-phase9-compare.js'
+      - 'pod-provider/backend/tests/apdm-phase9-compare.test.js'
       - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-delivery-phase9.js'
       - 'pod-provider/backend/lib/apdm-phase8-tier1-instrumentation.js'
       - 'pod-provider/backend/scripts/apdm-phase8-real-measure.js'
@@ -27,6 +36,15 @@ on:
 
 permissions:
   contents: read
+  actions: read
+
+env:
+  # Run 31956939507 completed every c1/c2/c4/c8 measurement arm with three
+  # successful samples at every canonical N. Its compare job alone failed due to
+  # artifact path handling. Pushes replay these immutable raw artifacts so CI
+  # fixes and comparator hardening never reprovision 4,000 Pods unnecessarily.
+  APDM_P9_CANONICAL_EVIDENCE_RUN_ID: '31956939507'
+  APDM_P9_CANONICAL_EVIDENCE_RUN_ATTEMPT: '1'
 
 concurrency:
   group: apdm-phase9-measure-${{ github.ref }}
@@ -35,6 +53,7 @@ concurrency:
 jobs:
   measure:
     name: concurrency ${{ matrix.local_concurrency }}
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.evidence_run_id == ''
     runs-on: ubuntu-latest
     timeout-minutes: 240
     strategy:
@@ -49,9 +68,9 @@ jobs:
       APDM_P8_RUN_ID: 'p9-${{ github.run_id }}-${{ github.run_attempt }}-c${{ matrix.local_concurrency }}'
       APDM_P8_SAMPLES: "${{ github.event.inputs.samples || '3' }}"
       APDM_P8_WARMUPS: "${{ github.event.inputs.warmups || '1' }}"
-      # Account/Pod bootstrap is fixture construction, not the behavior under test.
-      # Keep it strictly serial so every matrix candidate starts from the same
-      # conservative setup path and does not overload the auth/bootstrap services.
+      # Signup/fixture construction is invariant across the matrix. The normal
+      # post-signup bootstrap path remains whatever bounded behavior the real
+      # application uses; only local fan-out concurrency is the experiment.
       APDM_P8_PROVISION_CONCURRENCY: '1'
       APDM_P9_CONCURRENCY: '${{ matrix.local_concurrency }}'
 
@@ -95,12 +114,31 @@ jobs:
             sleep $((attempt * 10))
           done
 
-      # Fixture construction is deliberately invariant across the matrix. Signup
-      # performs real ActivityPub/Pod bootstrap work, so allowing the candidate
-      # local-delivery concurrency to affect provisioning would change the setup
-      # itself and confound the measured comparison. Every candidate therefore
-      # provisions with the production-safe serial setting; the matrix value is
-      # applied only when the measured backend is recreated below.
+      - name: Record resolved runtime environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          export BACKEND_IMAGE_ID="$(docker image inspect apdm-phase8-backend:local --format '{{.Id}}')"
+          export FUSEKI_IMAGE_ID="$(docker inspect pod-provider-fuseki_test-1 --format '{{.Image}}')"
+          export REDIS_IMAGE_ID="$(docker inspect pod-provider-redis-1 --format '{{.Image}}')"
+          export MAILCATCHER_IMAGE_ID="$(docker inspect pod-provider-mailcatcher-1 --format '{{.Image}}')"
+          node - <<'NODE' > "measurements/apdm-p9-environment-c${APDM_P9_CONCURRENCY}.json"
+          const manifest = {
+            commitSha: process.env.GITHUB_SHA,
+            concurrency: Number(process.env.APDM_P9_CONCURRENCY),
+            runnerOs: process.env.RUNNER_OS,
+            runnerArch: process.env.RUNNER_ARCH,
+            imageOs: process.env.ImageOS || null,
+            imageVersion: process.env.ImageVersion || null,
+            hostNode: process.version,
+            backendImageId: process.env.BACKEND_IMAGE_ID,
+            fusekiImageId: process.env.FUSEKI_IMAGE_ID,
+            redisImageId: process.env.REDIS_IMAGE_ID,
+            mailcatcherImageId: process.env.MAILCATCHER_IMAGE_ID
+          };
+          process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
       - name: Start backend for actor provisioning
         env:
           APDM_P8_ENABLED: 'false'
@@ -177,9 +215,10 @@ jobs:
             pod-provider/measurements/apdm-p8-100.jsonl
             pod-provider/measurements/apdm-p8-200.jsonl
             pod-provider/measurements/apdm-p8-1000.jsonl
-            pod-provider/measurements/apdm-p9-c${APDM_P9_CONCURRENCY}-all.jsonl
-            pod-provider/measurements/apdm-p9-c${APDM_P9_CONCURRENCY}-summary.json
-          if-no-files-found: warn
+            pod-provider/measurements/apdm-p9-c${{ matrix.local_concurrency }}-all.jsonl
+            pod-provider/measurements/apdm-p9-c${{ matrix.local_concurrency }}-summary.json
+            pod-provider/measurements/apdm-p9-environment-c${{ matrix.local_concurrency }}.json
+          if-no-files-found: error
           retention-days: 14
 
       - name: Show service logs on failure
@@ -193,26 +232,95 @@ jobs:
   compare:
     name: compare bounded concurrency results
     needs: measure
+    if: >-
+      always() &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && github.event.inputs.evidence_run_id != '') ||
+       needs.measure.result == 'success')
     runs-on: ubuntu-latest
-    if: always() && needs.measure.result == 'success'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download all concurrency evidence
+      - name: Resolve evidence source
+        id: evidence
+        shell: bash
+        env:
+          INPUT_RUN_ID: '${{ github.event.inputs.evidence_run_id }}'
+          INPUT_RUN_ATTEMPT: '${{ github.event.inputs.evidence_run_attempt }}'
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            run_id="${APDM_P9_CANONICAL_EVIDENCE_RUN_ID}"
+            run_attempt="${APDM_P9_CANONICAL_EVIDENCE_RUN_ATTEMPT}"
+          elif [[ -n "${INPUT_RUN_ID}" ]]; then
+            run_id="${INPUT_RUN_ID}"
+            run_attempt="${INPUT_RUN_ATTEMPT:-1}"
+          else
+            run_id="${GITHUB_RUN_ID}"
+            run_attempt="${GITHUB_RUN_ATTEMPT}"
+          fi
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "run_attempt=${run_attempt}" >> "$GITHUB_OUTPUT"
+          echo "Replaying APDM Phase 9 evidence run ${run_id} attempt ${run_attempt}"
+
+      - name: Download c1 evidence
         uses: actions/download-artifact@v4
         with:
-          pattern: apdm-p9-c*-${{ github.run_id }}-${{ github.run_attempt }}
-          path: measurements
-          merge-multiple: true
+          name: apdm-p9-c1-${{ steps.evidence.outputs.run_id }}-${{ steps.evidence.outputs.run_attempt }}
+          path: measurements/c1
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.evidence.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download c2 evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: apdm-p9-c2-${{ steps.evidence.outputs.run_id }}-${{ steps.evidence.outputs.run_attempt }}
+          path: measurements/c2
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.evidence.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download c4 evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: apdm-p9-c4-${{ steps.evidence.outputs.run_id }}-${{ steps.evidence.outputs.run_attempt }}
+          path: measurements/c4
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.evidence.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download c8 evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: apdm-p9-c8-${{ steps.evidence.outputs.run_id }}-${{ steps.evidence.outputs.run_attempt }}
+          path: measurements/c8
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.evidence.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Rebuild summaries from immutable raw evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          for concurrency in 1 2 4 8; do
+            dir="measurements/c${concurrency}"
+            cat "${dir}/apdm-p8-1.jsonl" "${dir}/apdm-p8-10.jsonl" "${dir}/apdm-p8-100.jsonl" \
+                "${dir}/apdm-p8-200.jsonl" "${dir}/apdm-p8-1000.jsonl" \
+                > "${dir}/apdm-p9-c${concurrency}-all.jsonl"
+            node pod-provider/backend/scripts/apdm-phase8-summarize.js \
+              "${dir}/apdm-p9-c${concurrency}-all.jsonl" \
+              "${dir}/apdm-p9-c${concurrency}-summary.json"
+          done
 
       - name: Produce comparative evidence
         run: |
           node pod-provider/backend/scripts/apdm-phase9-compare.js \
-            measurements/apdm-p9-c1-summary.json \
-            measurements/apdm-p9-c2-summary.json \
-            measurements/apdm-p9-c4-summary.json \
-            measurements/apdm-p9-c8-summary.json \
+            measurements/c1/apdm-p9-c1-summary.json \
+            measurements/c2/apdm-p9-c2-summary.json \
+            measurements/c4/apdm-p9-c4-summary.json \
+            measurements/c8/apdm-p9-c8-summary.json \
             measurements/apdm-p9-comparison.json \
             measurements/apdm-p9-comparison.md
           cat measurements/apdm-p9-comparison.md >> "$GITHUB_STEP_SUMMARY"
@@ -224,4 +332,8 @@ jobs:
           path: |
             measurements/apdm-p9-comparison.json
             measurements/apdm-p9-comparison.md
+            measurements/c1/apdm-p9-c1-summary.json
+            measurements/c2/apdm-p9-c2-summary.json
+            measurements/c4/apdm-p9-c4-summary.json
+            measurements/c8/apdm-p9-c8-summary.json
           retention-days: 30
