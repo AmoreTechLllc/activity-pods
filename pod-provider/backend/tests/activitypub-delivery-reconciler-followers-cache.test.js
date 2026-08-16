@@ -183,6 +183,7 @@ test('reconcileAccount shares one account-bound follower snapshot across activit
   const context = {
     settings: { lookbackMs: 900000, maxActivitiesPerAccount: 50 },
     logger: { warn: jest.fn() },
+    resolveLocalOutboxUri: service.methods.resolveLocalOutboxUri,
     listOutboxActivityPage: jest.fn(async () => ({ rows, nextCursor: null })),
     reconcileActivity: jest.fn(async (_ctx, _activity, _dataset, followersSnapshot) => {
       seenSnapshots.push(followersSnapshot);
@@ -191,7 +192,15 @@ test('reconcileAccount shares one account-bound follower snapshot across activit
   };
   const ctx = {
     call: jest.fn(async (action, params) => {
-      if (action === 'activitypub.actor.getCollectionUri') return 'https://pods.example/alice/outbox';
+      if (action === 'activitypub.actor.getCollectionUri') {
+        throw new Error('heavy actor materialization path must not be used by reconciliation');
+      }
+      if (action === 'triplestore.query') {
+        expect(params.dataset).toBe('alice');
+        expect(params.webId).toBe('system');
+        expect(params.query).toContain('<https://pods.example/alice> as:outbox ?outboxUri');
+        return [{ outboxUri: { value: 'https://pods.example/alice/outbox' } }];
+      }
       if (action === 'activitypub.activity.get') {
         return {
           id: params.resourceUri,
