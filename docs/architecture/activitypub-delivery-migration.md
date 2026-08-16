@@ -118,7 +118,7 @@ Those six source-visible calls were never a reliable total-work estimate because
 | P1 | PR #14; hardening #23 | PASS |
 | P2 | PR #15; hardening #22 | PASS |
 | P3 | PR #16; hardening #21 | PASS |
-| P4 | PR #17 plus replay-horizon hardening | PASS |
+| P4 | PR #17; replay-horizon hardening PR #25, merge `1e110861256f419fef9d55af1bcca36627814b88` | PASS |
 | P5 | PR #26, merge `427d3d3258382f91355ff08c33cfd40360087d84` | PASS |
 | P6 | PR #27, merge `8f6a1bd244015c58698d92a9b9fd939a602d6b96` | PASS |
 | P7 | PR #28, merge `6d65b2375b9860229dda3d081446f890bfa8699e` | PASS |
@@ -126,6 +126,10 @@ Those six source-visible calls were never a reliable total-work estimate because
 | P9 | #65 primitive `8684c58ad1d494e60ffcfa15ab19ef1c67cce16c`; #66 evidence `154b40873fec0886c4e2a25e67d6e644fe69ec4c`; #68 c4 promotion `5d7f2ff0631402e143000af68c174f8c615a755a` | PASS |
 | P10 | PR #67 open; real OFF/ON run `31965449687` launched from `1f512cfb192ab469b9684cb17a7e3af2756a3cdb` | IN PROGRESS |
 | P11–P16 | no phase implementation started | BLOCKED / NOT STARTED |
+
+## Phase 4 replay/idempotency hardening
+
+Phase 4's durable handoff contract was later hardened without changing its authority split. ActivityPods PR #25 (`1e110861256f419fef9d55af1bcca36627814b88`) caps automatic producer reconciliation lookback at 48 hours, leaving a 24-hour safety margin inside the existing 72-hour blind-recipient recovery-snapshot lifetime. The paired federation retention hardening keeps completed-delivery proof longer than that producer replay horizon. This prevents an automatically reconstructed deterministic intent from outliving the sidecar evidence used to suppress duplicate remote execution.
 
 ## Phase 5 remote-authority contract
 
