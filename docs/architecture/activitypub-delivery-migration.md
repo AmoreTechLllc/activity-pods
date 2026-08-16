@@ -4,6 +4,8 @@ Program ID: `APDM`
 
 This is the ActivityPods-specific companion to the authoritative cross-repository roadmap in `outlaw-dame/mastopod-federation-architecture/docs/activitypub-delivery-migration/`.
 
+APDM is the ActivityPub delivery/fan-out workstream inside the broader provider-wide scalability program documented in [`scalability.md`](./scalability.md). That umbrella work also covers provider/account scans, follower collections, reconciliation, identity/ATProto indexes, startup migrations, DM/poll/reply hot paths, Fuseki/TDB2 resource behavior, batching, queue/resource bounds, and multi-account provider load. Completing APDM therefore does not by itself mean that every ActivityPods scalability problem is closed.
+
 ActivityPods does not maintain an independent phase numbering scheme. ActivityPods slices use `APDM-P<n>-A`; a checked ActivityPods slice does not override a still-open cross-repo exit gate.
 
 ## Completion rule
@@ -240,6 +242,8 @@ Phase 11 must not begin before these boxes close.
 ## Supporting hardening is not phase completion
 
 This repo includes additional reconciliation, follower-index, selective-resolution, identity, Fuseki, FEP and scalability work outside the direct P0–P10 slices. Those changes can reduce cost or protect APDM invariants, but they are supporting/adjacent work unless a cross-repo phase exit gate explicitly depends on them. They must not be used to check a later phase complete early.
+
+For the subsystem-by-subsystem scaling rationale and the problems those supporting changes address, see [`scalability.md`](./scalability.md).
 
 ## Non-negotiable local-delivery rule
 

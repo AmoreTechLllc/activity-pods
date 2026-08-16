@@ -1,5 +1,11 @@
 # ActivityPods Architecture Records
 
+## Provider-wide scalability
+
+- [`scalability.md`](./scalability.md) — provider-wide scalability problem statement and architecture: local Pod fan-out, remote federation, provider/account scans, follower collections, reconciliation, identity/ATProto indexes, Fuseki/TDB2, startup migrations, batching, bounded concurrency, queue/response limits, evidence rules, and remaining bottlenecks.
+
+This is the umbrella scalability document. APDM is one major workstream inside it rather than the complete scalability program.
+
 ## ActivityPub Delivery Migration (APDM)
 
 - [`activitypub-delivery-migration.md`](./activitypub-delivery-migration.md) — current ActivityPods APDM phase ledger, evidence summary, current post-Phase-9 authority model, and the open Phase 10 gate.
