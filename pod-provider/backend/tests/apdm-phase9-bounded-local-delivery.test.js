@@ -32,36 +32,38 @@ if (localRecipients.length > 0) {
   this.localPost(localRecipients, activity);
 }
 async localPost(recipients, activityToPost) {
-  const success = [];
-  const failures = [];
-  try {
-    await this.broker.call('activitypub.side-effects.processInbox', { activity: activityToPost, recipients });
-  } catch (e) {}
-  for (const recipientUri of recipients) {
-    try {
-      const account = await this.broker.call('auth.account.findByWebId', { webId: recipientUri });
-      if (!account) throw new Error(\`No account found with webId \${recipientUri}\`);
-      const dataset = this.settings.podProvider ? account.username : undefined;
-      success.push(recipientUri);
-    } catch (e) {
-      this.logger.warn(\`Error when posting activity to local actor \${recipientUri}: \${e.message}\`);
-      failures.push(recipientUri);
-    }
-  }
-  this.broker.emit('activitypub.inbox.received', { activity: activityToPost, recipients, local: true });
+      const success = [];
+      const failures = [];
+
+      try {
+        await this.broker.call('activitypub.side-effects.processInbox', { activity: activityToPost, recipients });
+      } catch (e) {}
+
+      for (const recipientUri of recipients) {
+        try {
+          const account = await this.broker.call('auth.account.findByWebId', { webId: recipientUri });
+          if (!account) throw new Error(\`No account found with webId \${recipientUri}\`);
+          const dataset = this.settings.podProvider ? account.username : undefined;
+          success.push(recipientUri);
+        } catch (e) {
+          this.logger.warn(\`Error when posting activity to local actor \${recipientUri}: \${e.message}\`);
+          failures.push(recipientUri);
+        }
+      }
+
+      this.broker.emit('activitypub.inbox.received', { activity: activityToPost, recipients, local: true });
       return { success, failures };
     }
 `;
 }
 
 function loadInstalledLocalPost() {
-  const packageRoot = findPackageRoot();
-  const outboxFile = locateOutboxSource(packageRoot);
+  const outboxFile = locateOutboxSource(findPackageRoot());
   delete require.cache[require.resolve(outboxFile)];
   return require(outboxFile).methods.localPost;
 }
 
-function createActivity(id = 'phase9') {
+function createActivity(id) {
   return {
     id: `https://pod.example/activities/${id}`,
     type: 'Create',
@@ -82,19 +84,17 @@ describe('APDM Phase 9 bounded local delivery concurrency', () => {
     else process.env[LOCAL_DELIVERY_CONCURRENCY_ENV] = originalConcurrency;
   });
 
-  test('configuration defaults safely, accepts positive integers and clamps the hard ceiling', () => {
-    expect(resolveLocalDeliveryConcurrency(undefined)).toBe(DEFAULT_LOCAL_DELIVERY_CONCURRENCY);
-    expect(resolveLocalDeliveryConcurrency('')).toBe(DEFAULT_LOCAL_DELIVERY_CONCURRENCY);
-    expect(resolveLocalDeliveryConcurrency('0')).toBe(DEFAULT_LOCAL_DELIVERY_CONCURRENCY);
-    expect(resolveLocalDeliveryConcurrency('-1')).toBe(DEFAULT_LOCAL_DELIVERY_CONCURRENCY);
-    expect(resolveLocalDeliveryConcurrency('4x')).toBe(DEFAULT_LOCAL_DELIVERY_CONCURRENCY);
+  test('configuration defaults safely and clamps the hard ceiling', () => {
+    for (const value of [undefined, '', '0', '-1', '4x', '999999999999999999999999999999999']) {
+      expect(resolveLocalDeliveryConcurrency(value)).toBe(DEFAULT_LOCAL_DELIVERY_CONCURRENCY);
+    }
     expect(resolveLocalDeliveryConcurrency('4')).toBe(4);
     expect(resolveLocalDeliveryConcurrency(String(MAX_LOCAL_DELIVERY_CONCURRENCY + 1000))).toBe(
       MAX_LOCAL_DELIVERY_CONCURRENCY
     );
   });
 
-  test('Phase 9 patch layers on reviewed Phase 7/8 source and is idempotent', () => {
+  test('patch layers on reviewed Phase 7/8 source, preserves bounded workers and is idempotent', () => {
     const predecessor = patchOutboxSource(representativeOutboxSource());
     const once = patchPhase9OutboxSource(predecessor.source);
     const twice = patchPhase9OutboxSource(once.source);
@@ -103,20 +103,20 @@ describe('APDM Phase 9 bounded local delivery concurrency', () => {
     expect(once.source).toContain(PHASE9_CONCURRENCY_MARKER);
     expect(once.source).toContain('const workerCount = Math.min(localDeliveryConcurrency, recipients.length);');
     expect(once.source).toContain('await Promise.all(workers);');
+    expect(once.source).not.toContain('Promise.all(recipients.map');
     expect(once.source).toContain('successResults[recipientIndex] = recipientUri;');
     expect(once.source).toContain('failureResults[recipientIndex] = recipientUri;');
     expect(twice).toEqual({ source: once.source, changed: false });
   });
 
-  test('production Docker image supplies both patchers before yarn install', () => {
+  test('production image supplies both patchers before dependency installation', () => {
     const dockerfile = fs.readFileSync(path.resolve(__dirname, '../../docker/backend.dockerfile'), 'utf8');
-    const phase7Patcher = dockerfile.indexOf('ADD backend/scripts/patch-semapps-activitypub-local-delivery.js');
-    const phase9Patcher = dockerfile.indexOf('ADD backend/scripts/patch-semapps-activitypub-local-delivery-phase9.js');
+    const p7 = dockerfile.indexOf('ADD backend/scripts/patch-semapps-activitypub-local-delivery.js');
+    const p9 = dockerfile.indexOf('ADD backend/scripts/patch-semapps-activitypub-local-delivery-phase9.js');
     const install = dockerfile.indexOf('RUN yarn install && yarn cache clean');
-
-    expect(phase7Patcher).toBeGreaterThan(-1);
-    expect(phase9Patcher).toBeGreaterThan(phase7Patcher);
-    expect(install).toBeGreaterThan(phase9Patcher);
+    expect(p7).toBeGreaterThan(-1);
+    expect(p9).toBeGreaterThan(p7);
+    expect(install).toBeGreaterThan(p9);
   });
 
   test('installed pinned SemApps artifact contains the Phase 9 marker', () => {
@@ -124,52 +124,12 @@ describe('APDM Phase 9 bounded local delivery concurrency', () => {
     expect(source).toContain(PHASE9_CONCURRENCY_MARKER);
   });
 
-  test('configured concurrency is a real in-flight ceiling rather than an unbounded recipient Promise.all', async () => {
+  test('configured concurrency is a real in-flight ceiling', async () => {
     process.env[LOCAL_DELIVERY_CONCURRENCY_ENV] = '3';
     const localPost = loadInstalledLocalPost();
-    const recipients = Array.from({ length: 12 }, (_, index) => `https://pod.example/user-${index}`);
-    let activeInboxLookups = 0;
-    let maxActiveInboxLookups = 0;
-
-    const broker = {
-      call: jest.fn(async (action, params) => {
-        if (action === 'activitypub.side-effects.processInbox') return;
-        if (action === 'auth.account.findByWebId') return { username: params.webId.split('/').pop() };
-        if (action === 'activitypub.actor.getCollectionUri') {
-          activeInboxLookups += 1;
-          maxActiveInboxLookups = Math.max(maxActiveInboxLookups, activeInboxLookups);
-          await delay(8);
-          activeInboxLookups -= 1;
-          return `${params.actorUri}/inbox`;
-        }
-        return undefined;
-      }),
-      emit: jest.fn()
-    };
-    const service = {
-      broker,
-      settings: { podProvider: true },
-      logger: { error: jest.fn(), warn: jest.fn() }
-    };
-
-    const result = await localPost.call(service, recipients, createActivity('bounded'));
-
-    expect(maxActiveInboxLookups).toBe(3);
-    expect(result).toEqual({ success: recipients, failures: [] });
-    expect(broker.emit).toHaveBeenCalledWith('activitypub.inbox.received', {
-      activity: expect.any(Object),
-      recipients,
-      local: true
-    });
-  });
-
-  test('concurrency one preserves serial execution', async () => {
-    process.env[LOCAL_DELIVERY_CONCURRENCY_ENV] = '1';
-    const localPost = loadInstalledLocalPost();
-    const recipients = ['https://pod.example/a', 'https://pod.example/b', 'https://pod.example/c'];
+    const recipients = Array.from({ length: 12 }, (_, i) => `https://pod.example/user-${i}`);
     let active = 0;
-    let maxActive = 0;
-    const seen = [];
+    let maximum = 0;
 
     const service = {
       settings: { podProvider: true },
@@ -180,8 +140,43 @@ describe('APDM Phase 9 bounded local delivery concurrency', () => {
           if (action === 'auth.account.findByWebId') return { username: params.webId.split('/').pop() };
           if (action === 'activitypub.actor.getCollectionUri') {
             active += 1;
-            maxActive = Math.max(maxActive, active);
-            seen.push(params.actorUri);
+            maximum = Math.max(maximum, active);
+            await delay(8);
+            active -= 1;
+            return `${params.actorUri}/inbox`;
+          }
+          return undefined;
+        }),
+        emit: jest.fn()
+      }
+    };
+
+    await expect(localPost.call(service, recipients, createActivity('bounded'))).resolves.toEqual({
+      success: recipients,
+      failures: []
+    });
+    expect(maximum).toBe(3);
+  });
+
+  test('default/explicit concurrency one preserves serial execution', async () => {
+    delete process.env[LOCAL_DELIVERY_CONCURRENCY_ENV];
+    const localPost = loadInstalledLocalPost();
+    const recipients = ['https://pod.example/a', 'https://pod.example/b', 'https://pod.example/c'];
+    let active = 0;
+    let maximum = 0;
+    const starts = [];
+
+    const service = {
+      settings: { podProvider: true },
+      logger: { error: jest.fn(), warn: jest.fn() },
+      broker: {
+        call: jest.fn(async (action, params) => {
+          if (action === 'activitypub.side-effects.processInbox') return;
+          if (action === 'auth.account.findByWebId') return { username: params.webId.split('/').pop() };
+          if (action === 'activitypub.actor.getCollectionUri') {
+            active += 1;
+            maximum = Math.max(maximum, active);
+            starts.push(params.actorUri);
             await delay(2);
             active -= 1;
             return `${params.actorUri}/inbox`;
@@ -196,8 +191,8 @@ describe('APDM Phase 9 bounded local delivery concurrency', () => {
       success: recipients,
       failures: []
     });
-    expect(maxActive).toBe(1);
-    expect(seen).toEqual(recipients);
+    expect(maximum).toBe(1);
+    expect(starts).toEqual(recipients);
   });
 
   test('out-of-order completion and failures still return deterministic recipient-order results', async () => {
@@ -218,10 +213,9 @@ describe('APDM Phase 9 bounded local delivery concurrency', () => {
           if (action === 'activitypub.side-effects.processInbox') return;
           if (action === 'auth.account.findByWebId') return { username: params.webId.split('/').pop() };
           if (action === 'activitypub.actor.getCollectionUri') {
-            const actor = params.actorUri;
-            await delay(actor.includes('slow') ? 12 : 1);
-            if (actor.includes('failure')) throw new Error('injected recipient failure');
-            return `${actor}/inbox`;
+            await delay(params.actorUri.includes('slow') ? 12 : 1);
+            if (params.actorUri.includes('failure')) throw new Error('injected recipient failure');
+            return `${params.actorUri}/inbox`;
           }
           return undefined;
         }),
@@ -229,9 +223,7 @@ describe('APDM Phase 9 bounded local delivery concurrency', () => {
       }
     };
 
-    const result = await localPost.call(service, recipients, createActivity('ordered'));
-
-    expect(result).toEqual({
+    await expect(localPost.call(service, recipients, createActivity('ordered'))).resolves.toEqual({
       success: ['https://pod.example/slow-success', 'https://pod.example/fast-success'],
       failures: ['https://pod.example/fast-failure', 'https://pod.example/slow-failure']
     });
