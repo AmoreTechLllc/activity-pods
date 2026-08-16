@@ -40,6 +40,7 @@ describe('APDM blind recipient crash reconciliation', () => {
       reconciliationRedis,
       loadBlindRecipientSnapshot: service.methods.loadBlindRecipientSnapshot,
       expandConcreteRecipients: service.methods.expandConcreteRecipients,
+      findLocalAccountsByWebIds: service.methods.findLocalAccountsByWebIds,
       logger: { debug: jest.fn() }
     };
 
