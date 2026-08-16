@@ -1,6 +1,10 @@
 # Worked Example: One Post to 200 Local Followers
 
-This example explains the ActivityPods/SemApps local fan-out scalability problem concretely. It is intentionally local: Alice and all recipients are on the same ActivityPods provider, so no remote HTTP delivery and no Fedify-sidecar execution are involved.
+This example explains the ActivityPods/SemApps local fan-out scalability problem concretely. It is intentionally local: Alice and all recipients are on the same ActivityPods provider, so no remote HTTP delivery and no Fedify-sidecar execution are involved **in this particular example**.
+
+The underlying architectural defect was broader than local delivery. Historically, both local and remote ActivityPub paths inherited a **recipient-oriented orchestration** style in which one logical post could trigger repeated actor/account/inbox resolution, nested Moleculer actions, serialization, datastore work, and per-recipient execution. The exact work differed by path, but the scaling pattern was shared: repeated function/service-call granularity multiplied by recipient count.
+
+That cross-cutting problem is one of the reasons the architecture split remote federation execution into Tier 2/Fedify. Remote HTTP delivery, shared-inbox collapse, retry/backoff, domain concurrency, connection management, and delivery-state recovery can be scaled independently there without moving Pod/LDP/WebACL authority out of ActivityPods. Local delivery cannot be moved wholesale into Tier 2 because authoritative Pod dataset, LDP, WebACL, collection, and activity-attachment semantics remain Tier 1 responsibilities, so its equivalent amplification must be reduced inside ActivityPods/SemApps itself.
 
 The core defect is not that Moleculer itself is inherently slow. The historical path used **recipient-oriented orchestration**: for each recipient, resolve and perform several independent operations before moving to the next recipient. The architectural direction is **fan-out-oriented orchestration**: resolve shared state once, reuse already-authoritative context, batch same-authority operations where semantics permit, and otherwise process recipients with bounded concurrency.
 
@@ -147,10 +151,17 @@ The preferred sequence is therefore:
 - **P11:** reserved for the remaining dominant persistence-path amplification after the P10 baseline is known.
 - **P12:** durable per-recipient completion/recovery so partial failure does not require replaying completed local recipients.
 
-## Local versus remote terminology
+## Local example, cross-cutting root cause
 
-This worked example is **local Tier 1** scalability. It never reaches remote federation execution.
+This worked example itself is **local Tier 1** scalability: no remote HTTP request occurs in the Alice-to-200-local-followers scenario. That does **not** mean the underlying orchestration problem was local-only.
 
-Remote ActivityPub has a related but different historical problem: duplicate routing/execution authority and repeated recipient/inbox work across SemApps and the sidecar. APDM P1-P6 resolves that ownership problem so ActivityPods plans/signs and the Fedify sidecar is the sole external HTTP executor in production external mode.
+Historically, remote federation also suffered from recipient-oriented/repeated-work behavior inside the SemApps/Moleculer delivery model: per-recipient resolution and execution work, repeated discovery/materialization, native `remotePost` jobs, and later a second downstream routing path as the sidecar was introduced. The same broad scaling defect therefore affected both sides of the local/remote partition even though the concrete actions differed.
 
-Both local and remote work share the same design principle—do not repeatedly rediscover or re-execute already-known work—but their authority boundaries and optimization mechanisms are different.
+The architecture applies two different remedies to the same root pattern because authority differs:
+
+- **Local / Tier 1:** retain ActivityPods/SemApps authority, then remove duplicate lookups, reuse request-local context, reduce Fuseki/LDP/WebACL work, batch only within valid Pod/dataset boundaries, and use bounded concurrency.
+- **Remote / Tier 2:** keep authoritative planning/signing decisions in ActivityPods, but move internet-facing federation execution into the Fedify sidecar, where shared-inbox collapse, per-domain concurrency, HTTP connection reuse, retry/backoff, DLQ/idempotency, and queue fan-out can scale independently of Moleculer service-call orchestration.
+
+APDM P1-P6 then removed the transitional duplication so Tier 2 became the sole external HTTP executor in production external mode rather than a second remote-routing authority alongside native SemApps `remotePost`.
+
+So Tier 2 is not merely an organizational boundary. It is also a deliberate scalability boundary: **remote federation execution was separated from the recipient-oriented Moleculer execution model so it could use federation-specific fan-out primitives without weakening Tier-1 Pod authority**.
