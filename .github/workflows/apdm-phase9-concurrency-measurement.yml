@@ -1,0 +1,202 @@
+name: APDM Phase 9 bounded concurrency measurements
+
+on:
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: Measured samples per recipient count
+        required: false
+        default: '3'
+      warmups:
+        description: Warmup roots per recipient count
+        required: false
+        default: '1'
+  push:
+    branches:
+      - agent/apdm-phase9-measurements
+    paths:
+      - '.github/workflows/apdm-phase9-concurrency-measurement.yml'
+      - 'pod-provider/backend/scripts/apdm-phase9-compare.js'
+      - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-delivery-phase9.js'
+      - 'pod-provider/backend/lib/apdm-phase8-tier1-instrumentation.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-real-measure.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-warm-restart-ready.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-summarize.js'
+      - 'pod-provider/docker-compose-phase8.yml'
+      - 'pod-provider/docker/backend.dockerfile'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apdm-phase9-measure-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    name: concurrency ${{ matrix.local_concurrency }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        local_concurrency: [1, 2, 4, 8]
+    defaults:
+      run:
+        working-directory: pod-provider
+    env:
+      APDM_P8_RUN_ID: 'p9-${{ github.run_id }}-${{ github.run_attempt }}-c${{ matrix.local_concurrency }}'
+      APDM_P8_SAMPLES: "${{ github.event.inputs.samples || '3' }}"
+      APDM_P8_WARMUPS: "${{ github.event.inputs.warmups || '1' }}"
+      APDM_P8_PROVISION_CONCURRENCY: '4'
+      APDM_P9_CONCURRENCY: '${{ matrix.local_concurrency }}'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Prepare isolated measurement directory
+        run: |
+          rm -rf measurements
+          mkdir -p measurements
+
+      - name: Start isolated Fuseki, Redis and mailcatcher
+        run: |
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d fuseki_test redis mailcatcher
+
+      - name: Bootstrap Fuseki datasets
+        env:
+          FUSEKI_URL: http://localhost:3040
+          AUTH_DATASET: settings
+          WAIT_SECONDS: '60'
+        run: ./scripts/fuseki-bootstrap.sh
+
+      - name: Build benchmark backend image
+        run: docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml build backend
+
+      - name: Start backend for actor provisioning
+        env:
+          APDM_P8_ENABLED: 'false'
+          APDM_P8_COUNT: '0'
+        run: |
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d --no-deps backend
+          for attempt in $(seq 1 120); do
+            if curl -sS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          echo 'Backend did not become reachable for provisioning' >&2
+          exit 1
+
+      - name: Provision fresh sender and 1000 real local recipients
+        env:
+          APDM_P8_ENABLED: 'false'
+          APDM_P8_COUNT: '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+            node scripts/apdm-phase8-real-measure.js provision /app/backend/measurements/apdm-p8-actors.json 1000 \
+            2>&1 | tee measurements/apdm-p9-provision-c${APDM_P9_CONCURRENCY}.log
+
+      - name: Measure 1 10 100 200 1000 recipient matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          for count in 1 10 100 200 1000; do
+            export APDM_P8_ENABLED=true
+            export APDM_P8_COUNT="${count}"
+            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml \
+              up -d --force-recreate --no-deps backend
+
+            ready=false
+            for attempt in $(seq 1 120); do
+              if curl -sS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then ready=true; break; fi
+              sleep 1
+            done
+            if [[ "${ready}" != true ]]; then
+              echo "Backend did not become reachable for concurrency=${APDM_P9_CONCURRENCY} N=${count}" >&2
+              exit 1
+            fi
+
+            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+              node scripts/apdm-phase8-warm-restart-ready.js
+            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+              node scripts/apdm-phase8-real-measure.js measure /app/backend/measurements/apdm-p8-actors.json "${count}"
+          done
+
+      - name: Summarize isolated concurrency run
+        run: |
+          cat measurements/apdm-p8-1.jsonl measurements/apdm-p8-10.jsonl measurements/apdm-p8-100.jsonl \
+              measurements/apdm-p8-200.jsonl measurements/apdm-p8-1000.jsonl \
+              > measurements/apdm-p9-c${APDM_P9_CONCURRENCY}-all.jsonl
+          node backend/scripts/apdm-phase8-summarize.js \
+            measurements/apdm-p9-c${APDM_P9_CONCURRENCY}-all.jsonl \
+            measurements/apdm-p9-c${APDM_P9_CONCURRENCY}-summary.json
+          cat measurements/apdm-p9-c${APDM_P9_CONCURRENCY}-summary.json
+
+      - name: Upload isolated concurrency evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apdm-p9-c${{ matrix.local_concurrency }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            pod-provider/measurements/apdm-p9-provision-c${{ matrix.local_concurrency }}.log
+            pod-provider/measurements/apdm-p8-1.jsonl
+            pod-provider/measurements/apdm-p8-10.jsonl
+            pod-provider/measurements/apdm-p8-100.jsonl
+            pod-provider/measurements/apdm-p8-200.jsonl
+            pod-provider/measurements/apdm-p8-1000.jsonl
+            pod-provider/measurements/apdm-p9-c${{ matrix.local_concurrency }}-all.jsonl
+            pod-provider/measurements/apdm-p9-c${{ matrix.local_concurrency }}-summary.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml logs --no-color --tail=400 backend fuseki_test redis || true
+
+      - name: Stop isolated stack
+        if: always()
+        run: docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v || true
+
+  compare:
+    name: compare bounded concurrency results
+    needs: measure
+    runs-on: ubuntu-latest
+    if: always() && needs.measure.result == 'success'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all concurrency evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: apdm-p9-c*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements
+          merge-multiple: true
+
+      - name: Produce comparative evidence
+        run: |
+          node pod-provider/backend/scripts/apdm-phase9-compare.js \
+            measurements/apdm-p9-c1-summary.json \
+            measurements/apdm-p9-c2-summary.json \
+            measurements/apdm-p9-c4-summary.json \
+            measurements/apdm-p9-c8-summary.json \
+            measurements/apdm-p9-comparison.json \
+            measurements/apdm-p9-comparison.md
+          cat measurements/apdm-p9-comparison.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload comparative evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: apdm-p9-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            measurements/apdm-p9-comparison.json
+            measurements/apdm-p9-comparison.md
+          retention-days: 30
