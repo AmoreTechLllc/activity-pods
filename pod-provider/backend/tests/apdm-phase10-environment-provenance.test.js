@@ -34,7 +34,9 @@ describe('APDM Phase 10 environment provenance', () => {
   test('accepts matched c4 environments with opposite proven memo arms', () => {
     const result = validateEnvironment(manifest(), manifest({ arm: 'on', memoEnabled: true }));
     expect(result.passed).toBe(true);
+    expect(result.resourceComparable).toBe(true);
     expect(result.failures).toEqual([]);
+    expect(result.resourceDifferences).toEqual([]);
   });
 
   test('rejects mislabeled control and enabled arms', () => {
@@ -55,21 +57,34 @@ describe('APDM Phase 10 environment provenance', () => {
     expect(result.failures.join('\n')).toContain('concurrency 4');
   });
 
-  test('rejects cross-commit runtime or host-hardware evidence', () => {
+  test('rejects cross-commit or cross-image mechanism evidence', () => {
+    const result = validateEnvironment(
+      manifest(),
+      manifest({ arm: 'on', memoEnabled: true, commitSha: 'different', fusekiImageId: 'sha256:other' })
+    );
+    expect(result.passed).toBe(false);
+    expect(result.resourceComparable).toBe(false);
+    expect(result.failures.join('\n')).toContain('commitSha');
+    expect(result.failures.join('\n')).toContain('fusekiImageId');
+  });
+
+  test('preserves mechanism evidence but marks timing and CPU incomparable across host hardware', () => {
     const result = validateEnvironment(
       manifest(),
       manifest({
         arm: 'on',
         memoEnabled: true,
-        commitSha: 'different',
-        fusekiImageId: 'sha256:other',
-        hostCpuModel: 'Intel Xeon'
+        hostCpuModel: 'Intel Xeon',
+        hostCpuCount: 8,
+        hostTotalMemoryBytes: 34359738368
       })
     );
-    expect(result.passed).toBe(false);
-    expect(result.failures.join('\n')).toContain('commitSha');
-    expect(result.failures.join('\n')).toContain('fusekiImageId');
-    expect(result.failures.join('\n')).toContain('hostCpuModel');
+    expect(result.passed).toBe(true);
+    expect(result.resourceComparable).toBe(false);
+    expect(result.failures).toEqual([]);
+    expect(result.resourceDifferences.join('\n')).toContain('hostCpuModel');
+    expect(result.resourceDifferences.join('\n')).toContain('hostCpuCount');
+    expect(result.resourceDifferences.join('\n')).toContain('hostTotalMemoryBytes');
   });
 
   test('rejects incomplete provenance instead of treating missing values as equal', () => {
