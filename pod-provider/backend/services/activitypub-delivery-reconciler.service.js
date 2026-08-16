@@ -5,8 +5,11 @@ const Redis = require('ioredis');
 const { MIME_TYPES } = require('@semapps/mime-types');
 const { sanitizeSparqlQuery } = require('@semapps/triplestore');
 const CONFIG = require('../config/config');
-const { parseDeliveryEndpointUrl } = require('../utils/activitypub-delivery-plan');
-const { buildDeliveryPlanV1, mapWithConcurrency } = require('../utils/activitypub-delivery-planner');
+const {
+  buildDeliveryPlanV1,
+  mapWithConcurrency,
+  resolveLocalOutboxUri
+} = require('../utils/activitypub-delivery-planner');
 
 const ACCOUNT_CURSOR_KEY = 'apdm:delivery-reconciliation:account-keyset:v2';
 const RECONCILIATION_LOCK_KEY = 'apdm:delivery-reconciliation:lock:v1';
@@ -464,44 +467,7 @@ module.exports = {
     },
 
     async resolveLocalOutboxUri(ctx, actorUri, dataset) {
-      if (typeof actorUri !== 'string' || actorUri.length === 0) {
-        throw new Error('Outbox reconciliation requires a local actor URI');
-      }
-      if (typeof dataset !== 'string' || dataset.length === 0) {
-        throw new Error(`Outbox reconciliation requires a local dataset for ${actorUri}`);
-      }
-
-      const query = sanitizeSparqlQuery`
-        PREFIX as: <https://www.w3.org/ns/activitystreams#>
-        SELECT DISTINCT ?outboxUri
-        WHERE {
-          <${actorUri}> as:outbox ?outboxUri .
-        }
-        LIMIT 2
-      `;
-      const rows = await ctx.call('triplestore.query', {
-        query,
-        accept: MIME_TYPES.SPARQL_JSON,
-        dataset,
-        webId: 'system'
-      });
-      const outboxUris = (Array.isArray(rows) ? rows : [])
-        .map(row => row?.outboxUri?.value)
-        .filter(value => typeof value === 'string' && value.length > 0);
-
-      if (outboxUris.length !== 1) {
-        throw new Error(
-          outboxUris.length === 0
-            ? `Unable to resolve safe local outbox for ${actorUri}`
-            : `Unable to resolve unambiguous local outbox for ${actorUri}`
-        );
-      }
-
-      const outboxUri = outboxUris[0];
-      if (!parseDeliveryEndpointUrl(outboxUri)) {
-        throw new Error(`Unable to resolve safe local outbox for ${actorUri}`);
-      }
-      return outboxUri;
+      return resolveLocalOutboxUri(ctx, actorUri, dataset);
     },
 
     async listOutboxActivityPage(ctx, { outboxUri, dataset, cursor, limit, cutoffPublished }) {
