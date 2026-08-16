@@ -49,7 +49,10 @@ jobs:
       APDM_P8_RUN_ID: 'p9-${{ github.run_id }}-${{ github.run_attempt }}-c${{ matrix.local_concurrency }}'
       APDM_P8_SAMPLES: "${{ github.event.inputs.samples || '3' }}"
       APDM_P8_WARMUPS: "${{ github.event.inputs.warmups || '1' }}"
-      APDM_P8_PROVISION_CONCURRENCY: '4'
+      # Account/Pod bootstrap is fixture construction, not the behavior under test.
+      # Keep it strictly serial so every matrix candidate starts from the same
+      # conservative setup path and does not overload the auth/bootstrap services.
+      APDM_P8_PROVISION_CONCURRENCY: '1'
       APDM_P9_CONCURRENCY: '${{ matrix.local_concurrency }}'
 
     steps:
@@ -78,7 +81,19 @@ jobs:
         run: ./scripts/fuseki-bootstrap.sh
 
       - name: Build benchmark backend image
-        run: docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml build backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml build backend; then
+              exit 0
+            fi
+            if [[ "${attempt}" -eq 3 ]]; then
+              echo 'Backend image build failed after 3 attempts' >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
       # Fixture construction is deliberately invariant across the matrix. Signup
       # performs real ActivityPub/Pod bootstrap work, so allowing the candidate
@@ -162,8 +177,8 @@ jobs:
             pod-provider/measurements/apdm-p8-100.jsonl
             pod-provider/measurements/apdm-p8-200.jsonl
             pod-provider/measurements/apdm-p8-1000.jsonl
-            pod-provider/measurements/apdm-p9-c${{ matrix.local_concurrency }}-all.jsonl
-            pod-provider/measurements/apdm-p9-c${{ matrix.local_concurrency }}-summary.json
+            pod-provider/measurements/apdm-p9-c${APDM_P9_CONCURRENCY}-all.jsonl
+            pod-provider/measurements/apdm-p9-c${APDM_P9_CONCURRENCY}-summary.json
           if-no-files-found: warn
           retention-days: 14
 
