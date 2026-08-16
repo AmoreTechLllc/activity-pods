@@ -38,10 +38,13 @@ module.exports = {
 
       const prepared = JSON.parse(JSON.stringify(activity)); // Deep copy
 
-      // Get actor information including aliases
+      // SemApps 1.1.4 activitypub.actor.get validates actorUri (not id).
+      // Keep webId explicit so the local actor lookup remains requester-scoped;
+      // Moleculer inherits ctx.meta.dataset from the originating outbox.post,
+      // preserving Pod-provider local-vs-remote dataset authority.
       let actor;
       try {
-        actor = await ctx.call('activitypub.actor.get', { id: actorId });
+        actor = await ctx.call('activitypub.actor.get', { actorUri: actorId, webId: actorId });
       } catch (err) {
         this.logger.warn(`Could not fetch actor ${actorId}: ${err.message}`);
         return prepared;
