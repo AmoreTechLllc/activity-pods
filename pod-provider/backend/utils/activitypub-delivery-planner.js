@@ -87,10 +87,10 @@ async function resolveLocalActorCollectionUri(ctx, { actorUri, dataset, collecti
   if (typeof dataset !== 'string' || dataset.length === 0) {
     throw new Error(`Local ${collection || 'collection'} resolution requires a dataset for ${actorUri}`);
   }
-  const querySpec = LOCAL_COLLECTION_QUERIES[collection];
-  if (!querySpec) {
+  if (!Object.prototype.hasOwnProperty.call(LOCAL_COLLECTION_QUERIES, collection)) {
     throw new Error(`Unsupported local ActivityPub collection predicate ${collection}`);
   }
+  const querySpec = LOCAL_COLLECTION_QUERIES[collection];
 
   const bindingName = `${collection}Uri`;
   const actorIri = sanitizeSparqlQuery`<${actorUri}>`;
