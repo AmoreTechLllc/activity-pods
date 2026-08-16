@@ -25,27 +25,34 @@ function binding(webId, username) {
   };
 }
 
-test('resolves local recipient accounts in one bounded authoritative query instead of one action per recipient', async () => {
+test('resolves local recipient accounts in one bounded authoritative query and selectively reads each pod inbox', async () => {
   const locals = ['https://pods.example/bob', 'https://pods.example/carol'];
   const remote = 'https://remote.example/users/dave';
   const calls = [];
   const ctx = {
-    async call(action, params, options) {
-      calls.push({ action, params, options });
+    async call(action, params) {
+      calls.push({ action, params });
       if (action === 'activitypub.activity.getRecipients') return [...locals, remote];
       if (action === 'triplestore.query') {
-        expect(params.dataset).toBe('settings');
-        expect(params.webId).toBe('system');
-        expect(params.query).toContain('VALUES ?webId');
-        expect(params.query).toContain('<https://pods.example/bob>');
-        expect(params.query).toContain('<https://pods.example/carol>');
-        expect(params.query).toContain('FILTER NOT EXISTS { ?accountUri semapps:deletedAt ?deletedAt . }');
-        return [binding(locals[0], 'bob'), binding(locals[1], 'carol')];
+        if (params.dataset === 'settings') {
+          expect(params.webId).toBe('system');
+          expect(params.query).toContain('VALUES ?webId');
+          expect(params.query).toContain('<https://pods.example/bob>');
+          expect(params.query).toContain('<https://pods.example/carol>');
+          expect(params.query).toContain('FILTER NOT EXISTS { ?accountUri semapps:deletedAt ?deletedAt . }');
+          return [binding(locals[0], 'bob'), binding(locals[1], 'carol')];
+        }
+        if (params.dataset === 'bob' || params.dataset === 'carol') {
+          const actorUri = `https://pods.example/${params.dataset}`;
+          expect(params.webId).toBe('system');
+          expect(params.query).toContain(`<${actorUri}> ldp:inbox ?inboxUri`);
+          expect(params.query).toMatch(/LIMIT 2/u);
+          return [{ inboxUri: { value: `${actorUri}/inbox` } }];
+        }
+        throw new Error(`Unexpected triplestore dataset ${params.dataset}`);
       }
       if (action === 'activitypub.actor.getCollectionUri') {
-        const username = params.actorUri.endsWith('/bob') ? 'bob' : 'carol';
-        expect(options).toEqual({ meta: { dataset: username } });
-        return `${params.actorUri}/inbox`;
+        throw new Error('heavy actor materialization path must not be used');
       }
       if (action === 'activitypub.actor.get') {
         return { id: remote, inbox: `${remote}/inbox` };
@@ -66,8 +73,10 @@ test('resolves local recipient accounts in one bounded authoritative query inste
 
   expect(plan.localRecipients.map(target => target.actorUri)).toEqual(locals);
   expect(plan.remoteRecipients.map(target => target.actorUri)).toEqual([remote]);
-  expect(calls.filter(call => call.action === 'triplestore.query')).toHaveLength(1);
+  expect(calls.filter(call => call.action === 'triplestore.query' && call.params.dataset === 'settings')).toHaveLength(1);
+  expect(calls.filter(call => call.action === 'triplestore.query' && call.params.dataset !== 'settings')).toHaveLength(2);
   expect(calls.some(call => call.action === 'auth.account.findByWebId')).toBe(false);
+  expect(calls.some(call => call.action === 'activitypub.actor.getCollectionUri')).toBe(false);
 });
 
 test('chunks local account queries at 250 WebIDs and deduplicates candidates before querying', async () => {
@@ -160,9 +169,12 @@ test('missing local-looking recipient preserves the planner fail-closed coverage
   const missing = 'https://pods.example/not-an-account';
   const remote = 'https://remote.example/users/dave';
   const ctx = {
-    async call(action) {
+    async call(action, params) {
       if (action === 'activitypub.activity.getRecipients') return [missing, remote];
-      if (action === 'triplestore.query') return [];
+      if (action === 'triplestore.query') {
+        expect(params.dataset).toBe('settings');
+        return [];
+      }
       if (action === 'activitypub.actor.get') return { id: remote, inbox: `${remote}/inbox` };
       throw new Error(`Unexpected call ${action}`);
     }
