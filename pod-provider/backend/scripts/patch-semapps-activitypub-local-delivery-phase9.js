@@ -48,7 +48,7 @@ function patchPhase9OutboxSource(source) {
   patched = replaceExactlyOnce(
     patched,
     '      const success = [];\n      const failures = [];',
-    `      const successResults = new Array(recipients.length); // ${PHASE9_CONCURRENCY_MARKER}\n      const failureResults = new Array(recipients.length);\n      const localDeliveryConcurrencyRaw = process.env.${LOCAL_DELIVERY_CONCURRENCY_ENV};\n      const localDeliveryConcurrency =\n        typeof localDeliveryConcurrencyRaw === 'string' && /^[1-9]\\d*$/u.test(localDeliveryConcurrencyRaw)\n          ? Math.min(Number(localDeliveryConcurrencyRaw), ${MAX_LOCAL_DELIVERY_CONCURRENCY})\n          : ${DEFAULT_LOCAL_DELIVERY_CONCURRENCY};`,
+    `      const successResults = new Array(recipients.length); // ${PHASE9_CONCURRENCY_MARKER}\n      const failureResults = new Array(recipients.length);\n      const localDeliveryConcurrencyRaw = process.env.${LOCAL_DELIVERY_CONCURRENCY_ENV};\n      const localDeliveryConcurrencyParsed =\n        typeof localDeliveryConcurrencyRaw === 'string' && /^[1-9]\\d*$/u.test(localDeliveryConcurrencyRaw)\n          ? Number(localDeliveryConcurrencyRaw)\n          : NaN;\n      const localDeliveryConcurrency = Number.isSafeInteger(localDeliveryConcurrencyParsed)\n        ? Math.min(localDeliveryConcurrencyParsed, ${MAX_LOCAL_DELIVERY_CONCURRENCY})\n        : ${DEFAULT_LOCAL_DELIVERY_CONCURRENCY};`,
     'local delivery result arrays'
   );
 
