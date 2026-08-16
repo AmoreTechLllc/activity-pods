@@ -8,17 +8,28 @@ const service = require('../services/activitypub-delivery-reconciler.service');
 const LOCAL = 'https://pods.example/bob';
 const REMOTE = 'https://remote.example/users/carol';
 
-test('reconcileActivity resolves each accepted local account once and reuses it in the planner', async () => {
-  const accountLookup = jest.fn(async params => {
-    expect(params).toEqual({ webId: LOCAL });
-    return { webId: LOCAL, username: 'bob' };
+function accountBinding(webId = LOCAL, username = 'bob') {
+  return {
+    accountUri: { value: `urn:account:${username}` },
+    webId: { value: webId },
+    username: { value: username }
+  };
+}
+
+test('reconcileActivity resolves accepted local accounts once in a batch and reuses them in the planner', async () => {
+  const accountQuery = jest.fn(async params => {
+    expect(params.dataset).toBe('settings');
+    expect(params.webId).toBe('system');
+    expect(params.query).toContain(`<${LOCAL}>`);
+    return [accountBinding()];
   });
   const calls = [];
   const ctx = {
     async call(action, params, options) {
       calls.push({ action, params, options });
       if (action === 'activitypub.activity.getRecipients') return [LOCAL, REMOTE];
-      if (action === 'auth.account.findByWebId') return accountLookup(params);
+      if (action === 'triplestore.query') return accountQuery(params);
+      if (action === 'auth.account.findByWebId') throw new Error('duplicate account lookup');
       if (action === 'activitypub.actor.getCollectionUri') {
         expect(params).toEqual({ actorUri: LOCAL, predicate: 'inbox', webId: 'system' });
         expect(options).toEqual({ meta: { dataset: 'bob' } });
@@ -36,9 +47,10 @@ test('reconcileActivity resolves each accepted local account once and reuses it 
     }
   };
   const context = {
-    settings: { baseUri: 'https://pods.example' },
+    settings: { baseUri: 'https://pods.example', accountsDataset: 'settings' },
     logger: { debug: jest.fn() },
-    expandConcreteRecipients: service.methods.expandConcreteRecipients
+    expandConcreteRecipients: service.methods.expandConcreteRecipients,
+    findLocalAccountsByWebIds: service.methods.findLocalAccountsByWebIds
   };
   const activity = {
     id: 'https://pods.example/alice/activities/reconcile-account-reuse',
@@ -57,24 +69,25 @@ test('reconcileActivity resolves each accepted local account once and reuses it 
 
   const plan = await service.methods.reconcileActivity.call(context, ctx, activity, 'alice');
 
-  expect(accountLookup).toHaveBeenCalledTimes(1);
+  expect(accountQuery).toHaveBeenCalledTimes(1);
   expect(plan.localRecipients).toEqual([
     { actorUri: LOCAL, dataset: 'bob', inboxUri: `${LOCAL}/inbox` }
   ]);
   expect(plan.remoteRecipients).toEqual([
     expect.objectContaining({ actorUri: REMOTE, targetDomain: 'remote.example' })
   ]);
-  expect(calls.filter(call => call.action === 'auth.account.findByWebId')).toHaveLength(1);
+  expect(calls.some(call => call.action === 'auth.account.findByWebId')).toBe(false);
 });
 
 test('reconcileActivity preserves fail-closed coverage when a directly addressed local-looking recipient has no account', async () => {
   const missing = 'https://pods.example/not-an-account';
-  const accountLookup = jest.fn(async () => null);
+  const accountQuery = jest.fn(async () => []);
   const localInboxLookup = jest.fn();
   const ctx = {
     async call(action, params) {
       if (action === 'activitypub.activity.getRecipients') return [missing, REMOTE];
-      if (action === 'auth.account.findByWebId') return accountLookup(params);
+      if (action === 'triplestore.query') return accountQuery(params);
+      if (action === 'auth.account.findByWebId') throw new Error('per-recipient account lookup must not run');
       if (action === 'activitypub.actor.get') {
         return { id: REMOTE, inbox: `${REMOTE}/inbox` };
       }
@@ -86,9 +99,10 @@ test('reconcileActivity preserves fail-closed coverage when a directly addressed
     }
   };
   const context = {
-    settings: { baseUri: 'https://pods.example' },
+    settings: { baseUri: 'https://pods.example', accountsDataset: 'settings' },
     logger: { debug: jest.fn() },
-    expandConcreteRecipients: service.methods.expandConcreteRecipients
+    expandConcreteRecipients: service.methods.expandConcreteRecipients,
+    findLocalAccountsByWebIds: service.methods.findLocalAccountsByWebIds
   };
   const activity = {
     id: 'https://pods.example/alice/activities/missing-local-account',
@@ -102,6 +116,6 @@ test('reconcileActivity preserves fail-closed coverage when a directly addressed
     new RegExp(`omitted explicitly addressed recipient ${missing.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'u')
   );
 
-  expect(accountLookup).toHaveBeenCalledTimes(1);
+  expect(accountQuery).toHaveBeenCalledTimes(1);
   expect(localInboxLookup).not.toHaveBeenCalled();
 });

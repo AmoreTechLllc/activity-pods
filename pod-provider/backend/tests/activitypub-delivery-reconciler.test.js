@@ -23,6 +23,7 @@ function createServiceContext(overrides = {}) {
     reconcileAccount: service.methods.reconcileAccount,
     reconcileActivity: service.methods.reconcileActivity,
     expandConcreteRecipients: service.methods.expandConcreteRecipients,
+    findLocalAccountsByWebIds: service.methods.findLocalAccountsByWebIds,
     listAccountPage: service.methods.listAccountPage,
     listOutboxActivityPage: service.methods.listOutboxActivityPage,
     acquireDistributedLease: jest.fn(async () => 'lease-token'),
@@ -75,6 +76,16 @@ function createContext({ includeRemote = true, unresolvedFollowers = false } = {
           if (params.predicate === 'inbox') return `${params.actorUri}/inbox`;
           throw new Error(`Unexpected predicate ${params.predicate}`);
         case 'triplestore.query':
+          if (params.dataset === 'settings') {
+            expect(params.query).toContain('VALUES ?webId');
+            expect(params.query).toContain('<https://pods.example/bob>');
+            expect(params.webId).toBe('system');
+            return [{
+              accountUri: { value: 'urn:account:bob' },
+              webId: { value: 'https://pods.example/bob' },
+              username: { value: 'bob' }
+            }];
+          }
           expect(params.query).toContain('LIMIT 50');
           expect(params.query).not.toContain('OFFSET');
           expect(params.query).toContain('ORDER BY DESC(STR(?published)) ASC(STR(?activityUri))');
@@ -96,7 +107,7 @@ function createContext({ includeRemote = true, unresolvedFollowers = false } = {
             items: ['https://pods.example/bob', 'https://remote.example/users/carol']
           };
         case 'auth.account.findByWebId':
-          return { webId: params.webId, username: 'bob' };
+          throw new Error('reconciliation must use bounded batch account lookup');
         case 'activitypub.actor.get':
           return {
             id: params.actorUri,
