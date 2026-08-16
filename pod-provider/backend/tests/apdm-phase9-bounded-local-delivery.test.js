@@ -9,9 +9,13 @@ const {
 } = require('../scripts/patch-semapps-activitypub-local-delivery');
 const {
   PHASE9_CONCURRENCY_MARKER,
+  PHASE9_C4_DEFAULT_MARKER,
   LOCAL_DELIVERY_CONCURRENCY_ENV,
   DEFAULT_LOCAL_DELIVERY_CONCURRENCY,
+  INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK,
   MAX_LOCAL_DELIVERY_CONCURRENCY,
+  LEGACY_PHASE9_CONCURRENCY_BLOCK,
+  PROMOTED_PHASE9_CONCURRENCY_BLOCK,
   resolveLocalDeliveryConcurrency,
   patchPhase9OutboxSource
 } = require('../scripts/patch-semapps-activitypub-local-delivery-phase9');
@@ -76,6 +80,33 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function createConcurrencyHarness() {
+  let active = 0;
+  let maximum = 0;
+  const starts = [];
+  const service = {
+    settings: { podProvider: true },
+    logger: { error: jest.fn(), warn: jest.fn() },
+    broker: {
+      call: jest.fn(async (action, params) => {
+        if (action === 'activitypub.side-effects.processInbox') return;
+        if (action === 'auth.account.findByWebId') return { username: params.webId.split('/').pop() };
+        if (action === 'activitypub.actor.getCollectionUri') {
+          active += 1;
+          maximum = Math.max(maximum, active);
+          starts.push(params.actorUri);
+          await delay(8);
+          active -= 1;
+          return `${params.actorUri}/inbox`;
+        }
+        return undefined;
+      }),
+      emit: jest.fn()
+    }
+  };
+  return { service, starts, maximum: () => maximum };
+}
+
 describe('APDM Phase 9 bounded local delivery concurrency', () => {
   const originalConcurrency = process.env[LOCAL_DELIVERY_CONCURRENCY_ENV];
 
@@ -84,29 +115,69 @@ describe('APDM Phase 9 bounded local delivery concurrency', () => {
     else process.env[LOCAL_DELIVERY_CONCURRENCY_ENV] = originalConcurrency;
   });
 
-  test('configuration defaults safely and clamps the hard ceiling', () => {
-    for (const value of [undefined, '', '0', '-1', '4x', '999999999999999999999999999999999']) {
+  test('unset configuration uses measured c4 while invalid explicit values fail safe to serial one', () => {
+    expect(DEFAULT_LOCAL_DELIVERY_CONCURRENCY).toBe(4);
+    expect(INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK).toBe(1);
+    for (const value of [undefined, null, '']) {
       expect(resolveLocalDeliveryConcurrency(value)).toBe(DEFAULT_LOCAL_DELIVERY_CONCURRENCY);
     }
+    for (const value of ['0', '-1', '4x', ' 4', '999999999999999999999999999999999']) {
+      expect(resolveLocalDeliveryConcurrency(value)).toBe(INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK);
+    }
+    expect(resolveLocalDeliveryConcurrency('1')).toBe(1);
+    expect(resolveLocalDeliveryConcurrency('2')).toBe(2);
     expect(resolveLocalDeliveryConcurrency('4')).toBe(4);
+    expect(resolveLocalDeliveryConcurrency('8')).toBe(8);
     expect(resolveLocalDeliveryConcurrency(String(MAX_LOCAL_DELIVERY_CONCURRENCY + 1000))).toBe(
       MAX_LOCAL_DELIVERY_CONCURRENCY
     );
   });
 
-  test('patch layers on reviewed Phase 7/8 source, preserves bounded workers and is idempotent', () => {
+  test('fresh patch layers on reviewed Phase 7/8 source and embeds c4 promotion marker', () => {
     const predecessor = patchOutboxSource(representativeOutboxSource());
     const once = patchPhase9OutboxSource(predecessor.source);
     const twice = patchPhase9OutboxSource(once.source);
 
     expect(once.changed).toBe(true);
     expect(once.source).toContain(PHASE9_CONCURRENCY_MARKER);
+    expect(once.source).toContain(PHASE9_C4_DEFAULT_MARKER);
+    expect(once.source).toContain(PROMOTED_PHASE9_CONCURRENCY_BLOCK);
     expect(once.source).toContain('const workerCount = Math.min(localDeliveryConcurrency, recipients.length);');
     expect(once.source).toContain('await Promise.all(workers);');
     expect(once.source).not.toContain('Promise.all(recipients.map');
     expect(once.source).toContain('successResults[recipientIndex] = recipientUri;');
     expect(once.source).toContain('failureResults[recipientIndex] = recipientUri;');
     expect(twice).toEqual({ source: once.source, changed: false });
+  });
+
+  test('existing reviewed c1 Phase 9 artifact migrates exactly once to the c4 default', () => {
+    const predecessor = patchOutboxSource(representativeOutboxSource());
+    const freshPromoted = patchPhase9OutboxSource(predecessor.source).source;
+    const legacy = freshPromoted.replace(PROMOTED_PHASE9_CONCURRENCY_BLOCK, LEGACY_PHASE9_CONCURRENCY_BLOCK);
+
+    expect(legacy).toContain(PHASE9_CONCURRENCY_MARKER);
+    expect(legacy).not.toContain(PHASE9_C4_DEFAULT_MARKER);
+    expect(legacy).toContain(LEGACY_PHASE9_CONCURRENCY_BLOCK);
+
+    const migrated = patchPhase9OutboxSource(legacy);
+    expect(migrated.changed).toBe(true);
+    expect(migrated.source).toContain(PHASE9_C4_DEFAULT_MARKER);
+    expect(migrated.source).toContain(PROMOTED_PHASE9_CONCURRENCY_BLOCK);
+    expect(migrated.source).not.toContain(LEGACY_PHASE9_CONCURRENCY_BLOCK);
+    expect(patchPhase9OutboxSource(migrated.source)).toEqual({ source: migrated.source, changed: false });
+  });
+
+  test('existing Phase 9 marker with drifted worker shape fails closed instead of partial migration', () => {
+    const predecessor = patchOutboxSource(representativeOutboxSource());
+    const freshPromoted = patchPhase9OutboxSource(predecessor.source).source;
+    const legacy = freshPromoted
+      .replace(PROMOTED_PHASE9_CONCURRENCY_BLOCK, LEGACY_PHASE9_CONCURRENCY_BLOCK)
+      .replace(
+        'const workerCount = Math.min(localDeliveryConcurrency, recipients.length);',
+        'const workerCount = recipients.length;'
+      );
+
+    expect(() => patchPhase9OutboxSource(legacy)).toThrow('unsupported worker shape');
   });
 
   test('production image supplies both patchers before dependency installation', () => {
@@ -119,80 +190,53 @@ describe('APDM Phase 9 bounded local delivery concurrency', () => {
     expect(install).toBeGreaterThan(p9);
   });
 
-  test('installed pinned SemApps artifact contains the Phase 9 marker', () => {
+  test('installed pinned SemApps artifact contains promoted Phase 9 marker and fail-safe constants', () => {
     const source = fs.readFileSync(locateOutboxSource(findPackageRoot()), 'utf8');
     expect(source).toContain(PHASE9_CONCURRENCY_MARKER);
+    expect(source).toContain(PHASE9_C4_DEFAULT_MARKER);
+    expect(source).toContain(`? ${DEFAULT_LOCAL_DELIVERY_CONCURRENCY}`);
+    expect(source).toContain(`: ${INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK};`);
   });
 
   test('configured concurrency is a real in-flight ceiling', async () => {
     process.env[LOCAL_DELIVERY_CONCURRENCY_ENV] = '3';
     const localPost = loadInstalledLocalPost();
     const recipients = Array.from({ length: 12 }, (_, i) => `https://pod.example/user-${i}`);
-    let active = 0;
-    let maximum = 0;
+    const harness = createConcurrencyHarness();
 
-    const service = {
-      settings: { podProvider: true },
-      logger: { error: jest.fn(), warn: jest.fn() },
-      broker: {
-        call: jest.fn(async (action, params) => {
-          if (action === 'activitypub.side-effects.processInbox') return;
-          if (action === 'auth.account.findByWebId') return { username: params.webId.split('/').pop() };
-          if (action === 'activitypub.actor.getCollectionUri') {
-            active += 1;
-            maximum = Math.max(maximum, active);
-            await delay(8);
-            active -= 1;
-            return `${params.actorUri}/inbox`;
-          }
-          return undefined;
-        }),
-        emit: jest.fn()
-      }
-    };
-
-    await expect(localPost.call(service, recipients, createActivity('bounded'))).resolves.toEqual({
+    await expect(localPost.call(harness.service, recipients, createActivity('bounded'))).resolves.toEqual({
       success: recipients,
       failures: []
     });
-    expect(maximum).toBe(3);
+    expect(harness.maximum()).toBe(3);
   });
 
-  test('default/explicit concurrency one preserves serial execution', async () => {
+  test('unset environment applies the empirically selected concurrency four in the installed artifact', async () => {
     delete process.env[LOCAL_DELIVERY_CONCURRENCY_ENV];
     const localPost = loadInstalledLocalPost();
-    const recipients = ['https://pod.example/a', 'https://pod.example/b', 'https://pod.example/c'];
-    let active = 0;
-    let maximum = 0;
-    const starts = [];
+    const recipients = Array.from({ length: 8 }, (_, i) => `https://pod.example/default-${i}`);
+    const harness = createConcurrencyHarness();
 
-    const service = {
-      settings: { podProvider: true },
-      logger: { error: jest.fn(), warn: jest.fn() },
-      broker: {
-        call: jest.fn(async (action, params) => {
-          if (action === 'activitypub.side-effects.processInbox') return;
-          if (action === 'auth.account.findByWebId') return { username: params.webId.split('/').pop() };
-          if (action === 'activitypub.actor.getCollectionUri') {
-            active += 1;
-            maximum = Math.max(maximum, active);
-            starts.push(params.actorUri);
-            await delay(2);
-            active -= 1;
-            return `${params.actorUri}/inbox`;
-          }
-          return undefined;
-        }),
-        emit: jest.fn()
-      }
-    };
-
-    await expect(localPost.call(service, recipients, createActivity('serial'))).resolves.toEqual({
+    await expect(localPost.call(harness.service, recipients, createActivity('default-c4'))).resolves.toEqual({
       success: recipients,
       failures: []
     });
-    expect(maximum).toBe(1);
-    expect(starts).toEqual(recipients);
+    expect(harness.maximum()).toBe(4);
+  });
+
+  test('explicit one and malformed configuration preserve serial execution', async () => {
+    const recipients = ['https://pod.example/a', 'https://pod.example/b', 'https://pod.example/c'];
+    for (const configured of ['1', 'broken']) {
+      process.env[LOCAL_DELIVERY_CONCURRENCY_ENV] = configured;
+      const localPost = loadInstalledLocalPost();
+      const harness = createConcurrencyHarness();
+      await expect(localPost.call(harness.service, recipients, createActivity(`serial-${configured}`))).resolves.toEqual({
+        success: recipients,
+        failures: []
+      });
+      expect(harness.maximum()).toBe(1);
+      expect(harness.starts).toEqual(recipients);
+    }
   });
 
   test('out-of-order completion and failures still return deterministic recipient-order results', async () => {
