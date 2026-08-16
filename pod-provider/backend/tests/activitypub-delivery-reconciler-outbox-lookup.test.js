@@ -31,18 +31,21 @@ test('selective outbox lookup queries only the authoritative actor predicate in 
   expect(call).toHaveBeenCalledTimes(1);
 });
 
-test('shared selective collection resolver rejects arbitrary predicate names before Fuseki', async () => {
-  const call = jest.fn();
+test.each(['privateKeys', '__proto__', 'constructor', 'toString'])(
+  'shared selective collection resolver rejects non-allowlisted collection name %s before Fuseki',
+  async collection => {
+    const call = jest.fn();
 
-  await expect(
-    resolveLocalActorCollectionUri(
-      { call },
-      { actorUri: ACTOR, dataset: DATASET, collection: 'privateKeys' }
-    )
-  ).rejects.toThrow(/Unsupported local ActivityPub collection predicate/u);
+    await expect(
+      resolveLocalActorCollectionUri(
+        { call },
+        { actorUri: ACTOR, dataset: DATASET, collection }
+      )
+    ).rejects.toThrow(/Unsupported local ActivityPub collection predicate/u);
 
-  expect(call).not.toHaveBeenCalled();
-});
+    expect(call).not.toHaveBeenCalled();
+  }
+);
 
 test('selective outbox lookup fails closed for missing or ambiguous persisted outbox triples', async () => {
   await expect(
