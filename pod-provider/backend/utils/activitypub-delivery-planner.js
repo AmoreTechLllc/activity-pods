@@ -81,7 +81,7 @@ async function resolveLocalInboxUri(ctx, actorUri, dataset) {
   `;
   const rows = await ctx.call('triplestore.query', {
     query,
-    accept: MIME_TYPES.JSON,
+    accept: MIME_TYPES.SPARQL_JSON,
     dataset,
     webId: 'system'
   });
