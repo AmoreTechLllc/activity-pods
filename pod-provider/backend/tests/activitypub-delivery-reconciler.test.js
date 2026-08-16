@@ -20,6 +20,7 @@ function createServiceContext(overrides = {}) {
       ...overrides
     },
     logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+    resolveLocalOutboxUri: service.methods.resolveLocalOutboxUri,
     reconcileAccount: service.methods.reconcileAccount,
     reconcileActivity: service.methods.reconcileActivity,
     expandConcreteRecipients: service.methods.expandConcreteRecipients,
@@ -72,8 +73,7 @@ function createContext({ includeRemote = true, unresolvedFollowers = false } = {
         case 'auth.account.find':
           return [{ webId: 'https://pods.example/alice', username: 'alice' }];
         case 'activitypub.actor.getCollectionUri':
-          if (params.predicate === 'outbox') return 'https://pods.example/alice/outbox';
-          throw new Error(`Unexpected predicate ${params.predicate}`);
+          throw new Error('heavy actor materialization path must not be used by reconciliation');
         case 'triplestore.query':
           if (params.dataset === 'settings') {
             expect(params.query).toContain('VALUES ?webId');
@@ -91,10 +91,16 @@ function createContext({ includeRemote = true, unresolvedFollowers = false } = {
             expect(params.query).toMatch(/LIMIT 2/u);
             return [{ inboxUri: { value: 'https://pods.example/bob/inbox' } }];
           }
+          expect(params.dataset).toBe('alice');
+          expect(params.webId).toBe('system');
+          if (params.query.includes('as:outbox ?outboxUri')) {
+            expect(params.query).toContain('<https://pods.example/alice> as:outbox ?outboxUri');
+            expect(params.query).toMatch(/LIMIT 2/u);
+            return [{ outboxUri: { value: 'https://pods.example/alice/outbox' } }];
+          }
           expect(params.query).toContain('LIMIT 50');
           expect(params.query).not.toContain('OFFSET');
           expect(params.query).toContain('ORDER BY DESC(STR(?published)) ASC(STR(?activityUri))');
-          expect(params.dataset).toBe('alice');
           return [{ activityUri: { value: activity.id }, published: { value: activity.published } }];
         case 'activitypub.activity.get':
           expect(options).toEqual({ meta: { dataset: 'alice' } });
@@ -230,7 +236,15 @@ describe('APDM Phase 4 delivery reconciliation', () => {
     });
     const ctx = {
       async call(action, params) {
-        if (action === 'activitypub.actor.getCollectionUri') return 'https://pods.example/alice/outbox';
+        if (action === 'activitypub.actor.getCollectionUri') {
+          throw new Error('heavy actor materialization path must not be used by reconciliation');
+        }
+        if (action === 'triplestore.query') {
+          expect(params.dataset).toBe('alice');
+          expect(params.webId).toBe('system');
+          expect(params.query).toContain('<https://pods.example/alice> as:outbox ?outboxUri');
+          return [{ outboxUri: { value: 'https://pods.example/alice/outbox' } }];
+        }
         if (action === 'activitypub.activity.get') {
           return activities.find(activity => activity.id === params.resourceUri);
         }
