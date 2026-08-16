@@ -1,5 +1,8 @@
 'use strict';
 
+let cachedBaseUri;
+let cachedMatcher;
+
 function normalizeProviderPath(pathname) {
   const normalized = pathname.replace(/\/+$/u, '');
   return normalized.length > 0 ? normalized : '/';
@@ -53,7 +56,12 @@ function createProviderUriMatcher(baseUri) {
 }
 
 function isProviderOwnedUri(value, baseUri) {
-  return createProviderUriMatcher(baseUri)(value);
+  if (baseUri !== cachedBaseUri || typeof cachedMatcher !== 'function') {
+    const matcher = createProviderUriMatcher(baseUri);
+    cachedBaseUri = baseUri;
+    cachedMatcher = matcher;
+  }
+  return cachedMatcher(value);
 }
 
 module.exports = {
