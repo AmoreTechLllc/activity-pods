@@ -552,7 +552,7 @@ module.exports = {
         if (!row || typeof row !== 'object') {
           throw new Error(`Malformed sender followers query result for ${collectionUri}`);
         }
-        if (row.itemUri === undefined || row.itemUri === null) continue;
+        if (row.itemUri === undefined) continue;
         const value = row.itemUri?.value;
         if (typeof value !== 'string' || value.length === 0) {
           throw new Error(`Malformed sender follower URI for ${collectionUri}`);
