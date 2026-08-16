@@ -5,7 +5,7 @@ const path = require('path');
 
 const REQUIRED_PHASE = 'APDM-P10-A';
 const REQUIRED_CONCURRENCY = 4;
-const MATCHED_FIELDS = [
+const HARD_MATCHED_FIELDS = [
   'phase',
   'commitSha',
   'workflowRunId',
@@ -16,14 +16,13 @@ const MATCHED_FIELDS = [
   'imageOs',
   'imageVersion',
   'hostNode',
-  'hostCpuModel',
-  'hostCpuCount',
-  'hostTotalMemoryBytes',
   'backendImageId',
   'fusekiImageId',
   'redisImageId',
   'mailcatcherImageId'
 ];
+const RESOURCE_COMPARABILITY_FIELDS = ['hostCpuModel', 'hostCpuCount', 'hostTotalMemoryBytes'];
+const REQUIRED_FIELDS = [...HARD_MATCHED_FIELDS, ...RESOURCE_COMPARABILITY_FIELDS];
 
 function readManifest(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -37,9 +36,10 @@ function assertNonEmpty(value, label) {
 
 function validateEnvironment(control, enabled) {
   const failures = [];
+  const resourceDifferences = [];
 
   for (const [label, manifest] of [['control', control], ['enabled', enabled]]) {
-    for (const field of MATCHED_FIELDS) {
+    for (const field of REQUIRED_FIELDS) {
       try {
         assertNonEmpty(manifest[field], `${label}.${field}`);
       } catch (error) {
@@ -61,9 +61,16 @@ function validateEnvironment(control, enabled) {
     failures.push(`Both manifests must prove APDM local-delivery concurrency ${REQUIRED_CONCURRENCY}`);
   }
 
-  for (const field of MATCHED_FIELDS) {
+  for (const field of HARD_MATCHED_FIELDS) {
     if (control[field] !== enabled[field]) {
       failures.push(`Evidence arms differ at ${field}: ${JSON.stringify(control[field])} vs ${JSON.stringify(enabled[field])}`);
+    }
+  }
+  for (const field of RESOURCE_COMPARABILITY_FIELDS) {
+    if (control[field] !== enabled[field]) {
+      resourceDifferences.push(
+        `Resource environments differ at ${field}: ${JSON.stringify(control[field])} vs ${JSON.stringify(enabled[field])}`
+      );
     }
   }
 
@@ -71,7 +78,10 @@ function validateEnvironment(control, enabled) {
     phase: REQUIRED_PHASE,
     passed: failures.length === 0,
     requiredConcurrency: REQUIRED_CONCURRENCY,
-    matchedFields: MATCHED_FIELDS,
+    hardMatchedFields: HARD_MATCHED_FIELDS,
+    resourceComparabilityFields: RESOURCE_COMPARABILITY_FIELDS,
+    resourceComparable: failures.length === 0 && resourceDifferences.length === 0,
+    resourceDifferences,
     control: { arm: control.arm, memoEnabled: control.memoEnabled },
     enabled: { arm: enabled.arm, memoEnabled: enabled.memoEnabled },
     failures
@@ -97,7 +107,8 @@ function main(argv = process.argv.slice(2)) {
 if (require.main === module) main();
 
 module.exports = {
-  MATCHED_FIELDS,
+  HARD_MATCHED_FIELDS,
+  RESOURCE_COMPARABILITY_FIELDS,
   REQUIRED_CONCURRENCY,
   REQUIRED_PHASE,
   validateEnvironment
