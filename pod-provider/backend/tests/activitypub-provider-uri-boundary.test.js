@@ -3,7 +3,8 @@
 const {
   createProviderUriMatcher,
   isProviderOwnedUri,
-  parseProviderBaseUrl
+  parseProviderBaseUrl,
+  partitionProviderUris
 } = require('../utils/activitypub-provider-uri');
 
 test.each([
@@ -37,7 +38,8 @@ test.each([
   ['https://pods.example/provider.evil/users/alice', false],
   ['https://pods.example/providers/users/alice', false],
   ['https://pods.example/%70rovider-evil/users/alice', false],
-  ['https://pods.example/provider%2Fevil/users/alice', false]
+  ['https://pods.example/provider%2Fevil/users/alice', false],
+  ['https://pods.example/provider/../admin', false]
 ])('path-scoped provider classifies %s with segment boundaries', (candidate, expected) => {
   const matches = createProviderUriMatcher('https://pods.example/provider/');
   expect(matches(candidate)).toBe(expected);
@@ -57,6 +59,17 @@ test('provider matcher is reusable without mutable candidate state', () => {
   expect(matches('https://pods.example/provider/users/alice')).toBe(true);
   expect(matches('https://pods.example.evil/provider/users/alice')).toBe(false);
   expect(matches('https://pods.example/provider/users/bob')).toBe(true);
+});
+
+test('single-pass partition preserves order and assigns each URI to exactly one bucket', () => {
+  const localA = 'https://pods.example/provider/users/alice';
+  const remote = 'https://pods.example.evil/provider/users/bob';
+  const localB = 'https://pods.example/provider/users/carol';
+
+  expect(partitionProviderUris([localA, remote, localB], 'https://pods.example/provider')).toEqual({
+    localUris: [localA, localB],
+    remoteUris: [remote]
+  });
 });
 
 test.each([
