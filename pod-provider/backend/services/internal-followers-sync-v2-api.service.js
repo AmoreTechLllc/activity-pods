@@ -4,7 +4,9 @@ const crypto = require('crypto');
 const { Errors: WebErrors } = require('moleculer-web');
 
 const MAX_PARTIAL_FOLLOWERS = 10_000;
+const MAX_PARTIAL_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_HTTP_URI_LENGTH = 4096;
+const EMPTY_RESPONSE_BYTES = Buffer.byteLength(JSON.stringify({ followers: [] }), 'utf8');
 
 module.exports = {
   name: 'internal-followers-sync-v2-api',
@@ -110,6 +112,7 @@ module.exports = {
 
         const followers = [];
         const seen = new Set();
+        let responseBytes = EMPTY_RESPONSE_BYTES;
         for (const candidate of hostnameCandidates) {
           const candidateBaseUri = this.serverBaseUriForActor(candidate);
           if (candidateBaseUri === null) {
@@ -117,8 +120,20 @@ module.exports = {
             return { error: 'internal_error', message: 'Follower projection returned an invalid actor URI' };
           }
           if (candidateBaseUri !== baseUri || seen.has(candidate)) continue;
+
+          const encodedCandidateBytes = Buffer.byteLength(JSON.stringify(candidate), 'utf8');
+          const nextResponseBytes = responseBytes + encodedCandidateBytes + (followers.length > 0 ? 1 : 0);
+          if (nextResponseBytes > MAX_PARTIAL_RESPONSE_BYTES) {
+            ctx.meta.$statusCode = 503;
+            return {
+              error: 'collection_too_large',
+              message: `Partial followers response exceeds ${MAX_PARTIAL_RESPONSE_BYTES} bytes`
+            };
+          }
+
           seen.add(candidate);
           followers.push(candidate);
+          responseBytes = nextResponseBytes;
           if (followers.length > MAX_PARTIAL_FOLLOWERS) {
             ctx.meta.$statusCode = 503;
             return {
@@ -132,7 +147,8 @@ module.exports = {
           actorIdentifier,
           baseUri,
           hostnameCandidateCount: hostnameCandidates.length,
-          partialCount: followers.length
+          partialCount: followers.length,
+          responseBytes
         });
 
         ctx.meta.$statusCode = 200;
