@@ -1,10 +1,11 @@
 # ActivityPods Architecture Records
 
-## Provider-wide scalability
+## Provider-wide scalability and resource efficiency
 
 - [`scalability.md`](./scalability.md) — provider-wide scalability problem statement and architecture: local Pod fan-out, remote federation, provider/account scans, follower collections, reconciliation, identity/ATProto indexes, Fuseki/TDB2, startup migrations, batching, bounded concurrency, queue/response limits, evidence rules, and remaining bottlenecks.
+- [`resource-efficiency.md`](./resource-efficiency.md) — cross-cutting performance/resource objective: reduce CPU, memory, datastore I/O, network traffic, queue churn, background work, and deployment footprint per useful outcome without sacrificing latency, throughput, correctness, durability, interoperability, or ActivityPods/SemApps compatibility.
 
-This is the umbrella scalability document. APDM is one major workstream inside it rather than the complete scalability program.
+`scalability.md` asks whether the system remains healthy as load and data grow. `resource-efficiency.md` asks whether the same correct useful work can be done with less compute and infrastructure. Both are required. APDM is one major workstream inside this broader program rather than the complete scalability/performance effort.
 
 ## ActivityPub Delivery Migration (APDM)
 
