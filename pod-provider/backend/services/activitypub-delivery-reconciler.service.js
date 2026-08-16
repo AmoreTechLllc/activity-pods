@@ -5,6 +5,7 @@ const Redis = require('ioredis');
 const { MIME_TYPES } = require('@semapps/mime-types');
 const { sanitizeSparqlQuery } = require('@semapps/triplestore');
 const CONFIG = require('../config/config');
+const { isProviderOwnedUri, partitionProviderUris } = require('../utils/activitypub-provider-uri');
 const {
   buildDeliveryPlanV1,
   mapWithConcurrency,
@@ -572,7 +573,7 @@ module.exports = {
           continue;
         }
 
-        if (!recipientUri.startsWith(this.settings.baseUri)) {
+        if (!isProviderOwnedUri(recipientUri, this.settings.baseUri)) {
           throw new Error(`Cannot safely reconcile unresolved remote followers collection ${recipientUri}`);
         }
 
@@ -620,8 +621,10 @@ module.exports = {
         dataset,
         senderFollowersSnapshot
       );
-      const localCandidateUris = concreteRecipients.filter(recipientUri => recipientUri.startsWith(this.settings.baseUri));
-      const remoteRecipientUris = concreteRecipients.filter(recipientUri => !recipientUri.startsWith(this.settings.baseUri));
+      const { localUris: localCandidateUris, remoteUris: remoteRecipientUris } = partitionProviderUris(
+        concreteRecipients,
+        this.settings.baseUri
+      );
       const localRecipientAccounts = await this.findLocalAccountsByWebIds(ctx, localCandidateUris);
       const localRecipientUris = localCandidateUris.filter(recipientUri => localRecipientAccounts.has(recipientUri));
 
