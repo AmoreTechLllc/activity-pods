@@ -2,6 +2,7 @@
 
 const {
   REQUIRED_RECIPIENT_COUNTS,
+  aggregateNestedCounts,
   linearFit,
   parseJsonLines,
   percentile,
@@ -33,6 +34,19 @@ describe('APDM Phase 8 measurement summarizer', () => {
     expect(model.intercept).toBeCloseTo(2, 8);
   });
 
+  test('aggregates nested Fuseki evidence without changing the original trace schema', () => {
+    expect(
+      aggregateNestedCounts(
+        [
+          { fuseki: { pathCounts: { '/$/datasets/alice': 2, '/alice/query': 1 } } },
+          { fuseki: { pathCounts: { '/$/datasets/alice': 3, '/bob/query': 4 } } }
+        ],
+        'fuseki',
+        'pathCounts'
+      )
+    ).toEqual({ '/$/datasets/alice': 5, '/alice/query': 1, '/bob/query': 4 });
+  });
+
   test('does not declare Phase 8 measurement complete until every required size has a successful sample', () => {
     const summary = summarize([
       {
@@ -45,7 +59,7 @@ describe('APDM Phase 8 measurement summarizer', () => {
         actionCount: 8,
         actionCounts: { 'activitypub.outbox.post': 1 },
         categoryCounts: { activitypub: 1 },
-        fuseki: { requestCount: 3 },
+        fuseki: { requestCount: 3, pathCounts: { '/$/datasets/alice': 2 } },
         errors: []
       }
     ]);
@@ -53,6 +67,7 @@ describe('APDM Phase 8 measurement summarizer', () => {
     expect(summary.complete).toBe(false);
     expect(summary.missingRecipientCounts).toEqual([10, 100, 200, 1000]);
     expect(summary.historicalTopLevelModel.status).toBe('insufficient-measurements');
+    expect(summary.cases[1].fusekiPathCounts['/$/datasets/alice']).toBe(2);
   });
 
   test('failed traces are reported but cannot satisfy the completion gate or influence fitted models', () => {
@@ -66,7 +81,7 @@ describe('APDM Phase 8 measurement summarizer', () => {
       actionCount: 999999,
       actionCounts: { broken: 999999 },
       categoryCounts: { other: 999999 },
-      fuseki: { requestCount: 999999 },
+      fuseki: { requestCount: 999999, pathCounts: { '/$/datasets/broken': 999999 } },
       errors: [{ source: 'root-action', message: 'failed' }]
     }));
 
@@ -77,6 +92,7 @@ describe('APDM Phase 8 measurement summarizer', () => {
     expect(summary.measuredModels.fusekiHttpRequests).toBeUndefined();
     expect(summary.cases[1].successfulSamples).toBe(0);
     expect(summary.cases[1].failedSamples).toBe(1);
+    expect(summary.cases[1].fusekiPathCounts).toEqual({});
   });
 
   test('successful samples drive models while failed samples remain separately reported', () => {
@@ -98,7 +114,10 @@ describe('APDM Phase 8 measurement summarizer', () => {
           activitypub: 1,
           ldp: recipientCount
         },
-        fuseki: { requestCount: 4 * recipientCount + 1 },
+        fuseki: {
+          requestCount: 4 * recipientCount + 1,
+          pathCounts: { '/$/datasets/alice': recipientCount, '/alice/query': 3 * recipientCount + 1 }
+        },
         errors: []
       });
       records.push({
@@ -108,7 +127,7 @@ describe('APDM Phase 8 measurement summarizer', () => {
         actionCount: 1000000,
         actionCounts: { broken: 1000000 },
         categoryCounts: { other: 1000000 },
-        fuseki: { requestCount: 1000000 },
+        fuseki: { requestCount: 1000000, pathCounts: { '/$/datasets/broken': 1000000 } },
         errors: [{ source: 'detached-local-delivery', message: 'failed sample' }]
       });
     }
@@ -123,5 +142,7 @@ describe('APDM Phase 8 measurement summarizer', () => {
     expect(summary.historicalTopLevelModel.status).toBe('ready-for-reconciliation');
     expect(summary.cases[100].successfulSamples).toBe(1);
     expect(summary.cases[100].failedSamples).toBe(1);
+    expect(summary.cases[100].fusekiPathCounts['/$/datasets/alice']).toBe(100);
+    expect(summary.cases[100].fusekiPathCounts['/$/datasets/broken']).toBeUndefined();
   });
 });
