@@ -9,10 +9,13 @@ const {
 } = require('../scripts/patch-semapps-activitypub-local-delivery');
 const {
   PHASE9_CONCURRENCY_MARKER,
+  PHASE9_C4_DEFAULT_MARKER,
   LOCAL_DELIVERY_CONCURRENCY_ENV,
   DEFAULT_LOCAL_DELIVERY_CONCURRENCY,
   INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK,
   MAX_LOCAL_DELIVERY_CONCURRENCY,
+  LEGACY_PHASE9_CONCURRENCY_BLOCK,
+  PROMOTED_PHASE9_CONCURRENCY_BLOCK,
   resolveLocalDeliveryConcurrency,
   patchPhase9OutboxSource
 } = require('../scripts/patch-semapps-activitypub-local-delivery-phase9');
@@ -130,21 +133,51 @@ describe('APDM Phase 9 bounded local delivery concurrency', () => {
     );
   });
 
-  test('patch layers on reviewed Phase 7/8 source, preserves bounded workers and embeds rollout defaults', () => {
+  test('fresh patch layers on reviewed Phase 7/8 source and embeds c4 promotion marker', () => {
     const predecessor = patchOutboxSource(representativeOutboxSource());
     const once = patchPhase9OutboxSource(predecessor.source);
     const twice = patchPhase9OutboxSource(once.source);
 
     expect(once.changed).toBe(true);
     expect(once.source).toContain(PHASE9_CONCURRENCY_MARKER);
-    expect(once.source).toContain(`? ${DEFAULT_LOCAL_DELIVERY_CONCURRENCY}`);
-    expect(once.source).toContain(`: ${INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK};`);
+    expect(once.source).toContain(PHASE9_C4_DEFAULT_MARKER);
+    expect(once.source).toContain(PROMOTED_PHASE9_CONCURRENCY_BLOCK);
     expect(once.source).toContain('const workerCount = Math.min(localDeliveryConcurrency, recipients.length);');
     expect(once.source).toContain('await Promise.all(workers);');
     expect(once.source).not.toContain('Promise.all(recipients.map');
     expect(once.source).toContain('successResults[recipientIndex] = recipientUri;');
     expect(once.source).toContain('failureResults[recipientIndex] = recipientUri;');
     expect(twice).toEqual({ source: once.source, changed: false });
+  });
+
+  test('existing reviewed c1 Phase 9 artifact migrates exactly once to the c4 default', () => {
+    const predecessor = patchOutboxSource(representativeOutboxSource());
+    const freshPromoted = patchPhase9OutboxSource(predecessor.source).source;
+    const legacy = freshPromoted.replace(PROMOTED_PHASE9_CONCURRENCY_BLOCK, LEGACY_PHASE9_CONCURRENCY_BLOCK);
+
+    expect(legacy).toContain(PHASE9_CONCURRENCY_MARKER);
+    expect(legacy).not.toContain(PHASE9_C4_DEFAULT_MARKER);
+    expect(legacy).toContain(LEGACY_PHASE9_CONCURRENCY_BLOCK);
+
+    const migrated = patchPhase9OutboxSource(legacy);
+    expect(migrated.changed).toBe(true);
+    expect(migrated.source).toContain(PHASE9_C4_DEFAULT_MARKER);
+    expect(migrated.source).toContain(PROMOTED_PHASE9_CONCURRENCY_BLOCK);
+    expect(migrated.source).not.toContain(LEGACY_PHASE9_CONCURRENCY_BLOCK);
+    expect(patchPhase9OutboxSource(migrated.source)).toEqual({ source: migrated.source, changed: false });
+  });
+
+  test('existing Phase 9 marker with drifted worker shape fails closed instead of partial migration', () => {
+    const predecessor = patchOutboxSource(representativeOutboxSource());
+    const freshPromoted = patchPhase9OutboxSource(predecessor.source).source;
+    const legacy = freshPromoted
+      .replace(PROMOTED_PHASE9_CONCURRENCY_BLOCK, LEGACY_PHASE9_CONCURRENCY_BLOCK)
+      .replace(
+        'const workerCount = Math.min(localDeliveryConcurrency, recipients.length);',
+        'const workerCount = recipients.length;'
+      );
+
+    expect(() => patchPhase9OutboxSource(legacy)).toThrow('unsupported worker shape');
   });
 
   test('production image supplies both patchers before dependency installation', () => {
@@ -157,9 +190,10 @@ describe('APDM Phase 9 bounded local delivery concurrency', () => {
     expect(install).toBeGreaterThan(p9);
   });
 
-  test('installed pinned SemApps artifact contains Phase 9 marker and measured/fail-safe constants', () => {
+  test('installed pinned SemApps artifact contains promoted Phase 9 marker and fail-safe constants', () => {
     const source = fs.readFileSync(locateOutboxSource(findPackageRoot()), 'utf8');
     expect(source).toContain(PHASE9_CONCURRENCY_MARKER);
+    expect(source).toContain(PHASE9_C4_DEFAULT_MARKER);
     expect(source).toContain(`? ${DEFAULT_LOCAL_DELIVERY_CONCURRENCY}`);
     expect(source).toContain(`: ${INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK};`);
   });
