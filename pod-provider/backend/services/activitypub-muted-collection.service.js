@@ -225,10 +225,7 @@ module.exports = {
           item: followerUri
         });
 
-        const ownerActor = await ctx.call('activitypub.actor.get', {
-          actorUri: ownerActorUri,
-          webId: ownerActorUri
-        });
+        const ownerActor = await this.getLocalActor(ctx, ownerActorUri);
         if (!ownerActor?.outbox) {
           this.logger.warn('[muted] unable to accept muted-collection follow because owner outbox is missing', {
             ownerActorUri,
@@ -342,6 +339,14 @@ module.exports = {
       }
       return dataset;
     },
+    async getLocalActor(ctx, actorUri, dataset) {
+      const resolvedDataset = dataset || (await this.resolveActorDataset(ctx, actorUri));
+      return ctx.call(
+        'activitypub.actor.get',
+        { actorUri, webId: actorUri },
+        { meta: { dataset: resolvedDataset } }
+      );
+    },
     async runMatcher(matcher, activity, fetcher) {
       if (typeof matcher === 'function') {
         return matcher(activity, fetcher);
@@ -451,8 +456,8 @@ module.exports = {
         processor[PATCHED_PROCESSOR_FLAG] = true;
       }
     },
-    async resolveMutedCollectionUri(ctx, actorUri) {
-      const actor = await ctx.call('activitypub.actor.get', { actorUri, webId: actorUri });
+    async resolveMutedCollectionUri(ctx, actorUri, dataset) {
+      const actor = await this.getLocalActor(ctx, actorUri, dataset);
       if (!actor || typeof actor !== 'object') return null;
 
       return (
@@ -474,7 +479,7 @@ module.exports = {
         { meta: { webId: actorUri, dataset } }
       );
 
-      const mutedCollectionUri = (await this.resolveMutedCollectionUri(ctx, actorUri)) || `${actorUri}/muted`;
+      const mutedCollectionUri = (await this.resolveMutedCollectionUri(ctx, actorUri, dataset)) || `${actorUri}/muted`;
       await this.ensureCollectionMetadata(ctx, mutedCollectionUri, actorUri, MUTED_OF_PREDICATE, dataset);
 
       const mutedState = await this.getMutedCollectionSharingStateByCollectionUri(ctx, mutedCollectionUri, dataset);

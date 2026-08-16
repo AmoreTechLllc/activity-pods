@@ -7,8 +7,10 @@ const EXPECTED_PACKAGE = '@semapps/activitypub';
 const EXPECTED_VERSION = '1.1.4';
 const PATCH_MARKER = 'APDM-P7_LOCAL_RECIPIENT_CONTEXT_REUSE';
 const PHASE8_COMPLETION_MARKER = 'APDM-P8_LOCAL_DELIVERY_COMPLETION_OBSERVER';
+const PHASE8_RESULT_MARKER = 'APDM-P8_LOCAL_DELIVERY_RESULT_OBSERVER';
 const LOCAL_CONTEXT_SYMBOL_KEY = 'semapps-atproto.apdm.local-recipient-contexts';
 const LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY = 'semapps-atproto.apdm-p8.local-delivery-observer';
+const LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY = 'semapps-atproto.apdm-p8.local-delivery-result-observer';
 
 function findPackageRoot() {
   let current = path.dirname(require.resolve(EXPECTED_PACKAGE));
@@ -51,7 +53,12 @@ function isOutboxCandidate(source) {
 function locateOutboxSource(packageRoot) {
   const candidates = walkJavaScriptFiles(packageRoot).filter(file => {
     const source = fs.readFileSync(file, 'utf8');
-    return source.includes(PATCH_MARKER) || source.includes(PHASE8_COMPLETION_MARKER) || isOutboxCandidate(source);
+    return (
+      source.includes(PATCH_MARKER) ||
+      source.includes(PHASE8_COMPLETION_MARKER) ||
+      source.includes(PHASE8_RESULT_MARKER) ||
+      isOutboxCandidate(source)
+    );
   });
 
   if (candidates.length !== 1) {
@@ -136,6 +143,27 @@ function patchOutboxSource(source) {
     changed = true;
   }
 
+  if (!patched.includes(PHASE8_RESULT_MARKER)) {
+    if (!patched.includes(PHASE8_COMPLETION_MARKER)) {
+      throw new Error('[APDM-P8] Phase 8 result seam requires the completion observer patch');
+    }
+
+    patched = replaceExactlyOnce(
+      patched,
+      `      const phase8LocalDeliveryObserver = globalThis[Symbol.for('${LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY}')]; // ${PHASE8_COMPLETION_MARKER}\n`,
+      `      const phase8LocalDeliveryObserver = globalThis[Symbol.for('${LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY}')]; // ${PHASE8_COMPLETION_MARKER}\n      const phase8LocalDeliveryResultObserver = globalThis[Symbol.for('${LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY}')]; // ${PHASE8_RESULT_MARKER}\n`,
+      'Phase 8 result observer declaration'
+    );
+
+    patched = replaceExactlyOnce(
+      patched,
+      '      return { success, failures };\n      } catch (error) {',
+      `      const phase8LocalDeliveryResult = { success, failures };\n      if (typeof phase8LocalDeliveryResultObserver === 'function') {\n        try {\n          phase8LocalDeliveryResultObserver(activityToPost, phase8LocalDeliveryResult);\n        } catch (_instrumentationError) {\n          // APDM measurement hooks must never affect local delivery.\n        }\n      }\n      return phase8LocalDeliveryResult;\n      } catch (error) {`,
+      'Phase 8 localPost result observer'
+    );
+    changed = true;
+  }
+
   return { source: patched, changed };
 }
 
@@ -154,7 +182,9 @@ function applyPatch() {
 
   if (result.changed) {
     fs.writeFileSync(outboxFile, result.source, 'utf8');
-    process.stdout.write(`[APDM] Patched ${path.relative(packageRoot, outboxFile)} for Phase 7 context reuse and Phase 8 completion observation\n`);
+    process.stdout.write(
+      `[APDM] Patched ${path.relative(packageRoot, outboxFile)} for Phase 7 context reuse and Phase 8 completion/result observation\n`
+    );
   } else {
     process.stdout.write(`[APDM] ${path.relative(packageRoot, outboxFile)} already patched\n`);
   }
@@ -169,8 +199,10 @@ module.exports = {
   EXPECTED_VERSION,
   PATCH_MARKER,
   PHASE8_COMPLETION_MARKER,
+  PHASE8_RESULT_MARKER,
   LOCAL_CONTEXT_SYMBOL_KEY,
   LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY,
+  LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY,
   findPackageRoot,
   locateOutboxSource,
   patchOutboxSource,

@@ -43,15 +43,21 @@ module.exports = {
       const recipient = await ctx.call('activitypub.actor.get', { actorUri: recipientUri });
       const locale = recipient['schema:knowsLanguage'] || 'en';
 
-      const emitter = await ctx.call('activitypub.actor.get', { actorUri: activity.actor, webId: recipientUri });
+      // ActivitiesHandlerMixin may pass a dereferenced actor object to an
+      // onReceive handler. SemApps activitypub.actor.get/getProfile require an
+      // actor URI, so normalize both legal ActivityPub representations before
+      // crossing that service boundary instead of forwarding an object into a
+      // string-validated action.
+      const emitterUri = this.resolveActorUri(activity.actor);
+      const emitter = await ctx.call('activitypub.actor.get', { actorUri: emitterUri, webId: recipientUri });
 
       let emitterProfile = {};
       try {
         emitterProfile = emitter.url
-          ? await ctx.call('activitypub.actor.getProfile', { actorUri: activity.actor, webId: recipientUri })
+          ? await ctx.call('activitypub.actor.getProfile', { actorUri: emitterUri, webId: recipientUri })
           : {};
       } catch (e) {
-        this.logger.warn(`Could not get profile of actor ${activity.actor}`);
+        this.logger.warn(`Could not get profile of actor ${emitterUri}`);
       }
 
       const templateParams = { activity, emitter, emitterProfile, ...rest };
@@ -101,6 +107,14 @@ module.exports = {
     }
   },
   methods: {
+    resolveActorUri(actor) {
+      if (typeof actor === 'string' && actor.length > 0) return actor;
+      if (actor && typeof actor === 'object') {
+        const actorUri = actor.id || actor['@id'];
+        if (typeof actorUri === 'string' && actorUri.length > 0) return actorUri;
+      }
+      throw new Error('Notification activity actor must resolve to an ActivityPub actor URI');
+    },
     async queueMail(ctx, title, payload) {
       payload.template = 'single-mail';
       if (this.createJob) {

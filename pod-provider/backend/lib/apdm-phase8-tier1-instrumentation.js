@@ -11,6 +11,7 @@ const DEFAULT_ROOT_ACTION = 'activitypub.outbox.post';
 const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'apdm-phase8-tier1.jsonl');
 const PATCH_MARKER = Symbol.for('semapps-atproto.apdm-p8.http-probe');
 const LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY = 'semapps-atproto.apdm-p8.local-delivery-observer';
+const LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY = 'semapps-atproto.apdm-p8.local-delivery-result-observer';
 
 function normalizeUrl(value) {
   if (!value) return undefined;
@@ -253,7 +254,10 @@ function createPhase8Tier1Instrumentation(options = {}) {
   }
 
   const observerKey = Symbol.for(LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY);
+  const resultObserverKey = Symbol.for(LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY);
   const previousLocalDeliveryObserver = globalThis[observerKey];
+  const previousLocalDeliveryResultObserver = globalThis[resultObserverKey];
+
   const localDeliveryObserver = (phase, _activity, error) => {
     const trace = storage.getStore();
     if (!trace) return;
@@ -275,7 +279,34 @@ function createPhase8Tier1Instrumentation(options = {}) {
       maybeFinalizeTrace(trace);
     }
   };
+
+  const localDeliveryResultObserver = (_activity, result) => {
+    const trace = storage.getStore();
+    if (!trace || !result) return;
+
+    const successes = Array.isArray(result.success) ? result.success : [];
+    const failures = Array.isArray(result.failures) ? result.failures : [];
+
+    if (failures.length > 0) {
+      trace.errors.push({
+        source: 'detached-local-delivery-partial',
+        failureCount: failures.length,
+        failures: [...failures]
+      });
+    }
+
+    if (Number.isInteger(trace.recipientCount) && trace.recipientCount > 0 && successes.length !== trace.recipientCount) {
+      trace.errors.push({
+        source: 'detached-local-delivery-count-mismatch',
+        expectedRecipientCount: trace.recipientCount,
+        successfulRecipientCount: successes.length,
+        failureCount: failures.length
+      });
+    }
+  };
+
   globalThis[observerKey] = localDeliveryObserver;
+  globalThis[resultObserverKey] = localDeliveryResultObserver;
 
   const middleware = {
     name: 'APDMPhase8Tier1Instrumentation',
@@ -346,6 +377,10 @@ function createPhase8Tier1Instrumentation(options = {}) {
         if (previousLocalDeliveryObserver === undefined) delete globalThis[observerKey];
         else globalThis[observerKey] = previousLocalDeliveryObserver;
       }
+      if (globalThis[resultObserverKey] === localDeliveryResultObserver) {
+        if (previousLocalDeliveryResultObserver === undefined) delete globalThis[resultObserverKey];
+        else globalThis[resultObserverKey] = previousLocalDeliveryResultObserver;
+      }
       storage.disable();
     }
   };
@@ -355,6 +390,7 @@ module.exports = {
   DEFAULT_ROOT_ACTION,
   DEFAULT_OUTPUT,
   LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY,
+  LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY,
   classifyAction,
   createTrace,
   finishTrace,

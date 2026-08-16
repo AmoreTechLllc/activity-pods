@@ -15,7 +15,7 @@ module.exports = {
     jwtPath: path.resolve(__dirname, '../../jwt'),
     accountsDataset: CONFIG.AUTH_ACCOUNTS_DATASET,
     reservedUsernames: CONFIG.AUTH_RESERVED_USER_NAMES,
-    minPasswordLength: 8, // Same as frontend requirement
+    minPasswordLength: 8,
     minUsernameLength: 2,
     webIdSelection: ['nick', 'schema:knowsLanguage'],
     formUrl: CONFIG.FRONTEND_URL ? urlJoin(CONFIG.FRONTEND_URL, 'login') : undefined,
@@ -31,9 +31,6 @@ module.exports = {
     atproto: {
       autoProvisionOnSignup: process.env.APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP !== 'false',
       didMethod: process.env.APODS_ATPROTO_DID_METHOD || 'plc',
-      // Bound on how long signup will wait for the /data/key container to
-      // appear before failing fast. Prevents indefinite hangs if event
-      // listeners crash or are slow to bootstrap pod containers.
       keyContainerWaitTimeoutMs: Number(process.env.APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS || 30_000)
     }
   },
@@ -70,42 +67,32 @@ module.exports = {
         ...this.pickAccountData(rest)
       });
 
-      // Hoisted so the outer catch can reference it for rollback even if
-      // webid.createWebId itself throws.
       let webId = null;
       try {
         const profileData = { nick: accountData.username, email: accountData.email, ...rest };
         webId = await ctx.call('webid.createWebId', this.pickWebIdData(profileData), {
-          meta: {
-            isSignup: true
-          }
+          meta: { isSignup: true }
         });
 
         accountData = await ctx.call('auth.account.attachWebId', { accountUri: accountData['@id'], webId });
-
-        // Emit auth.registered first so event listeners (solid.storage, ldp containers, activitypub actor, etc.)
-        // begin creating the pod storage containers and actor synchronously.
         ctx.emit('auth.registered', { webId, profileData, accountData });
 
         let activityPubProvisioning = null;
         let atprotoProvisioning = null;
-        if (this.settings.atproto.autoProvisionOnSignup) {
-          try {
-            // Wait for the key container (/data/key) before reading the
-            // ActivityPub actor or generating AT keys. The container and actor
-            // are created asynchronously by auth.registered listeners.
-            await this._waitForKeyContainerWithTimeout(ctx, webId);
+        try {
+          await this._waitForKeyContainerWithTimeout(ctx, webId);
 
-            activityPubProvisioning = await ctx.call('activitypub-provisioning.provisionForAccount', {
-              canonicalAccountId: webId,
-              webId,
-              username: accountData.username || username,
-              profile: {
-                displayName: rest?.name || accountData?.username || username,
-                ...(rest?.summary ? { summary: rest.summary } : {})
-              }
-            });
+          activityPubProvisioning = await ctx.call('activitypub-provisioning.provisionForAccount', {
+            canonicalAccountId: webId,
+            webId,
+            username: accountData.username || username,
+            profile: {
+              displayName: rest?.name || accountData?.username || username,
+              ...(rest?.summary ? { summary: rest.summary } : {})
+            }
+          });
 
+          if (this.settings.atproto.autoProvisionOnSignup) {
             atprotoProvisioning = await ctx.call('atproto-provisioning.provisionForAccount', {
               canonicalAccountId: webId,
               webId,
@@ -118,18 +105,18 @@ module.exports = {
                 ...(rest?.summary ? { summary: rest.summary } : {})
               }
             });
-          } catch (e) {
-            this.logger.error(`[Auth] ATProto provisioning failed for ${webId}: ${e.message}`);
-            // Best-effort cleanup of any partial AT artifacts before the
-            // outer catch removes the account. Each step is isolated so a
-            // failure in one does not block the others.
-            await this._cleanupPartialAtprotoArtifacts(ctx, webId);
-            throw new MoleculerError(
-              `ATProto provisioning failed during signup: ${e.message}`,
-              Number.isFinite(Number(e.code)) ? Number(e.code) : 500,
-              e.type || 'ATPROTO_PROVISIONING_FAILED'
-            );
           }
+        } catch (e) {
+          const provisioningStage = this.settings.atproto.autoProvisionOnSignup
+            ? 'ActivityPub/ATProto provisioning'
+            : 'ActivityPub provisioning';
+          this.logger.error(`[Auth] ${provisioningStage} failed for ${webId}: ${e.message}`);
+          await this._cleanupPartialAtprotoArtifacts(ctx, webId);
+          throw new MoleculerError(
+            `${provisioningStage} failed during signup: ${e.message}`,
+            Number.isFinite(Number(e.code)) ? Number(e.code) : 500,
+            e.type || 'ACCOUNT_PROVISIONING_FAILED'
+          );
         }
 
         const token = await ctx.call('auth.jwt.generateServerSignedToken', { payload: { webId } });
@@ -139,10 +126,7 @@ module.exports = {
           webId,
           newUser: true,
           ...(activityPubProvisioning
-            ? {
-                activityPubActorId: activityPubProvisioning.actorId,
-                activityPubHandle: activityPubProvisioning.handle
-              }
+            ? { activityPubActorId: activityPubProvisioning.actorId, activityPubHandle: activityPubProvisioning.handle }
             : {}),
           ...(atprotoProvisioning
             ? {
@@ -154,22 +138,81 @@ module.exports = {
             : {})
         };
       } catch (e) {
-        // Outer rollback covers failures AFTER successful AT provisioning
-        // (e.g. JWT generation). Best-effort, idempotent — safe to call
-        // even when nothing was created.
-        if (webId) {
-          await this._cleanupPartialAtprotoArtifacts(ctx, webId).catch(() => {});
-        }
+        if (webId) await this._cleanupPartialAtprotoArtifacts(ctx, webId).catch(() => {});
         await ctx.call('auth.account.remove', { id: accountData['@id'] });
         throw e;
+      }
+    },
+
+    /**
+     * Authoritative full local Pod/bootstrap completion barrier.
+     * No API route exposes this action. The normal production signup hook and
+     * the Phase 8 fixture runner share it so deferred benchmark provisioning
+     * cannot drift from production completeness semantics.
+     */
+    awaitBootstrapComplete: {
+      params: {
+        webId: { type: 'string' }
+      },
+      async handler(ctx) {
+        const { webId } = ctx.params;
+        const forceCompleteSignupBootstrap = process.env.APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP === 'true';
+        const forcedBootstrapReadinessAttempts = forceCompleteSignupBootstrap
+          ? Math.max(1, Number(process.env.APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP_ATTEMPTS || 1))
+          : 1;
+
+        const isRetryableBootstrapTimeout = error => {
+          const message = String(error?.message || '');
+          return /after\s+30s|still has not been created after\s+30s|timed out waiting/i.test(message);
+        };
+
+        const callBootstrapReadiness = async (actionName, params) => {
+          for (let attempt = 1; attempt <= forcedBootstrapReadinessAttempts; attempt += 1) {
+            try {
+              return await ctx.call(actionName, params);
+            } catch (error) {
+              if (
+                !forceCompleteSignupBootstrap ||
+                !isRetryableBootstrapTimeout(error) ||
+                attempt >= forcedBootstrapReadinessAttempts
+              ) {
+                throw error;
+              }
+              this.logger.warn(
+                `[Auth] Forced signup bootstrap readiness timed out for ${actionName} (${attempt}/${forcedBootstrapReadinessAttempts}); retrying same readiness condition for ${webId}`
+              );
+            }
+          }
+          return undefined;
+        };
+
+        await Promise.all([
+          callBootstrapReadiness('auth-agent.waitForResourceCreation', { webId }),
+          callBootstrapReadiness('agent-registry.waitForResourceCreation', { webId }),
+          callBootstrapReadiness('auth-registry.waitForResourceCreation', { webId }),
+          callBootstrapReadiness('data-registry.waitForResourceCreation', { webId }),
+          callBootstrapReadiness('activitypub.actor.awaitCreateComplete', {
+            actorUri: webId,
+            additionalKeys: [
+              'pim:storage',
+              'pim:preferencesFile',
+              'interop:hasAuthorizationAgent',
+              'interop:hasRegistrySet',
+              'solid:publicTypeIndex'
+            ]
+          })
+        ]);
+
+        await Promise.all([
+          callBootstrapReadiness('data-registry.awaitCreateComplete', { webId }),
+          callBootstrapReadiness('type-indexes.awaitCreateComplete', { webId })
+        ]);
+
+        return { webId, complete: true };
       }
     }
   },
   async started() {
-    // The AuthLocalService mixin registers /auth/signup with toBottom:true (default),
-    // placing it AFTER the LDP catch-all /:username/:slugParts* in moleculer-web's route list.
-    // moleculer-web's addRoute() replaces in-place when names match (ignoring toBottom),
-    // so we must remove the route first, then re-add at position 0 (toBottom:false).
     const { pathname: basePath } = new URL(this.settings.baseUrl);
     await this.broker.call('api.removeRoute', { name: 'auth-signup' });
     await this.broker.call('api.addRoute', {
@@ -183,10 +226,6 @@ module.exports = {
     this.logger.info('[Auth] /auth/signup route promoted above LDP catch-all');
   },
   methods: {
-    /**
-     * Race the key-container poll against a hard timeout. Throws
-     * KEY_CONTAINER_WAIT_TIMEOUT if the container does not appear in time.
-     */
     async _waitForKeyContainerWithTimeout(ctx, webId) {
       const timeoutMs = Math.max(1_000, Number(this.settings.atproto.keyContainerWaitTimeoutMs) || 30_000);
       let timer;
@@ -200,7 +239,6 @@ module.exports = {
             )
           );
         }, timeoutMs);
-        // Allow the process to exit naturally during shutdown.
         if (typeof timer.unref === 'function') timer.unref();
       });
       try {
@@ -210,12 +248,6 @@ module.exports = {
       }
     },
 
-    /**
-     * Best-effort rollback of partial AT artifacts created earlier in the
-     * signup flow. Each step swallows its own errors and logs at warn so
-     * one failure cannot mask the underlying provisioning error or block
-     * account removal in the outer catch.
-     */
     async _cleanupPartialAtprotoArtifacts(ctx, webId) {
       try {
         await ctx.call('identitybindings.remove', { canonicalAccountId: webId });
@@ -232,40 +264,26 @@ module.exports = {
   hooks: {
     after: {
       async signup(ctx, res) {
-        if (process.env.NODE_ENV !== 'production') {
-          return res;
-        }
+        const forceCompleteSignupBootstrap = process.env.APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP === 'true';
+        const deferCompleteSignupBootstrap =
+          process.env.NODE_ENV !== 'production' && process.env.APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP === 'true';
+        if (process.env.NODE_ENV !== 'production' && !forceCompleteSignupBootstrap) return res;
+
+        // Deferral is structurally non-production and additionally requires the
+        // explicit forced-completeness mode. Production always executes the
+        // authoritative barrier in the request lifecycle even if a defer flag
+        // is accidentally present in its environment.
+        if (forceCompleteSignupBootstrap && deferCompleteSignupBootstrap) return res;
 
         const allowIncompleteSignupBootstrap =
-          process.env.SEMAPPS_ALLOW_INCOMPLETE_SIGNUP_BOOTSTRAP === 'true' || process.env.NODE_ENV !== 'production';
-
-        const { webId } = res;
+          !forceCompleteSignupBootstrap &&
+          (process.env.SEMAPPS_ALLOW_INCOMPLETE_SIGNUP_BOOTSTRAP === 'true' || process.env.NODE_ENV !== 'production');
 
         try {
-          await ctx.call('auth-agent.waitForResourceCreation', { webId });
-          await ctx.call('agent-registry.waitForResourceCreation', { webId });
-          await ctx.call('auth-registry.waitForResourceCreation', { webId });
-          await ctx.call('data-registry.waitForResourceCreation', { webId });
-
-          await ctx.call('activitypub.actor.awaitCreateComplete', {
-            actorUri: webId,
-            additionalKeys: [
-              'pim:storage',
-              'pim:preferencesFile',
-              'interop:hasAuthorizationAgent',
-              'interop:hasRegistrySet',
-              'solid:publicTypeIndex'
-            ]
-          });
-
-          // Wait until all data and type registrations are created
-          // This is necessary for the data provider to be able to load all containers
-          await ctx.call('data-registry.awaitCreateComplete', { webId });
-          await ctx.call('type-indexes.awaitCreateComplete', { webId });
+          await ctx.call('auth.awaitBootstrapComplete', { webId: res.webId });
         } catch (e) {
           if (!allowIncompleteSignupBootstrap) throw e;
-
-          this.logger.warn(`[Auth] Continuing signup with incomplete local bootstrap for ${webId}: ${e.message}`);
+          this.logger.warn(`[Auth] Continuing signup with incomplete local bootstrap for ${res.webId}: ${e.message}`);
         }
 
         return res;

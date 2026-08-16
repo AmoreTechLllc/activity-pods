@@ -1,0 +1,68 @@
+services:
+  backend:
+    # Stable tag lets the dedicated workflow load a BuildKit-cached image once
+    # and reuse it for all backend recreations in the canonical matrix.
+    image: apdm-phase8-backend:local
+    environment:
+      # Phase 8 measures ActivityPub local fan-out. Disable only the unrelated
+      # ATProto account projection; Tier 1 Pod/key/ActivityPub bootstrap still
+      # runs during signup. Full Pod/registry completeness is not skipped: the
+      # benchmark runner calls the same auth.awaitBootstrapComplete barrier in
+      # bounded windows before any measurement or backend recreation.
+      APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
+      APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+      APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+
+      # Provisioning 1,001 fully bootstrapped Pod actors is setup, not measured
+      # load. Keep the same readiness conditions but allow more time than the
+      # production defaults while the benchmark fixture is built. The shared
+      # barrier retries only timeout-shaped readiness failures and never skips a
+      # missing registration or retries non-timeout errors.
+      APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'
+      APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP_ATTEMPTS: '3'
+
+      # Signup is intentionally non-replayable. Keep both HTTP deadlines above
+      # the forced-bootstrap convergence window, with the server slightly longer
+      # than the client so the client owns the bounded ambiguous-timeout edge.
+      APDM_P8_SIGNUP_TIMEOUT_MS: '900000'
+      APODS_HTTP_SERVER_TIMEOUT_MS: '960000'
+
+      # Custom ActivityPods services (for example private realtime emission and
+      # viewership history) use the generic REDIS_URL rather than the SemApps
+      # per-purpose Redis settings. Inside Docker, localhost is the backend
+      # container itself, so make their Redis dependency explicit and consistent
+      # with the shared test stack instead of allowing the localhost fallback.
+      REDIS_URL: 'redis://redis:6379'
+
+      # The ActivityPods sliding-window rate limiter consumes the SemApps cache
+      # Redis URL and otherwise falls back to redis://localhost:6379. Give it a
+      # dedicated logical DB in the benchmark stack so signup/check rate limits
+      # use the real Compose Redis without sharing queue/transporter/OIDC state.
+      SEMAPPS_REDIS_CACHE_URL: 'redis://redis:6379/10'
+
+      # Keep the benchmark local-only and suppress the transitional sidecar
+      # observer so unrelated failed HTTP attempts cannot contaminate samples.
+      SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: native
+      SIDECAR_WEBHOOK_URL: ''
+
+      # These values are supplied by the measurement workflow before each
+      # backend recreation. The recipient count is metadata only; the runner
+      # independently validates that the Activity contains exactly N actors.
+      SEMAPPS_APDM_PHASE8_INSTRUMENTATION_ENABLED: '${APDM_P8_ENABLED:-false}'
+      SEMAPPS_APDM_PHASE8_RECIPIENT_COUNT: '${APDM_P8_COUNT:-0}'
+      SEMAPPS_APDM_PHASE8_CASE_LABEL: 'real-local-${APDM_P8_COUNT:-0}'
+      SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT: '/app/backend/measurements/apdm-p8-${APDM_P8_COUNT:-0}.jsonl'
+
+      # Fixture creation is pipelined in bounded windows. Four simultaneous
+      # non-replayable signups cap write pressure; at most 24 actors may have
+      # event-driven Pod bootstrap work outstanding before the runner requires
+      # the exact shared completion barrier, checked eight actors at a time.
+      APDM_P8_RUN_ID: '${APDM_P8_RUN_ID:-local}'
+      APDM_P8_SAMPLES: '${APDM_P8_SAMPLES:-3}'
+      APDM_P8_WARMUPS: '${APDM_P8_WARMUPS:-1}'
+      APDM_P8_PROVISION_CONCURRENCY: '${APDM_P8_PROVISION_CONCURRENCY:-4}'
+      APDM_P8_PROVISION_BATCH_SIZE: '${APDM_P8_PROVISION_BATCH_SIZE:-24}'
+      APDM_P8_BOOTSTRAP_CONCURRENCY: '${APDM_P8_BOOTSTRAP_CONCURRENCY:-8}'
+
+    volumes:
+      - ./measurements:/app/backend/measurements
