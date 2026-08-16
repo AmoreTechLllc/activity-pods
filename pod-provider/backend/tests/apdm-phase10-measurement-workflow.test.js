@@ -33,6 +33,15 @@ describe('APDM Phase 10 real measurement workflow contract', () => {
     expect(source).toContain('node scripts/apdm-phase8-real-measure.js measure');
   });
 
+  test('records matched host and image provenance before comparison', () => {
+    const source = fs.readFileSync(workflowPath, 'utf8');
+    expect(source).toContain('hostCpuModel:');
+    expect(source).toContain('hostCpuCount:');
+    expect(source).toContain('hostTotalMemoryBytes:');
+    expect(source).toContain('backendImageId:');
+    expect(source).toContain('fusekiImageId:');
+  });
+
   test('requires provenance validation before the mechanism comparator', () => {
     const source = fs.readFileSync(workflowPath, 'utf8');
     const validate = source.indexOf('apdm-phase10-validate-environment.js');
@@ -43,11 +52,12 @@ describe('APDM Phase 10 real measurement workflow contract', () => {
     expect(source).toContain('if-no-files-found: error');
   });
 
-  test('shared compose overlay keeps Phase 10 off unless the workflow explicitly enables it', () => {
+  test('shared compose overlay keeps Phase 10 off and exposes the arm only when explicitly supplied', () => {
     const compose = fs.readFileSync(composePath, 'utf8');
     expect(compose).toContain(
       "APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED: '${APDM_P10_DATASET_EXIST_MEMO_ENABLED:-false}'"
     );
+    expect(compose).toContain("APDM_P10_MEASUREMENT_ARM: '${APDM_P10_ARM:-}'");
     expect(compose).toContain("APDM_LOCAL_DELIVERY_CONCURRENCY: '${APDM_P9_CONCURRENCY:-1}'");
   });
 });
