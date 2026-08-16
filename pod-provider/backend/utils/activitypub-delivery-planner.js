@@ -209,7 +209,11 @@ async function resolveRemoteDeliveryTargetWithCache(
   if (!(remoteDeliveryTargets instanceof Map)) return resolveRemoteDeliveryTarget(ctx, actorUri);
 
   if (remoteDeliveryTargets.has(actorUri)) {
-    return normalizeRemoteDeliveryTarget(actorUri, remoteDeliveryTargets.get(actorUri));
+    try {
+      return normalizeRemoteDeliveryTarget(actorUri, remoteDeliveryTargets.get(actorUri));
+    } catch {
+      remoteDeliveryTargets.delete(actorUri);
+    }
   }
 
   const target = await resolveRemoteDeliveryTarget(ctx, actorUri);
