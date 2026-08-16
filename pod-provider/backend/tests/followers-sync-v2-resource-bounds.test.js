@@ -19,7 +19,7 @@ function createContext(candidates) {
     },
     meta: {},
     call: jest.fn(async action => {
-      if (action === 'activitypub.follower-domain-index.getForDomain') return candidates;
+      if (action === 'activitypub.follower-server-base-index.getForServerBaseUri') return candidates;
       throw new Error(`unexpected action ${action}`);
     })
   };
