@@ -16,6 +16,16 @@ const {
 } = require('./activitypub-delivery-plan');
 
 const DEFAULT_TARGET_RESOLUTION_CONCURRENCY = 10;
+const LOCAL_COLLECTION_QUERIES = Object.freeze({
+  inbox: Object.freeze({
+    prefix: 'PREFIX ldp: <http://www.w3.org/ns/ldp#>',
+    predicate: 'ldp:inbox'
+  }),
+  outbox: Object.freeze({
+    prefix: 'PREFIX as: <https://www.w3.org/ns/activitystreams#>',
+    predicate: 'as:outbox'
+  })
+});
 
 function normalizeActorUri(value) {
   if (typeof value === 'string' && value.length > 0) return value;
@@ -70,12 +80,25 @@ function createDeliveryIntentId({ activityId, actorUri, localRecipientUris, remo
   return computeDeliveryPlanIntentId({ activityId, actorUri, localRecipientUris, remoteRecipientUris });
 }
 
-async function resolveLocalInboxUri(ctx, actorUri, dataset) {
-  const query = sanitizeSparqlQuery`
-    PREFIX ldp: <http://www.w3.org/ns/ldp#>
-    SELECT DISTINCT ?inboxUri
+async function resolveLocalActorCollectionUri(ctx, { actorUri, dataset, collection }) {
+  if (typeof actorUri !== 'string' || actorUri.length === 0) {
+    throw new Error(`Local ${collection || 'collection'} resolution requires an actor URI`);
+  }
+  if (typeof dataset !== 'string' || dataset.length === 0) {
+    throw new Error(`Local ${collection || 'collection'} resolution requires a dataset for ${actorUri}`);
+  }
+  if (!Object.prototype.hasOwnProperty.call(LOCAL_COLLECTION_QUERIES, collection)) {
+    throw new Error(`Unsupported local ActivityPub collection predicate ${collection}`);
+  }
+  const querySpec = LOCAL_COLLECTION_QUERIES[collection];
+
+  const bindingName = `${collection}Uri`;
+  const actorIri = sanitizeSparqlQuery`<${actorUri}>`;
+  const query = `
+    ${querySpec.prefix}
+    SELECT DISTINCT ?${bindingName}
     WHERE {
-      <${actorUri}> ldp:inbox ?inboxUri .
+      ${actorIri} ${querySpec.predicate} ?${bindingName} .
     }
     LIMIT 2
   `;
@@ -85,23 +108,31 @@ async function resolveLocalInboxUri(ctx, actorUri, dataset) {
     dataset,
     webId: 'system'
   });
-  const inboxUris = (Array.isArray(rows) ? rows : [])
-    .map(row => row?.inboxUri?.value)
+  const collectionUris = (Array.isArray(rows) ? rows : [])
+    .map(row => row?.[bindingName]?.value)
     .filter(value => typeof value === 'string' && value.length > 0);
 
-  if (inboxUris.length !== 1) {
+  if (collectionUris.length !== 1) {
     throw new Error(
-      inboxUris.length === 0
-        ? `Unable to resolve safe local inbox for ${actorUri}`
-        : `Unable to resolve unambiguous local inbox for ${actorUri}`
+      collectionUris.length === 0
+        ? `Unable to resolve safe local ${collection} for ${actorUri}`
+        : `Unable to resolve unambiguous local ${collection} for ${actorUri}`
     );
   }
 
-  const inboxUri = inboxUris[0];
-  if (!parseDeliveryEndpointUrl(inboxUri)) {
-    throw new Error(`Unable to resolve safe local inbox for ${actorUri}`);
+  const collectionUri = collectionUris[0];
+  if (!parseDeliveryEndpointUrl(collectionUri)) {
+    throw new Error(`Unable to resolve safe local ${collection} for ${actorUri}`);
   }
-  return inboxUri;
+  return collectionUri;
+}
+
+async function resolveLocalInboxUri(ctx, actorUri, dataset) {
+  return resolveLocalActorCollectionUri(ctx, { actorUri, dataset, collection: 'inbox' });
+}
+
+async function resolveLocalOutboxUri(ctx, actorUri, dataset) {
+  return resolveLocalActorCollectionUri(ctx, { actorUri, dataset, collection: 'outbox' });
 }
 
 async function resolveLocalDeliveryTarget(ctx, actorUri, podProvider, preResolvedAccount) {
@@ -274,7 +305,9 @@ module.exports = {
   isFollowersCollectionUri,
   mapWithConcurrency,
   normalizeActorUri,
+  resolveLocalActorCollectionUri,
   resolveLocalDeliveryTarget,
   resolveLocalInboxUri,
+  resolveLocalOutboxUri,
   resolveRemoteDeliveryTarget
 };

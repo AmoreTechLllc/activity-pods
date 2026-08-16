@@ -5,7 +5,11 @@ const Redis = require('ioredis');
 const { MIME_TYPES } = require('@semapps/mime-types');
 const { sanitizeSparqlQuery } = require('@semapps/triplestore');
 const CONFIG = require('../config/config');
-const { buildDeliveryPlanV1, mapWithConcurrency } = require('../utils/activitypub-delivery-planner');
+const {
+  buildDeliveryPlanV1,
+  mapWithConcurrency,
+  resolveLocalOutboxUri
+} = require('../utils/activitypub-delivery-planner');
 
 const ACCOUNT_CURSOR_KEY = 'apdm:delivery-reconciliation:account-keyset:v2';
 const RECONCILIATION_LOCK_KEY = 'apdm:delivery-reconciliation:lock:v1';
@@ -462,6 +466,10 @@ module.exports = {
       return accountsByWebId;
     },
 
+    async resolveLocalOutboxUri(ctx, actorUri, dataset) {
+      return resolveLocalOutboxUri(ctx, actorUri, dataset);
+    },
+
     async listOutboxActivityPage(ctx, { outboxUri, dataset, cursor, limit, cutoffPublished }) {
       const boundedLimit = Math.max(1, Math.min(1000, Math.floor(Number(limit) || 50)));
       if (typeof cutoffPublished !== 'string' || cutoffPublished.length === 0) {
@@ -590,14 +598,7 @@ module.exports = {
       let failures = 0;
 
       try {
-        const outboxUri = await ctx.call(
-          'activitypub.actor.getCollectionUri',
-          { actorUri: account.webId, predicate: 'outbox', webId: 'system' },
-          { meta: { dataset } }
-        );
-        if (typeof outboxUri !== 'string' || outboxUri.length === 0) {
-          return { activitiesScanned, handoffsRequeued, failures: failures + 1 };
-        }
+        const outboxUri = await this.resolveLocalOutboxUri(ctx, account.webId, dataset);
 
         const cutoffMs = Date.now() - Math.max(60000, Number(this.settings.lookbackMs) || 900000);
         const cutoffPublished = new Date(cutoffMs).toISOString();
