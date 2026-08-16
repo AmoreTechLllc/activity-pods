@@ -44,11 +44,18 @@ describe('APDM Phase 10 real measurement workflow contract', () => {
 
   test('requires provenance validation before the mechanism comparator', () => {
     const source = fs.readFileSync(workflowPath, 'utf8');
-    const validate = source.indexOf('apdm-phase10-validate-environment.js');
-    const compare = source.indexOf('apdm-phase10-compare.js');
-    expect(validate).toBeGreaterThan(-1);
-    expect(compare).toBeGreaterThan(validate);
-    expect(source).toContain('apdm-p10-environment-validation.json');
+    const validateStep = source.indexOf('- name: Validate evidence provenance');
+    const compareStep = source.indexOf('- name: Produce Phase 10 comparison');
+
+    expect(validateStep).toBeGreaterThan(-1);
+    expect(compareStep).toBeGreaterThan(validateStep);
+
+    const validationBlock = source.slice(validateStep, compareStep);
+    expect(validationBlock).toContain('apdm-phase10-validate-environment.js');
+    expect(validationBlock).toContain('apdm-p10-environment-validation.json');
+
+    const comparisonBlock = source.slice(compareStep);
+    expect(comparisonBlock).toContain('apdm-phase10-compare.js');
     expect(source).toContain('if-no-files-found: error');
   });
 
