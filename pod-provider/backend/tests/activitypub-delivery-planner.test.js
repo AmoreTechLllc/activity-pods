@@ -52,7 +52,9 @@ describe('APDM Phase 3 authoritative delivery planner', () => {
       async call(action, params, options) {
         calls.push({ action, params, options });
         if (action === 'auth.account.findByWebId') return { username: 'bob' };
-        if (action === 'activitypub.actor.getCollectionUri') return 'https://pods.example/bob/inbox';
+        if (action === 'triplestore.query') {
+          return [{ inboxUri: { value: 'https://pods.example/bob/inbox' } }];
+        }
         if (action === 'activitypub.actor.get') {
           return {
             id: params.actorUri,
@@ -88,11 +90,14 @@ describe('APDM Phase 3 authoritative delivery planner', () => {
     ]);
     expect(plan.remoteRecipients.some(target => target.actorUri.endsWith('/followers'))).toBe(false);
     expect(plan.meta).toEqual({ visibility: 'public', isPublicActivity: true });
-    expect(calls).toContainEqual({
-      action: 'activitypub.actor.getCollectionUri',
-      params: { actorUri: 'https://pods.example/bob', predicate: 'inbox', webId: 'system' },
-      options: { meta: { dataset: 'bob' } }
-    });
+    const localInboxQuery = calls.find(call => call.action === 'triplestore.query');
+    expect(localInboxQuery).toBeDefined();
+    expect(localInboxQuery.params).toEqual(
+      expect.objectContaining({ dataset: 'bob', webId: 'system' })
+    );
+    expect(localInboxQuery.params.query).toContain('<https://pods.example/bob> ldp:inbox ?inboxUri');
+    expect(localInboxQuery.params.query).toMatch(/LIMIT 2/u);
+    expect(calls.some(call => call.action === 'activitypub.actor.getCollectionUri')).toBe(false);
   });
 
   test('followers-only addressing produces concrete remote follower targets, never the collection URI', async () => {
