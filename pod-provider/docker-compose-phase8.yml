@@ -34,6 +34,12 @@ services:
       # with the shared test stack instead of allowing the localhost fallback.
       REDIS_URL: 'redis://redis:6379'
 
+      # The ActivityPods sliding-window rate limiter consumes the SemApps cache
+      # Redis URL and otherwise falls back to redis://localhost:6379. Give it a
+      # dedicated logical DB in the benchmark stack so signup/check rate limits
+      # use the real Compose Redis without sharing queue/transporter/OIDC state.
+      SEMAPPS_REDIS_CACHE_URL: 'redis://redis:6379/10'
+
       # Keep the benchmark local-only and suppress the transitional sidecar
       # observer so unrelated failed HTTP attempts cannot contaminate samples.
       SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: native
