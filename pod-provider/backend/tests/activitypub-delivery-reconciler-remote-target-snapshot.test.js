@@ -97,22 +97,39 @@ test('planner does not cache a failed remote target resolution and can recover o
 });
 
 test.each([
-  [{ actorUri: 'https://remote.example/users/mallory', inboxUrl: `${REMOTE_ACTOR}/inbox` }, /does not match/u],
-  [{ actorUri: REMOTE_ACTOR, inboxUrl: 'javascript:alert(1)' }, /invalid remote inbox/u],
-  [{ actorUri: REMOTE_ACTOR, inboxUrl: `${REMOTE_ACTOR}/inbox`, sharedInboxUrl: 'ftp://remote.example/inbox' }, /invalid remote shared inbox/u]
-])('planner fails closed on poisoned cached remote target %#', async (cached, pattern) => {
+  { actorUri: 'https://remote.example/users/mallory', inboxUrl: `${REMOTE_ACTOR}/inbox` },
+  { actorUri: REMOTE_ACTOR, inboxUrl: 'javascript:alert(1)' },
+  { actorUri: REMOTE_ACTOR, inboxUrl: `${REMOTE_ACTOR}/inbox`, sharedInboxUrl: 'ftp://remote.example/inbox' }
+])('planner evicts poisoned cached remote target %# and refreshes it from actor authority', async cached => {
   const remoteDeliveryTargets = new Map([[REMOTE_ACTOR, cached]]);
-  const ctx = { call: jest.fn() };
-
-  await expect(
-    buildDeliveryPlanV1(ctx, {
-      activity: activity(`${LOCAL_ACTOR}/activities/poisoned`),
-      remoteRecipientUris: [REMOTE_ACTOR],
-      remoteDeliveryTargets
+  const ctx = {
+    call: jest.fn(async (action, params) => {
+      if (action !== 'activitypub.actor.get') throw new Error(`Unexpected call ${action}`);
+      return {
+        id: params.actorUri,
+        inbox: `${params.actorUri}/inbox`,
+        endpoints: { sharedInbox: 'https://remote.example/inbox' }
+      };
     })
-  ).rejects.toThrow(pattern);
+  };
 
-  expect(ctx.call).not.toHaveBeenCalled();
+  const plan = await buildDeliveryPlanV1(ctx, {
+    activity: activity(`${LOCAL_ACTOR}/activities/poisoned`),
+    remoteRecipientUris: [REMOTE_ACTOR],
+    remoteDeliveryTargets
+  });
+
+  expect(ctx.call).toHaveBeenCalledTimes(1);
+  expect(plan.remoteRecipients).toEqual([
+    {
+      actorUri: REMOTE_ACTOR,
+      inboxUrl: `${REMOTE_ACTOR}/inbox`,
+      sharedInboxUrl: 'https://remote.example/inbox',
+      targetDomain: 'remote.example'
+    }
+  ]);
+  expect(remoteDeliveryTargets.get(REMOTE_ACTOR)).toEqual(plan.remoteRecipients[0]);
+  expect(Object.isFrozen(remoteDeliveryTargets.get(REMOTE_ACTOR))).toBe(true);
 });
 
 test('remote target snapshot stops retaining new actors at its configured bound', async () => {
