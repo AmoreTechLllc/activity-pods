@@ -11,7 +11,7 @@ const EMPTY_RESPONSE_BYTES = Buffer.byteLength(JSON.stringify({ followers: [] })
 module.exports = {
   name: 'internal-followers-sync-v2-api',
 
-  dependencies: ['api', 'activitypub.actor', 'activitypub.follower-domain-index', 'auth.account'],
+  dependencies: ['api', 'activitypub.actor', 'activitypub.follower-server-base-index', 'auth.account'],
 
   settings: {
     auth: {
@@ -88,12 +88,11 @@ module.exports = {
           return { followers: [] };
         }
 
-        const domain = new URL(baseUri).hostname.toLowerCase();
-        let hostnameCandidates;
+        let serverBaseCandidates;
         try {
-          hostnameCandidates = await ctx.call('activitypub.follower-domain-index.getForDomain', {
+          serverBaseCandidates = await ctx.call('activitypub.follower-server-base-index.getForServerBaseUri', {
             collectionUri: actor.followers,
-            domain
+            serverBaseUri: baseUri
           });
         } catch (err) {
           this.logger.error('[FollowersSyncV2Api] partial collection projection failed', {
@@ -105,7 +104,7 @@ module.exports = {
           return { error: 'internal_error', message: 'Failed to query follower projection' };
         }
 
-        if (!Array.isArray(hostnameCandidates)) {
+        if (!Array.isArray(serverBaseCandidates)) {
           ctx.meta.$statusCode = 500;
           return { error: 'internal_error', message: 'Follower projection returned invalid data' };
         }
@@ -113,13 +112,13 @@ module.exports = {
         const followers = [];
         const seen = new Set();
         let responseBytes = EMPTY_RESPONSE_BYTES;
-        for (const candidate of hostnameCandidates) {
+        for (const candidate of serverBaseCandidates) {
           const candidateBaseUri = this.serverBaseUriForActor(candidate);
-          if (candidateBaseUri === null) {
+          if (candidateBaseUri === null || candidateBaseUri !== baseUri) {
             ctx.meta.$statusCode = 500;
-            return { error: 'internal_error', message: 'Follower projection returned an invalid actor URI' };
+            return { error: 'internal_error', message: 'Follower projection returned an invalid server-base candidate' };
           }
-          if (candidateBaseUri !== baseUri || seen.has(candidate)) continue;
+          if (seen.has(candidate)) continue;
 
           const encodedCandidateBytes = Buffer.byteLength(JSON.stringify(candidate), 'utf8');
           const nextResponseBytes = responseBytes + encodedCandidateBytes + (followers.length > 0 ? 1 : 0);
@@ -146,7 +145,7 @@ module.exports = {
         this.logger.debug('[FollowersSyncV2Api] getPartialCollection', {
           actorIdentifier,
           baseUri,
-          hostnameCandidateCount: hostnameCandidates.length,
+          serverBaseCandidateCount: serverBaseCandidates.length,
           partialCount: followers.length,
           responseBytes
         });
