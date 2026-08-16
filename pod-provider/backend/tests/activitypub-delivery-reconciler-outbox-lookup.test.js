@@ -4,6 +4,7 @@ process.env.SEMAPPS_AVAILABLE_LOCALES ||= 'en';
 process.env.SEMAPPS_AUTH_RESERVED_USER_NAMES ||= 'admin';
 
 const service = require('../services/activitypub-delivery-reconciler.service');
+const { resolveLocalActorCollectionUri } = require('../utils/activitypub-delivery-planner');
 
 const ACTOR = 'https://pods.example/alice';
 const DATASET = 'alice';
@@ -28,6 +29,19 @@ test('selective outbox lookup queries only the authoritative actor predicate in 
 
   await expect(service.methods.resolveLocalOutboxUri({ call }, ACTOR, DATASET)).resolves.toBe(OUTBOX);
   expect(call).toHaveBeenCalledTimes(1);
+});
+
+test('shared selective collection resolver rejects arbitrary predicate names before Fuseki', async () => {
+  const call = jest.fn();
+
+  await expect(
+    resolveLocalActorCollectionUri(
+      { call },
+      { actorUri: ACTOR, dataset: DATASET, collection: 'privateKeys' }
+    )
+  ).rejects.toThrow(/Unsupported local ActivityPub collection predicate/u);
+
+  expect(call).not.toHaveBeenCalled();
 });
 
 test('selective outbox lookup fails closed for missing or ambiguous persisted outbox triples', async () => {
@@ -76,10 +90,10 @@ test('selective outbox lookup rejects SPARQL injection in actor URI before reach
 });
 
 test.each([
-  [null, DATASET, /local actor URI/u],
-  ['', DATASET, /local actor URI/u],
-  [ACTOR, null, /local dataset/u],
-  [ACTOR, '', /local dataset/u]
+  [null, DATASET, /requires an actor URI/u],
+  ['', DATASET, /requires an actor URI/u],
+  [ACTOR, null, /requires a dataset/u],
+  [ACTOR, '', /requires a dataset/u]
 ])('selective outbox lookup rejects invalid authority inputs', async (actorUri, dataset, pattern) => {
   const call = jest.fn();
 
