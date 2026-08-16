@@ -16,6 +16,7 @@ const {
 } = require('./activitypub-delivery-plan');
 
 const DEFAULT_TARGET_RESOLUTION_CONCURRENCY = 10;
+const DEFAULT_LOCAL_TARGET_CACHE_MAX_ENTRIES = 4096;
 const DEFAULT_REMOTE_TARGET_CACHE_MAX_ENTRIES = 4096;
 const LOCAL_COLLECTION_QUERIES = Object.freeze({
   inbox: Object.freeze({
@@ -136,20 +137,72 @@ async function resolveLocalOutboxUri(ctx, actorUri, dataset) {
   return resolveLocalActorCollectionUri(ctx, { actorUri, dataset, collection: 'outbox' });
 }
 
+function localDatasetForAccount(actorUri, podProvider, account) {
+  if (!account) throw new Error(`Unable to resolve local ActivityPub account for ${actorUri}`);
+  const dataset = podProvider ? account.username : account.username || account.dataset;
+  if (typeof dataset !== 'string' || dataset.length === 0) {
+    throw new Error(`Unable to resolve local dataset for ${actorUri}`);
+  }
+  return dataset;
+}
+
+function normalizeLocalDeliveryTarget(actorUri, dataset, target) {
+  if (
+    !target ||
+    typeof target !== 'object' ||
+    Array.isArray(target) ||
+    target.actorUri !== actorUri ||
+    target.dataset !== dataset
+  ) {
+    throw new Error(`Cached local delivery target does not match ${actorUri} in dataset ${dataset}`);
+  }
+  if (typeof target.inboxUri !== 'string' || !parseDeliveryEndpointUrl(target.inboxUri)) {
+    throw new Error(`Cached local delivery target has invalid inbox for ${actorUri}`);
+  }
+  return { actorUri, dataset, inboxUri: target.inboxUri };
+}
+
 async function resolveLocalDeliveryTarget(ctx, actorUri, podProvider, preResolvedAccount) {
   const account =
     preResolvedAccount === undefined
       ? await ctx.call('auth.account.findByWebId', { webId: actorUri })
       : preResolvedAccount;
-  if (!account) throw new Error(`Unable to resolve local ActivityPub account for ${actorUri}`);
+  const dataset = localDatasetForAccount(actorUri, podProvider, account);
+  const inboxUri = await resolveLocalInboxUri(ctx, actorUri, dataset);
+  return { actorUri, dataset, inboxUri };
+}
 
-  const dataset = podProvider ? account.username : account.username || account.dataset;
-  if (typeof dataset !== 'string' || dataset.length === 0) {
-    throw new Error(`Unable to resolve local dataset for ${actorUri}`);
+async function resolveLocalDeliveryTargetWithCache(
+  ctx,
+  actorUri,
+  podProvider,
+  preResolvedAccount,
+  localDeliveryTargets,
+  maxEntries = DEFAULT_LOCAL_TARGET_CACHE_MAX_ENTRIES
+) {
+  const account =
+    preResolvedAccount === undefined
+      ? await ctx.call('auth.account.findByWebId', { webId: actorUri })
+      : preResolvedAccount;
+  const dataset = localDatasetForAccount(actorUri, podProvider, account);
+
+  if (localDeliveryTargets instanceof Map && localDeliveryTargets.has(actorUri)) {
+    try {
+      return normalizeLocalDeliveryTarget(actorUri, dataset, localDeliveryTargets.get(actorUri));
+    } catch {
+      localDeliveryTargets.delete(actorUri);
+    }
   }
 
   const inboxUri = await resolveLocalInboxUri(ctx, actorUri, dataset);
-  return { actorUri, dataset, inboxUri };
+  const target = { actorUri, dataset, inboxUri };
+  if (localDeliveryTargets instanceof Map) {
+    const boundedMaxEntries = Math.max(0, Math.floor(Number(maxEntries) || 0));
+    if (localDeliveryTargets.size < boundedMaxEntries) {
+      localDeliveryTargets.set(actorUri, Object.freeze({ ...target }));
+    }
+  }
+  return target;
 }
 
 function parseRemoteDeliveryUrl(value, actorUri, label) {
@@ -254,6 +307,7 @@ async function buildDeliveryPlanV1(
     localRecipientUris = [],
     remoteRecipientUris = [],
     localRecipientAccounts,
+    localDeliveryTargets,
     remoteDeliveryTargets,
     podProvider = true,
     concurrency = DEFAULT_TARGET_RESOLUTION_CONCURRENCY
@@ -285,13 +339,14 @@ async function buildDeliveryPlanV1(
     classification: target.classification,
     value:
       target.classification === 'local'
-        ? await resolveLocalDeliveryTarget(
+        ? await resolveLocalDeliveryTargetWithCache(
             ctx,
             target.actor,
             podProvider,
             localRecipientAccounts instanceof Map && localRecipientAccounts.has(target.actor)
               ? localRecipientAccounts.get(target.actor)
-              : undefined
+              : undefined,
+            localDeliveryTargets
           )
         : await resolveRemoteDeliveryTargetWithCache(ctx, target.actor, remoteDeliveryTargets)
   }));
@@ -331,6 +386,7 @@ async function buildDeliveryPlanV1(
 }
 
 module.exports = {
+  DEFAULT_LOCAL_TARGET_CACHE_MAX_ENTRIES,
   DEFAULT_REMOTE_TARGET_CACHE_MAX_ENTRIES,
   DEFAULT_TARGET_RESOLUTION_CONCURRENCY,
   addressValues,
@@ -340,11 +396,14 @@ module.exports = {
   createDeliveryIntentId,
   determineVisibility,
   isFollowersCollectionUri,
+  localDatasetForAccount,
   mapWithConcurrency,
   normalizeActorUri,
+  normalizeLocalDeliveryTarget,
   normalizeRemoteDeliveryTarget,
   resolveLocalActorCollectionUri,
   resolveLocalDeliveryTarget,
+  resolveLocalDeliveryTargetWithCache,
   resolveLocalInboxUri,
   resolveLocalOutboxUri,
   resolveRemoteDeliveryTarget,
