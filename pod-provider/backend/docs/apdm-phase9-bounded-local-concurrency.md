@@ -83,4 +83,6 @@ The hard ceiling remains `32`; higher configured integers clamp to `32`. A futur
 
 ## Phase boundary
 
-Phase 9 is complete once the c4 default promotion passes exact-head CI and is merged. Phase 10 may then measure its dataset-existence memo with both OFF and ON arms at this same selected concurrency. Phase 10 remains fail-closed until its own real evidence gate passes. Phase 11 must not begin before that gate closes.
+Phase 9 is **PASS**. The c4 production-default promotion passed exact-head CI and merged in PR #68 as `5d7f2ff0631402e143000af68c174f8c615a755a`.
+
+Phase 10 therefore measures its fail-closed dataset-existence reuse with both OFF and ON arms at this same c4 baseline. Phase 10 remains open until its real evidence and production-default decision close; Phase 11 must not begin before that gate passes.
