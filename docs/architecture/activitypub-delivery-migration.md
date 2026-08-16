@@ -2,276 +2,252 @@
 
 Program ID: `APDM`
 
-This document is the ActivityPods-specific companion to the authoritative cross-repository ActivityPub Delivery Migration roadmap in `outlaw-dame/mastopod-federation-architecture/docs/activitypub-delivery-migration/`.
+This is the ActivityPods-specific companion to the authoritative cross-repository roadmap in `outlaw-dame/mastopod-federation-architecture/docs/activitypub-delivery-migration/`.
 
-ActivityPods does not maintain an independent phase numbering scheme. ActivityPods slices use `APDM-P<n>-A` and must satisfy the corresponding cross-repo exit gate before dependent work proceeds.
+ActivityPods does not maintain an independent phase numbering scheme. ActivityPods slices use `APDM-P<n>-A`; a checked ActivityPods slice does not override a still-open cross-repo exit gate.
 
-## Why this repo is involved
+## Completion rule
 
-The current ActivityPods backend pins `@semapps/activitypub` 1.1.4 and configures ActivityPub with `podProvider: true`. Ordinary ActivityPub recipient expansion, local fan-out and SemApps native remote dispatch therefore execute inside Tier 1 before the custom Fedify-facing `outbox-emitter` observes `activitypub.outbox.posted`.
+A checked phase below means the APDM **phase exit gate is closed**, not simply that an ActivityPods implementation PR was merged. Empirical phases remain unchecked until their measurement and promotion/rollback decisions are complete.
 
-The migration must change this repo at the delivery-planning boundary. A sidecar-only change cannot safely suppress native SemApps delivery because native jobs are created first.
+## Current program state
 
-## Exact SemApps 1.1.4 baseline
+- [x] `APDM-P0` — baseline and ownership
+- [x] `APDM-P1` — Delivery Plan v1 contract
+- [x] `APDM-P2` — pre-`remotePost` delivery strategy seam
+- [x] `APDM-P3` — authoritative expanded recipient planning
+- [x] `APDM-P4` — durable/idempotent sidecar handoff
+- [x] `APDM-P5` — production Fedify remote-authority cutover
+- [x] `APDM-P6` — transitional duplicate routing retired
+- [x] `APDM-P7` — duplicate local account lookup removed
+- [x] `APDM-P8` — real nested Tier 1 measurement complete
+- [x] `APDM-P9` — bounded local concurrency measured; c4 promoted
+- [ ] `APDM-P10` — measured local metadata round-trip reduction — **IN PROGRESS**
+- [ ] `APDM-P11` — batch-safe local persistence — **BLOCKED by P10**
+- [ ] `APDM-P12` — durable local fan-out/partial-failure recovery
+- [ ] `APDM-P13` — canonical bridge convergence
+- [ ] `APDM-P14` — federation-primary shared-inbox hardening
+- [ ] `APDM-P15` — end-to-end load/fault/interoperability proof
+- [ ] `APDM-P16` — stabilization/migration cleanup
 
-The verified SemApps `middleware-v1.1.4` implementation has the following behavior.
+The authoritative cross-repo `STATUS.md` contains the paired PR/commit/evidence ledger.
 
-### Recipient expansion
+## Why this repo owns the Tier 1 half
 
-`activitypub.activity.getRecipients`:
-
-1. resolves the sending actor;
-2. scans `to`, `bto`, `cc`, and `bcc`;
-3. skips ActivityStreams Public addresses;
-4. when the address equals the sender's local followers collection, loads that collection and appends its individual items;
-5. de-duplicates the expanded recipient list.
-
-This means ordinary follower-addressed posts are expanded inside SemApps before local/remote classification.
-
-### Outbox partition and native remote dispatch
-
-`activitypub.outbox.post`:
-
-1. persists/processes the activity;
-2. calls `activitypub.activity.getRecipients`;
-3. iterates the expanded recipients;
-4. for each local recipient, calls `auth.account.findByWebId` and stores the URI in `localRecipients`;
-5. stores non-local recipients in `remoteRecipients`;
-6. creates a Bull `remotePost` job for every remote recipient;
-7. only after those jobs are created emits `activitypub.outbox.posted` with `{ activity }`;
-8. calls `localPost(localRecipients, activity)` without awaiting it.
-
-The emitted event does not contain the already-expanded recipient list.
-
-### Native `remotePost`
-
-Each native job:
-
-1. resolves the recipient inbox with `activitypub.actor.getCollectionUri`;
-2. serializes the Activity;
-3. obtains HTTP signature headers from `signature.generateSignatureHeaders`;
-4. performs the external HTTP POST;
-5. uses the SemApps queue retry/backoff configuration.
-
-Therefore SemApps is a complete remote federation executor, not merely a planning layer.
-
-### Local fan-out
-
-`localPost` first runs inbox side effects once for the recipient set, then strictly iterates local recipients. In pod-provider mode, each recipient causes these visible calls:
-
-- partition loop: `auth.account.findByWebId`;
-- localPost: `auth.account.findByWebId` again;
-- `activitypub.actor.getCollectionUri`;
-- `activitypub.collection.add`;
-- `ldp.remote.store`;
-- `activitypub.activity.attach`.
-
-That is six visible recipient-specific top-level service calls before nested LDP/WebACL/triplestore work.
-
-For 200 local recipients, the source-counted visible model is approximately `2 + 6*200 = 1,202` calls including the fixed actor/followers resolution terms used in the earlier baseline model. For 1,000 it is approximately `6,002`.
-
-These are source-counted orchestration calls, not a claim that total nested operations equal those numbers. The historical ~8,000-operation estimate for ~200 recipients remains a measurement question scheduled for APDM-P8.
-
-## Fork-specific state before cutover
-
-The custom `pod-provider/backend/services/outbox-emitter.service.js` runs downstream of `activitypub.outbox.posted`. It:
-
-- resolves direct remote delivery targets;
-- filters local actors;
-- supplies known inbox/sharedInbox information to the sidecar;
-- de-duplicates known targets by shared inbox;
-- does not expand the actor's followers collection itself.
-
-Consequences:
-
-- direct remote actors can currently traverse both native SemApps delivery and the sidecar path;
-- ordinary `/followers` addressing still depends on SemApps expansion and cannot safely lose native delivery until the expanded target list is handed to the sidecar;
-- cancelling native Bull jobs after `outbox.posted` is not an accepted migration strategy because the jobs already exist and may race with cancellation.
-
-## ActivityPods authority during APDM
-
-This repo owns:
+ActivityPods pins `@semapps/activitypub` 1.1.4 and configures ActivityPub with `podProvider: true`. Tier 1 owns:
 
 - Activity persistence and ActivityPub side effects;
 - WebID/local actor ownership;
-- recipient expansion;
-- local/remote classification;
-- local Pod account/dataset/inbox metadata;
+- recipient expansion and local/remote classification;
+- local Pod account/dataset/inbox authority;
 - WebACL/LDP/Fuseki semantics;
 - local delivery implementation and optimization;
 - signing/key custody authority;
-- production of the versioned remote Delivery Plan/intent.
+- production of `ap.delivery-plan.v1` for external delivery.
 
-This repo does not own after durable remote handoff:
+After durable external handoff, ActivityPods does **not** own internet-facing federation execution, per-domain rate/concurrency controls, external retry/DLQ execution state, or shared-inbox execution optimization. Those belong to the federation/Fedify sidecar.
 
-- internet-facing HTTP federation execution;
-- remote domain concurrency/rate limits;
-- shared-inbox discovery/dedupe as an execution optimization;
-- external retry/DLQ execution state.
+## Current architecture after Phase 9
 
-Those belong to `outlaw-dame/mastopod-federation-architecture` / Fedify sidecar.
+### External remote delivery
 
-## ActivityPods phase slices
+In production `external` mode:
 
-- `APDM-P0-A` — baseline and ownership documentation only. **Complete.**
-- `APDM-P1-A` — Delivery Plan v1 producer contract and fixtures. **Complete.**
-- `APDM-P2-A` — pre-`remotePost` native/external strategy seam. **Complete.**
-- `APDM-P3-A` — authoritative expanded local/remote target planning. **Complete.**
-- `APDM-P4-A` — durable/idempotent handoff producer. **Complete.**
-- `APDM-P5-A` — guarded external-authority cutover and rollback proof.
-- `APDM-P6-A` — remove transitional duplicate target inference.
-- `APDM-P7-A` — remove duplicate local account lookup.
-- `APDM-P8-A` — nested Tier 1 instrumentation and measured cost model.
-- `APDM-P9-A` — bounded local concurrency.
-- `APDM-P10-A` — batch/coarse-grained local metadata resolution.
-- `APDM-P11-A` — batch-safe persistence optimization with semantic parity.
-- `APDM-P12-A` — durable local recipient state/idempotency and partial-failure recovery.
-- `APDM-P13-A` — route canonical bridge local notifications through the common local-delivery primitive.
-- `APDM-P15-A` — end-to-end load/fault/interoperability proof.
-- `APDM-P16-A` — migration cleanup, compatibility docs and rollback stabilization.
+1. SemApps persists/processes the Activity and still owns local Pod delivery.
+2. ActivityPods intercepts the would-have-been native `remotePost` work before native job creation.
+3. ActivityPods uses authoritative expanded recipient state to build `ap.delivery-plan.v1`.
+4. durable handoff retries until the sidecar accepts the intent.
+5. Fedify/sidecar is the sole external ActivityPub HTTP executor for that request.
+6. user key custody/signing authority remains in ActivityPods.
 
-## Phase 2 implementation — pre-`remotePost` strategy seam
-
-Phase 2 introduced an ActivityPods-owned adapter at `pod-provider/backend/lib/activitypub-service-with-delivery-strategy.js`.
-
-### Why an adapter is required
-
-SemApps 1.1.4 does not expose a configuration flag or public delivery-strategy extension point before `remotePost` job creation. Its top-level ActivityPub service dynamically registers the outbox subservice and mixes the queue implementation directly into it.
-
-ActivityPods therefore recreates only that top-level service-registration layer using the exact SemApps 1.1.4 subservices, while leaving the upstream `OutboxService.actions.post` algorithm itself intact. The ActivityPods adapter replaces only the root `post` action with a strategy wrapper.
-
-This is intentionally narrower than copying or forking the entire SemApps outbox algorithm.
-
-### Exact-version guard
-
-The adapter is pinned to `@semapps/activitypub` 1.1.4. Backend startup/tests fail if a different version is installed.
-
-This protects against a silent SemApps upgrade changing:
-
-- service-registration internals;
-- the outbox action;
-- queue names or payloads;
-- recipient ordering/classification;
-- local delivery semantics.
-
-A SemApps upgrade therefore requires explicit review of this adapter rather than silently inheriting an incompatible deep import.
-
-### Delivery modes and Phase 5 authority
-
-`SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE` accepts:
-
-- `native` — default and rollback mode. Exact SemApps remote job creation continues unchanged.
-- `external` — suppresses SemApps `remotePost` jobs and uses the hardened Delivery Plan + durable sidecar handoff path, but only after one of the explicit authorization states below succeeds.
-
-There are two distinct external authorization states:
-
-1. **Controlled preview** — valid only when `NODE_ENV` is explicitly `test` or `development` and `SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=true`. This is not a production cutover mechanism.
-2. **Phase 5 production authority** — requires `SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER=true`. This requirement also applies when `NODE_ENV` is unset or has an unknown value such as `staging`; unknown environments fail closed rather than inheriting preview authority.
-
-The preview and production-authority flags are mutually exclusive. A production/production-like cutover should therefore use:
-
-```text
-SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=external
-SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=false
-SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER=true
-SEMAPPS_QUEUE_SERVICE_URL=redis://<redis-host>:6379/<queue-db>
-SIDECAR_DELIVERY_HANDOFF_URL=http://fedify-sidecar:8080/webhook/outbox
-SIDECAR_TOKEN=<shared-internal-token>
-```
-
-`SIDECAR_WEBHOOK_URL` is a legacy/transitional sidecar-origin setting and is deliberately not used as the APDM durable handoff fallback. `SIDECAR_DELIVERY_HANDOFF_URL` must name the exact durable acceptance endpoint. External mode also fails closed without the queue service, authenticated handoff token, valid handoff URL, and bounded handoff timeout.
-
-A controlled local/test preview uses:
-
-```text
-NODE_ENV=test
-SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=external
-SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=true
-SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER=false
-```
-
-Unset or unrecognized `NODE_ENV` values never make preview-only external delivery authoritative.
-
-### How external mode suppresses native jobs
-
-The wrapper invokes the exact SemApps outbox `post` handler with an isolated execution context created per request.
-
-Only that request-local context overrides `createJob`:
-
-- `remotePost` jobs are captured instead of enqueued;
-- any non-`remotePost` job is delegated to the real queue implementation;
-- the shared Moleculer service instance is never mutated.
-
-This matters for concurrency: simultaneous posts cannot accidentally borrow one another's temporary queue interception.
-
-After the SemApps handler returns, the adapter validates the captured local/remote recipients, builds the authoritative `ap.delivery-plan.v1`, and awaits the Phase 4 durable Bull handoff enqueuer. Only after that enqueue succeeds does it emit `activitypub.outbox.remote-delivery.handoff-queued` for observability.
-
-The post-enqueue event contains `activity`, `deliveryPlan`, `remoteRecipients`, `localRecipients`, `suppressedNativeRemotePostCount`, `deliveryMode: external`, and `durableHandoffQueued: true`.
-
-The event is not a second delivery path or the durable acceptance mechanism: the Bull handoff is already queued before the event exists.
-
-### Phase 5 production cutover and authority split
-
-When production authority is explicitly enabled, the same already-hardened Phase 2–4 execution seam is used rather than introducing a second delivery path:
-
-1. SemApps still persists/processes the Activity and performs local Pod delivery.
-2. The request-local queue interception captures and suppresses every would-have-been native `remotePost` job.
-3. The authoritative expanded local/remote partition produces `ap.delivery-plan.v1`.
-4. The durable Bull handoff retries until the sidecar durably accepts the intent.
-5. The federation sidecar becomes the sole external ActivityPub HTTP executor for that external-mode request.
-6. User signing/key custody remains in ActivityPods; the sidecar consumes the internal signing boundary rather than taking custody of private keys.
-
-Phase 5 does not remove the native implementation. Native remains a tested rollback path through the later stabilization/cleanup program.
-
-### Rollback
-
-Rollback remains deliberately one switch:
+`native` remains the tested rollback executor:
 
 ```text
 SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=native
 ```
 
-`native` is also the default when the variable is absent. In native mode, stale values of either external opt-in flag are ignored for authority selection; they cannot turn an emergency rollback into a startup outage. Operators should still clean stale flags after service restoration, but doing so is not a prerequisite to restoring SemApps native remote delivery.
+### Local Pod delivery
 
-If the adapter itself must eventually be removed, that is a later stabilization/cleanup decision after the Phase 15/16 gates, not part of the Phase 5 cutover.
+Local fan-out remains the pinned SemApps `localPost()` path. APDM has optimized around that path rather than replacing it:
 
-### Phase 2 exit criteria
+- Phase 7 carries pre-resolved dataset context to remove the second local account lookup;
+- Phase 8 observes real nested Moleculer/Fuseki/LDP/WebACL work and correlates detached completion/failures;
+- Phase 9 layers a bounded worker pool and uses empirically selected default concurrency `4`;
+- Phase 10 is testing scoped reuse of positive dataset-existence authority checks before any deeper persistence changes.
 
-`APDM-P2-A` established the underlying seam with all of the following verified:
+The sidecar is not a replacement for local Pod delivery.
 
-1. native mode delegates to SemApps and creates native `remotePost` work as before;
-2. external preview mode creates **zero** native `remotePost` jobs;
-3. unrelated queue work still delegates normally;
-4. local delivery remains the exact SemApps local path;
-5. simultaneous external-preview requests do not mutate/share queue interception state;
-6. external mode fails closed without an explicit authorization state;
-7. SemApps package drift from 1.1.4 fails fast;
-8. backend CI and relevant tests pass;
-9. no substantive review comments remain.
+## Historical Phase 0 SemApps baseline
 
-### Phase 5 ActivityPods exit criteria
+The verified unoptimized SemApps 1.1.4 baseline remains important as an upstream compatibility reference, but it is **historical APDM baseline**, not a description of current fork behavior after P5–P9.
 
-`APDM-P5-A` is complete only when:
+### Recipient expansion
 
-1. production external authority requires `SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER=true`, including when `NODE_ENV` is unset or unknown;
-2. preview-only external delivery is limited to explicit `test`/`development` runtimes;
-3. production authority and preview cannot be enabled together;
-4. external authority reuses the proven Phase 2–4 path and produces zero native `remotePost` jobs;
-5. the durable Delivery Plan handoff remains the only external execution input;
-6. changing only `SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=native` deterministically restores the native executor;
-7. exact-head backend checks and fresh review are clean;
-8. the paired federation Phase 5 executor/security/interoperability gate is also complete before Phase 5 is declared PASS cross-repository.
+`activitypub.activity.getRecipients`:
+
+1. resolves the sender;
+2. scans `to`, `bto`, `cc`, and `bcc`;
+3. skips ActivityStreams Public;
+4. expands the sender's local followers collection to concrete followers;
+5. de-duplicates the result.
+
+### Historical outbox partition/remote execution
+
+Before APDM interception, `activitypub.outbox.post` partitioned expanded recipients, created one native Bull `remotePost` job for every remote recipient, emitted `activitypub.outbox.posted` only afterward, and launched `localPost()` detached. Native `remotePost` resolved the inbox, signed, and performed the external POST.
+
+That ordering is why a downstream-only `outbox.posted` listener could never safely become remote authority.
+
+### Historical local fan-out
+
+The original pod-provider local path visibly performed, per local recipient:
+
+- partition-time `auth.account.findByWebId`;
+- a second `auth.account.findByWebId` inside `localPost`;
+- `activitypub.actor.getCollectionUri`;
+- `activitypub.collection.add`;
+- `ldp.remote.store`;
+- `activitypub.activity.attach`.
+
+Those six source-visible calls were never a reliable total-work estimate because nested LDP/WebACL/triplestore calls were not counted. Phase 8 replaced that approximation with real measurements.
+
+## Phase evidence in ActivityPods
+
+| Phase | ActivityPods evidence | State |
+|---|---|---|
+| P0 | PR #13 | PASS |
+| P1 | PR #14; hardening #23 | PASS |
+| P2 | PR #15; hardening #22 | PASS |
+| P3 | PR #16; hardening #21 | PASS |
+| P4 | PR #17; replay-horizon hardening PR #25, merge `1e110861256f419fef9d55af1bcca36627814b88` | PASS |
+| P5 | PR #26, merge `427d3d3258382f91355ff08c33cfd40360087d84` | PASS |
+| P6 | PR #27, merge `8f6a1bd244015c58698d92a9b9fd939a602d6b96` | PASS |
+| P7 | PR #28, merge `6d65b2375b9860229dda3d081446f890bfa8699e` | PASS |
+| P8 | PRs #29/#30; #30 merge `e51e5cacd0696e558d7860920025279c9cad22ed` | PASS |
+| P9 | #65 primitive `8684c58ad1d494e60ffcfa15ab19ef1c67cce16c`; #66 evidence `154b40873fec0886c4e2a25e67d6e644fe69ec4c`; #68 c4 promotion `5d7f2ff0631402e143000af68c174f8c615a755a` | PASS |
+| P10 | PR #67 open; real OFF/ON run `31965449687` launched from `1f512cfb192ab469b9684cb17a7e3af2756a3cdb` | IN PROGRESS |
+| P11–P16 | no phase implementation started | BLOCKED / NOT STARTED |
+
+## Phase 4 replay/idempotency hardening
+
+Phase 4's durable handoff contract was later hardened without changing its authority split. ActivityPods PR #25 (`1e110861256f419fef9d55af1bcca36627814b88`) caps automatic producer reconciliation lookback at 48 hours, leaving a 24-hour safety margin inside the existing 72-hour blind-recipient recovery-snapshot lifetime. The paired federation retention hardening keeps completed-delivery proof longer than that producer replay horizon. This prevents an automatically reconstructed deterministic intent from outliving the sidecar evidence used to suppress duplicate remote execution.
+
+## Phase 5 remote-authority contract
+
+`SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE` supports:
+
+- `native` — SemApps remote executor and rollback mode;
+- `external` — suppress native `remotePost` jobs and use the durable Delivery Plan handoff, only when the explicit authorization contract succeeds.
+
+Production external authority requires the Phase 5 cutover state; preview-only external behavior is restricted to controlled non-production runtimes. Missing/ambiguous authority configuration fails closed rather than silently creating a second executor.
+
+The production authority invariant is:
+
+```text
+ActivityPods recipient/signing authority
+        ↓
+ap.delivery-plan.v1 durable handoff
+        ↓
+Fedify sidecar sole external HTTP executor
+```
+
+There is no supported parallel raw-routing authority in external mode after Phase 6.
+
+## Phase 7 closure — request-local dataset reuse
+
+The Phase 7 pinned SemApps patch:
+
+- validates a local account during outbox partition as before;
+- stores the already-resolved dataset in a non-enumerable Symbol-bound Map on the exact in-memory Activity;
+- extracts and deletes that context synchronously at the start of `localPost()`;
+- uses it instead of the duplicate account lookup;
+- preserves the old lookup as fallback for direct/legacy callers;
+- does not serialize the private context or share it across requests;
+- is pinned to `@semapps/activitypub@1.1.4` and fails closed on source/version drift.
+
+Inbox, LDP, WebACL, collection and activity-attachment semantics remain unchanged.
+
+## Phase 8 closure — measured Tier 1 cost
+
+The real-runtime benchmark provisions Pod-backed actors through normal signup/bootstrap and invokes the normal running `activitypub.outbox.post` root. Required cases are N=1/10/100/200/1000.
+
+Representative means from the canonical Phase 8 baseline:
+
+| N | elapsed | nested Moleculer actions | Fuseki HTTP requests | CPU |
+|---:|---:|---:|---:|---:|
+| 1 | 1.354 s | 938 | 318 | 1.559 s |
+| 10 | 2.900 s | 1,465.7 | 586.3 | 2.974 s |
+| 100 | 25.171 s | 6,611.7 | 3,202.3 | 25.084 s |
+| 200 | 50.537 s | 12,286.3 | 6,093.7 | 49.970 s |
+| 1000 | 333.538 s | 57,911.3 | 29,303 | 315.461 s |
+
+Measured slope was roughly `57.02` nested actions and `29.01` Fuseki HTTP requests per additional local recipient. This is the evidence baseline for later local-delivery phases.
+
+Detailed docs:
+
+- `pod-provider/backend/docs/apdm-phase8-tier1-instrumentation.md`
+- `pod-provider/backend/docs/apdm-phase8-real-measurement.md`
+
+## Phase 9 closure — bounded c4 scheduling
+
+Phase 9 uses a fixed-size worker pool over the existing local-recipient body. It never creates one promise per recipient. Physical completion may be concurrent, but `{ success, failures }` is reconstructed in original recipient order.
+
+Canonical run `31956939507` measured c1/c2/c4/c8 with three successful samples at every canonical N and zero failed samples. The original compare step failed only in artifact handling; PR #66 hardened replay/selection and replay `31964215322` selected the smallest qualifying candidate, c4.
+
+At N=100/200/1000, c4 delivered roughly `1.19x`, `1.21x`, and `1.34x` speedups versus c1, with lower measured CPU and near-invariant underlying action/Fuseki work. PR #68 therefore promoted normal unset concurrency to `4`.
+
+Runtime rules:
+
+- unset/normal default: `4`;
+- explicit `1`: serial rollback;
+- valid positive configured values: accepted up to hard ceiling `32`;
+- malformed/zero/negative/whitespace-padded/unsafe explicit values: fail safe to `1`.
+
+Detailed doc: `pod-provider/backend/docs/apdm-phase9-bounded-local-concurrency.md`.
+
+## Phase 10 current gate — metadata round-trip reduction
+
+Phase 8 showed repeated dataset-existence authority checking as a large, safe-looking metadata amplifier. Phase 10 therefore begins with measured metadata round-trip reduction rather than assuming account/inbox batching is the first correct optimization.
+
+ActivityPods PR #67 currently implements a fail-closed positive memo with these boundaries:
+
+- scope is exactly one SemApps `localPost()` async lineage;
+- only strict positive `triplestore.dataset.exist` results are reused;
+- false/error results are never reused;
+- dataset management invalidates before and after mutations;
+- a mutation epoch prevents stale in-flight positives from repopulating the memo;
+- `@semapps/triplestore@1.1.4` existence behavior is compatibility-pinned;
+- real correlated Fuseki `GET /$/datasets/{dataset}` requests are the mechanism signal;
+- configuration remains disabled unless explicitly set to `true`.
+
+Already closed P10 launch gates:
+
+- [x] implementation and adversarial race/scope hardening;
+- [x] rebase on Phase 9 c4 master;
+- [x] frozen exact-head Backend Checks `31965391790` pass at `1f512cfb192ab469b9684cb17a7e3af2756a3cdb`;
+- [x] dedicated OFF/ON c4 measurement run `31965449687` launched from that exact source.
+
+Still required before P10 PASS:
+
+- [ ] both OFF/ON arms complete N=1/10/100/200/1000 with at least three matched successful samples and zero failed samples;
+- [ ] provenance validation passes;
+- [ ] every large case reduces real dataset-registry GETs by at least 50% and lowers total Fuseki HTTP work;
+- [ ] delivery outcomes and Pod/LDP/WebACL semantics remain equivalent;
+- [ ] CPU/heap/latency/resource-comparability evidence is reviewed;
+- [ ] an evidence-backed production-default decision is merged.
+
+Phase 11 must not begin before these boxes close.
+
+## Supporting hardening is not phase completion
+
+This repo includes additional reconciliation, follower-index, selective-resolution, identity, Fuseki, FEP and scalability work outside the direct P0–P10 slices. Those changes can reduce cost or protect APDM invariants, but they are supporting/adjacent work unless a cross-repo phase exit gate explicitly depends on them. They must not be used to check a later phase complete early.
 
 ## Non-negotiable local-delivery rule
 
-The Fedify sidecar is not a replacement for local Pod delivery. Optimizing local fan-out must preserve local trust, dataset, WebACL/LDP and ActivityPods ownership semantics inside Tier 1.
+Optimizing local fan-out must preserve local trust, Pod dataset isolation, WebACL/LDP semantics, collection/activity behavior and ActivityPods ownership inside Tier 1. The remaining sequence is evidence-driven:
 
-The preferred sequence is:
-
-1. remove obvious duplicate resolution;
-2. instrument nested work;
-3. introduce bounded concurrency;
-4. batch metadata reads where safe;
-5. batch persistence only after proving semantic equivalence;
-6. add durable per-recipient recovery/idempotency;
-7. converge internal bridge workflows on the same local delivery primitive.
+1. finish measured safe metadata round-trip reduction (P10);
+2. measure the new baseline;
+3. optimize persistence only with semantic parity (P11);
+4. add durable recipient recovery/idempotency (P12);
+5. converge internal bridge workflows (P13);
+6. complete later federation/load/stabilization gates.
