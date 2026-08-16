@@ -13,15 +13,21 @@ const {
 
 const PHASE9_CONCURRENCY_MARKER = 'APDM-P9_BOUNDED_LOCAL_DELIVERY_CONCURRENCY';
 const LOCAL_DELIVERY_CONCURRENCY_ENV = 'APDM_LOCAL_DELIVERY_CONCURRENCY';
-const DEFAULT_LOCAL_DELIVERY_CONCURRENCY = 1;
+// Canonical APDM Phase 9 run 31956939507 selected c4 under the hardened
+// sustained-speedup/work-drift/CPU gate. Invalid explicit configuration stays
+// serial so a typo can never opt a deployment into parallel delivery.
+const DEFAULT_LOCAL_DELIVERY_CONCURRENCY = 4;
+const INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK = 1;
 const MAX_LOCAL_DELIVERY_CONCURRENCY = 32;
 
 function resolveLocalDeliveryConcurrency(value) {
   if (value === undefined || value === null || value === '') return DEFAULT_LOCAL_DELIVERY_CONCURRENCY;
-  if (typeof value !== 'string' || !/^[1-9]\d*$/u.test(value)) return DEFAULT_LOCAL_DELIVERY_CONCURRENCY;
+  if (typeof value !== 'string' || !/^[1-9]\d*$/u.test(value)) {
+    return INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK;
+  }
 
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) return DEFAULT_LOCAL_DELIVERY_CONCURRENCY;
+  if (!Number.isSafeInteger(parsed) || parsed < 1) return INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK;
   return Math.min(parsed, MAX_LOCAL_DELIVERY_CONCURRENCY);
 }
 
@@ -48,7 +54,7 @@ function patchPhase9OutboxSource(source) {
   patched = replaceExactlyOnce(
     patched,
     '      const success = [];\n      const failures = [];',
-    `      const successResults = new Array(recipients.length); // ${PHASE9_CONCURRENCY_MARKER}\n      const failureResults = new Array(recipients.length);\n      const localDeliveryConcurrencyRaw = process.env.${LOCAL_DELIVERY_CONCURRENCY_ENV};\n      const localDeliveryConcurrencyParsed =\n        typeof localDeliveryConcurrencyRaw === 'string' && /^[1-9]\\d*$/u.test(localDeliveryConcurrencyRaw)\n          ? Number(localDeliveryConcurrencyRaw)\n          : NaN;\n      const localDeliveryConcurrency = Number.isSafeInteger(localDeliveryConcurrencyParsed)\n        ? Math.min(localDeliveryConcurrencyParsed, ${MAX_LOCAL_DELIVERY_CONCURRENCY})\n        : ${DEFAULT_LOCAL_DELIVERY_CONCURRENCY};`,
+    `      const successResults = new Array(recipients.length); // ${PHASE9_CONCURRENCY_MARKER}\n      const failureResults = new Array(recipients.length);\n      const localDeliveryConcurrencyRaw = process.env.${LOCAL_DELIVERY_CONCURRENCY_ENV};\n      const localDeliveryConcurrencyParsed =\n        typeof localDeliveryConcurrencyRaw === 'string' && /^[1-9]\\d*$/u.test(localDeliveryConcurrencyRaw)\n          ? Number(localDeliveryConcurrencyRaw)\n          : NaN;\n      const localDeliveryConcurrency =\n        localDeliveryConcurrencyRaw === undefined || localDeliveryConcurrencyRaw === ''\n          ? ${DEFAULT_LOCAL_DELIVERY_CONCURRENCY}\n          : Number.isSafeInteger(localDeliveryConcurrencyParsed) && localDeliveryConcurrencyParsed >= 1\n            ? Math.min(localDeliveryConcurrencyParsed, ${MAX_LOCAL_DELIVERY_CONCURRENCY})\n            : ${INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK};`,
     'local delivery result arrays'
   );
 
@@ -92,7 +98,7 @@ function applyPatch() {
   if (result.changed) {
     fs.writeFileSync(outboxFile, result.source, 'utf8');
     process.stdout.write(
-      `[APDM-P9] Patched ${outboxFile} with bounded local delivery concurrency (default ${DEFAULT_LOCAL_DELIVERY_CONCURRENCY}, max ${MAX_LOCAL_DELIVERY_CONCURRENCY})\n`
+      `[APDM-P9] Patched ${outboxFile} with bounded local delivery concurrency (default ${DEFAULT_LOCAL_DELIVERY_CONCURRENCY}, invalid fallback ${INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK}, max ${MAX_LOCAL_DELIVERY_CONCURRENCY})\n`
     );
   } else {
     process.stdout.write(`[APDM-P9] ${outboxFile} already patched\n`);
@@ -107,6 +113,7 @@ module.exports = {
   PHASE9_CONCURRENCY_MARKER,
   LOCAL_DELIVERY_CONCURRENCY_ENV,
   DEFAULT_LOCAL_DELIVERY_CONCURRENCY,
+  INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK,
   MAX_LOCAL_DELIVERY_CONCURRENCY,
   resolveLocalDeliveryConcurrency,
   patchPhase9OutboxSource,
