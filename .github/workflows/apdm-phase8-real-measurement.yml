@@ -26,6 +26,8 @@ on:
       - 'pod-provider/backend/scripts/apdm-phase8-summarize.js'
       - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-delivery.js'
       - 'pod-provider/backend/services/core/auth.js'
+      - 'pod-provider/backend/services/core/fep-4adb-outbound.js'
+      - 'pod-provider/backend/services/core/rate-limiter.service.js'
       - 'pod-provider/backend/services/activitypub-blocked-collection.service.js'
       - 'pod-provider/backend/services/activitypub-muted-collection.service.js'
       - 'pod-provider/backend/services/mail-notifications.js'
