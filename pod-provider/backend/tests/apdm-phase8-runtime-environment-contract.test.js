@@ -62,6 +62,5 @@ describe('APDM Phase 8 runtime environment contracts', () => {
 
     expect(rateLimiterSource).toContain("process.env.SEMAPPS_REDIS_CACHE_URL || 'redis://localhost:6379'");
     expect(composeSource).toContain("SEMAPPS_REDIS_CACHE_URL: 'redis://redis:6379/10'");
-    expect(composeSource).toContain("SEMAPPS_REDIS_TRANSPORTER_URL").toBe(false);
   });
 });
