@@ -282,10 +282,11 @@ module.exports = {
       if (!uri) return null;
 
       try {
-        await ctx.call('ldp.remote.store', {
+        const storedResource = await ctx.call('ldp.remote.store', {
           resourceUri: uri,
           webId: webId || 'system'
         });
+        if (storedResource && typeof storedResource === 'object') return storedResource;
       } catch (error) {
         this.logger.debug('[reply-policies] remote store skipped', { resourceUri: uri, error: error.message });
       }
