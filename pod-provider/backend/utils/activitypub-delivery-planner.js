@@ -16,6 +16,7 @@ const {
 } = require('./activitypub-delivery-plan');
 
 const DEFAULT_TARGET_RESOLUTION_CONCURRENCY = 10;
+const DEFAULT_REMOTE_TARGET_CACHE_MAX_ENTRIES = 4096;
 const LOCAL_COLLECTION_QUERIES = Object.freeze({
   inbox: Object.freeze({
     prefix: 'PREFIX ldp: <http://www.w3.org/ns/ldp#>',
@@ -199,7 +200,12 @@ async function resolveRemoteDeliveryTarget(ctx, actorUri) {
   });
 }
 
-async function resolveRemoteDeliveryTargetWithCache(ctx, actorUri, remoteDeliveryTargets) {
+async function resolveRemoteDeliveryTargetWithCache(
+  ctx,
+  actorUri,
+  remoteDeliveryTargets,
+  maxEntries = DEFAULT_REMOTE_TARGET_CACHE_MAX_ENTRIES
+) {
   if (!(remoteDeliveryTargets instanceof Map)) return resolveRemoteDeliveryTarget(ctx, actorUri);
 
   if (remoteDeliveryTargets.has(actorUri)) {
@@ -207,7 +213,10 @@ async function resolveRemoteDeliveryTargetWithCache(ctx, actorUri, remoteDeliver
   }
 
   const target = await resolveRemoteDeliveryTarget(ctx, actorUri);
-  remoteDeliveryTargets.set(actorUri, Object.freeze({ ...target }));
+  const boundedMaxEntries = Math.max(0, Math.floor(Number(maxEntries) || 0));
+  if (remoteDeliveryTargets.size < boundedMaxEntries) {
+    remoteDeliveryTargets.set(actorUri, Object.freeze({ ...target }));
+  }
   return target;
 }
 
@@ -318,6 +327,7 @@ async function buildDeliveryPlanV1(
 }
 
 module.exports = {
+  DEFAULT_REMOTE_TARGET_CACHE_MAX_ENTRIES,
   DEFAULT_TARGET_RESOLUTION_CONCURRENCY,
   addressValues,
   assertConcreteRecipientUris,
