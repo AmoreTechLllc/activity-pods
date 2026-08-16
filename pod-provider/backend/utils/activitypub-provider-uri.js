@@ -55,18 +55,36 @@ function createProviderUriMatcher(baseUri) {
   };
 }
 
-function isProviderOwnedUri(value, baseUri) {
+function cachedProviderMatcher(baseUri) {
   if (baseUri !== cachedBaseUri || typeof cachedMatcher !== 'function') {
     const matcher = createProviderUriMatcher(baseUri);
     cachedBaseUri = baseUri;
     cachedMatcher = matcher;
   }
-  return cachedMatcher(value);
+  return cachedMatcher;
+}
+
+function isProviderOwnedUri(value, baseUri) {
+  return cachedProviderMatcher(baseUri)(value);
+}
+
+function partitionProviderUris(values, baseUri) {
+  const matcher = cachedProviderMatcher(baseUri);
+  const localUris = [];
+  const remoteUris = [];
+
+  for (const value of values || []) {
+    if (matcher(value)) localUris.push(value);
+    else remoteUris.push(value);
+  }
+
+  return { localUris, remoteUris };
 }
 
 module.exports = {
   createProviderUriMatcher,
   isProviderOwnedUri,
   normalizeProviderPath,
-  parseProviderBaseUrl
+  parseProviderBaseUrl,
+  partitionProviderUris
 };
