@@ -5,7 +5,7 @@ const Redis = require('ioredis');
 const { MIME_TYPES } = require('@semapps/mime-types');
 const { sanitizeSparqlQuery } = require('@semapps/triplestore');
 const CONFIG = require('../config/config');
-const { isProviderOwnedUri } = require('../utils/activitypub-provider-uri');
+const { isProviderOwnedUri, partitionProviderUris } = require('../utils/activitypub-provider-uri');
 const {
   buildDeliveryPlanV1,
   mapWithConcurrency,
@@ -621,11 +621,9 @@ module.exports = {
         dataset,
         senderFollowersSnapshot
       );
-      const localCandidateUris = concreteRecipients.filter(recipientUri =>
-        isProviderOwnedUri(recipientUri, this.settings.baseUri)
-      );
-      const remoteRecipientUris = concreteRecipients.filter(recipientUri =>
-        !isProviderOwnedUri(recipientUri, this.settings.baseUri)
+      const { localUris: localCandidateUris, remoteUris: remoteRecipientUris } = partitionProviderUris(
+        concreteRecipients,
+        this.settings.baseUri
       );
       const localRecipientAccounts = await this.findLocalAccountsByWebIds(ctx, localCandidateUris);
       const localRecipientUris = localCandidateUris.filter(recipientUri => localRecipientAccounts.has(recipientUri));
