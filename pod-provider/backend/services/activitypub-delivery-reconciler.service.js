@@ -11,6 +11,9 @@ const ACCOUNT_CURSOR_KEY = 'apdm:delivery-reconciliation:account-keyset:v2';
 const RECONCILIATION_LOCK_KEY = 'apdm:delivery-reconciliation:lock:v1';
 const BLIND_SNAPSHOT_PREFIX = 'apdm:delivery-reconciliation:blind:v1:';
 const BLIND_SNAPSHOT_TTL_SECONDS = 259200;
+const LOCAL_ACCOUNT_BATCH_MAX_COUNT = 250;
+const LOCAL_ACCOUNT_BATCH_MAX_IRI_BYTES = 65536;
+const LOCAL_ACCOUNT_MAX_WEBID_LENGTH = 4096;
 
 function isExternalMode() {
   return String(CONFIG.ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native').trim().toLowerCase() === 'external';
@@ -382,6 +385,81 @@ module.exports = {
       };
     },
 
+    async findLocalAccountsByWebIds(ctx, webIds) {
+      const uniqueWebIds = [...new Set((webIds || []).filter(value => typeof value === 'string' && value.length > 0))];
+      if (uniqueWebIds.length === 0) return new Map();
+
+      const renderedIris = uniqueWebIds.map(webId => {
+        if (webId.length > LOCAL_ACCOUNT_MAX_WEBID_LENGTH) {
+          throw new Error(`Local ActivityPub recipient WebID exceeds ${LOCAL_ACCOUNT_MAX_WEBID_LENGTH} characters`);
+        }
+        return { webId, iri: sanitizeSparqlQuery`<${webId}>` };
+      });
+      const batches = [];
+      let batch = [];
+      let batchBytes = 0;
+      for (const entry of renderedIris) {
+        const entryBytes = Buffer.byteLength(entry.iri, 'utf8') + (batch.length > 0 ? 1 : 0);
+        if (entryBytes > LOCAL_ACCOUNT_BATCH_MAX_IRI_BYTES) {
+          throw new Error('Local ActivityPub recipient WebID exceeds bounded SPARQL payload size');
+        }
+        if (
+          batch.length > 0 &&
+          (batch.length >= LOCAL_ACCOUNT_BATCH_MAX_COUNT || batchBytes + entryBytes > LOCAL_ACCOUNT_BATCH_MAX_IRI_BYTES)
+        ) {
+          batches.push(batch);
+          batch = [];
+          batchBytes = 0;
+        }
+        batch.push(entry);
+        batchBytes += Buffer.byteLength(entry.iri, 'utf8') + (batch.length > 1 ? 1 : 0);
+      }
+      if (batch.length > 0) batches.push(batch);
+
+      const accountsByWebId = new Map();
+      for (const entries of batches) {
+        const values = entries.map(entry => entry.iri).join(' ');
+        const query = `
+          PREFIX semapps: <http://semapps.org/ns/core#>
+          SELECT ?accountUri ?webId ?username
+          WHERE {
+            VALUES ?webId { ${values} }
+            ?accountUri a semapps:AuthAccount ;
+              semapps:webId ?webId ;
+              semapps:username ?username .
+            FILTER NOT EXISTS { ?accountUri semapps:deletedAt ?deletedAt . }
+          }
+        `;
+        const rows = await ctx.call('triplestore.query', {
+          query,
+          accept: MIME_TYPES.JSON,
+          dataset: this.settings.accountsDataset,
+          webId: 'system'
+        });
+        for (const row of Array.isArray(rows) ? rows : []) {
+          const account = {
+            '@id': row?.accountUri?.value,
+            webId: row?.webId?.value,
+            username: row?.username?.value
+          };
+          if (
+            typeof account['@id'] !== 'string' ||
+            typeof account.webId !== 'string' ||
+            typeof account.username !== 'string' ||
+            !uniqueWebIds.includes(account.webId)
+          ) {
+            continue;
+          }
+          const existing = accountsByWebId.get(account.webId);
+          if (existing && (existing['@id'] !== account['@id'] || existing.username !== account.username)) {
+            throw new Error(`Ambiguous local ActivityPub account records for ${account.webId}`);
+          }
+          accountsByWebId.set(account.webId, account);
+        }
+      }
+      return accountsByWebId;
+    },
+
     async listOutboxActivityPage(ctx, { outboxUri, dataset, cursor, limit, cutoffPublished }) {
       const boundedLimit = Math.max(1, Math.min(1000, Math.floor(Number(limit) || 50)));
       if (typeof cutoffPublished !== 'string' || cutoffPublished.length === 0) {
@@ -487,21 +565,10 @@ module.exports = {
         dataset,
         senderFollowersSnapshot
       );
-      const localRecipientUris = [];
-      const localRecipientAccounts = new Map();
-      const remoteRecipientUris = [];
-
-      for (const recipientUri of concreteRecipients) {
-        if (recipientUri.startsWith(this.settings.baseUri)) {
-          const localAccount = await ctx.call('auth.account.findByWebId', { webId: recipientUri });
-          if (localAccount) {
-            localRecipientUris.push(recipientUri);
-            localRecipientAccounts.set(recipientUri, localAccount);
-          }
-        } else {
-          remoteRecipientUris.push(recipientUri);
-        }
-      }
+      const localCandidateUris = concreteRecipients.filter(recipientUri => recipientUri.startsWith(this.settings.baseUri));
+      const remoteRecipientUris = concreteRecipients.filter(recipientUri => !recipientUri.startsWith(this.settings.baseUri));
+      const localRecipientAccounts = await this.findLocalAccountsByWebIds(ctx, localCandidateUris);
+      const localRecipientUris = localCandidateUris.filter(recipientUri => localRecipientAccounts.has(recipientUri));
 
       if (remoteRecipientUris.length === 0) return null;
 
