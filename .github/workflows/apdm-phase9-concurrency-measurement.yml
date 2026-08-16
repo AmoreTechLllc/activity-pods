@@ -80,10 +80,17 @@ jobs:
       - name: Build benchmark backend image
         run: docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml build backend
 
+      # Fixture construction is deliberately invariant across the matrix. Signup
+      # performs real ActivityPub/Pod bootstrap work, so allowing the candidate
+      # local-delivery concurrency to affect provisioning would change the setup
+      # itself and confound the measured comparison. Every candidate therefore
+      # provisions with the production-safe serial setting; the matrix value is
+      # applied only when the measured backend is recreated below.
       - name: Start backend for actor provisioning
         env:
           APDM_P8_ENABLED: 'false'
           APDM_P8_COUNT: '0'
+          APDM_P9_CONCURRENCY: '1'
         run: |
           docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d --no-deps backend
           for attempt in $(seq 1 120); do
@@ -97,14 +104,17 @@ jobs:
         env:
           APDM_P8_ENABLED: 'false'
           APDM_P8_COUNT: '0'
+          APDM_P9_CONCURRENCY: '1'
         shell: bash
         run: |
           set -euo pipefail
           docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
             node scripts/apdm-phase8-real-measure.js provision /app/backend/measurements/apdm-p8-actors.json 1000 \
-            2>&1 | tee measurements/apdm-p9-provision-c${APDM_P9_CONCURRENCY}.log
+            2>&1 | tee measurements/apdm-p9-provision-c${{ matrix.local_concurrency }}.log
 
       - name: Measure 1 10 100 200 1000 recipient matrix
+        env:
+          APDM_P9_CONCURRENCY: '${{ matrix.local_concurrency }}'
         shell: bash
         run: |
           set -euo pipefail
