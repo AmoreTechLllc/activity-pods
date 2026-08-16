@@ -8,7 +8,12 @@ const { retryWithBackoff } = require('../utils/backoff');
 const APODS = 'http://activitypods.org/ns/core#';
 const ENTRY_TYPE = 'apods:FollowerDomainIndexEntry';
 const STATE_TYPE = 'apods:FollowerDomainIndexState';
-const MAX_CONCURRENT_VALIDATIONS = 16;
+const MEMBERSHIP_QUERY_MAX_ITEMS = 500;
+const MEMBERSHIP_VALUES_MAX_CHARS = 64 * 1024;
+const REBUILD_PAGE_SIZE = 500;
+const REBUILD_INSERT_MAX_ITEMS = 250;
+const REBUILD_INSERT_MAX_CHARS = 64 * 1024;
+const MAX_HTTP_URI_LENGTH = 4096;
 
 function sparqlLiteral(value) {
   return JSON.stringify(String(value));
@@ -17,11 +22,12 @@ function sparqlLiteral(value) {
 function normalizeHttpUri(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
-  if (!trimmed || trimmed.length > 4096) return null;
+  if (!trimmed || trimmed.length > MAX_HTTP_URI_LENGTH) return null;
   try {
     const parsed = new URL(trimmed);
     if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return null;
-    return parsed.toString();
+    const normalized = parsed.toString();
+    return normalized.length <= MAX_HTTP_URI_LENGTH ? normalized : null;
   } catch {
     return null;
   }
@@ -45,9 +51,37 @@ function domainForFollower(followerUri) {
   return new URL(normalized).hostname.toLowerCase();
 }
 
+function chunkByRenderedSize(items, render, maxItems, maxChars) {
+  const batches = [];
+  let batch = [];
+  let chars = 0;
+
+  for (const item of items) {
+    const rendered = render(item);
+    const renderedLength = rendered.length + 1;
+    if (batch.length > 0 && (batch.length >= maxItems || chars + renderedLength > maxChars)) {
+      batches.push(batch);
+      batch = [];
+      chars = 0;
+    }
+    batch.push(item);
+    chars += renderedLength;
+  }
+  if (batch.length > 0) batches.push(batch);
+  return batches;
+}
+
+function chunkSparqlIris(items) {
+  return chunkByRenderedSize(
+    items,
+    item => `<${item}>`,
+    MEMBERSHIP_QUERY_MAX_ITEMS,
+    MEMBERSHIP_VALUES_MAX_CHARS
+  );
+}
+
 module.exports = {
   name: 'activitypub.follower-domain-index',
-
   dependencies: ['activitypub.collection', 'triplestore'],
 
   created() {
@@ -57,11 +91,9 @@ module.exports = {
   },
 
   async started() {
-    // Collection mutations and projection updates are separate operations. A
-    // process may die after the authoritative collection write but before the
-    // event projection is updated. Invalidate only the small readiness-marker
-    // set on boot; individual follower collections are lazily reconciled on
-    // their first FEP-8fcf domain query rather than scanning every account.
+    // A projection may have missed a collection mutation while this process was
+    // down. Invalidate only readiness markers; each collection is reconciled
+    // lazily on its first domain lookup instead of scanning every account.
     await this.triUpdate(
       this.broker,
       `
@@ -118,31 +150,23 @@ module.exports = {
         const candidates = (Array.isArray(rows) ? rows : [])
           .map(row => ({
             entry: this.readBinding(row, 'entry'),
-            followerUri: this.readBinding(row, 'followerUri')
+            followerUri: normalizeHttpUri(this.readBinding(row, 'followerUri'))
           }))
           .filter(row => row.entry && row.followerUri);
 
-        // The projection is an acceleration structure, never membership
-        // authority. Exact candidate membership checks are predicate/object ASK
-        // operations and are bounded by the requested domain subset, not by the
-        // actor's full follower population.
+        // The projection is acceleration only. Revalidate its exact candidate
+        // subset against authoritative collection membership in bounded query
+        // batches instead of one collection.includes round trip per follower.
+        const authoritativeMembers = await this.queryAuthoritativeMembers(
+          ctx,
+          collectionUri,
+          [...new Set(candidates.map(candidate => candidate.followerUri))]
+        );
         const valid = [];
         const staleEntries = [];
-        for (let offset = 0; offset < candidates.length; offset += MAX_CONCURRENT_VALIDATIONS) {
-          const batch = candidates.slice(offset, offset + MAX_CONCURRENT_VALIDATIONS);
-          const checked = await Promise.all(
-            batch.map(async candidate => {
-              const included = await ctx.call('activitypub.collection.includes', {
-                collectionUri,
-                itemUri: candidate.followerUri
-              });
-              return { ...candidate, included: included === true };
-            })
-          );
-          for (const candidate of checked) {
-            if (candidate.included) valid.push(candidate.followerUri);
-            else staleEntries.push(candidate.entry);
-          }
+        for (const candidate of candidates) {
+          if (authoritativeMembers.has(candidate.followerUri)) valid.push(candidate.followerUri);
+          else staleEntries.push(candidate.entry);
         }
 
         if (staleEntries.length > 0) {
@@ -159,9 +183,7 @@ module.exports = {
     },
 
     rebuild: {
-      params: {
-        collectionUri: { type: 'string', min: 1 }
-      },
+      params: { collectionUri: { type: 'string', min: 1 } },
       async handler(ctx) {
         const collectionUri = normalizeHttpUri(ctx.params.collectionUri);
         if (!collectionUri) return { rebuilt: false, count: 0 };
@@ -218,6 +240,43 @@ module.exports = {
       );
     },
 
+    async queryAuthoritativeMembers(ctx, collectionUri, followerUris) {
+      if (followerUris.length === 0) return new Set();
+      const dataset = getDatasetFromUri(collectionUri);
+      const authoritativeMembers = new Set();
+
+      for (const batch of chunkSparqlIris(followerUris)) {
+        const values = batch.map(followerUri => `<${followerUri}>`).join(' ');
+        const rows = await retryWithBackoff(
+          () =>
+            ctx.call('triplestore.query', {
+              query: `
+                PREFIX as: <https://www.w3.org/ns/activitystreams#>
+                SELECT DISTINCT ?followerUri
+                WHERE {
+                  VALUES ?followerUri { ${values} }
+                  <${collectionUri}> as:items ?followerUri .
+                }
+              `,
+              dataset,
+              webId: 'system',
+              accept: MIME_TYPES.JSON
+            }),
+          {
+            maxRetries: 2,
+            baseDelayMs: 50,
+            maxDelayMs: 500,
+            retryIf: error => Number(error?.code) === 429 || Number(error?.code) >= 500
+          }
+        );
+        for (const row of Array.isArray(rows) ? rows : []) {
+          const followerUri = normalizeHttpUri(this.readBinding(row, 'followerUri'));
+          if (followerUri) authoritativeMembers.add(followerUri);
+        }
+      }
+      return authoritativeMembers;
+    },
+
     async isReady(ctx, collectionUri) {
       if (this.dirtyCollections.has(collectionUri)) return false;
       const rows = await this.triQuery(
@@ -243,69 +302,137 @@ module.exports = {
       return this.rebuildCollection(ctx, collectionUri);
     },
 
+    async queryFollowerPage(ctx, collectionUri, dataset, cursor) {
+      const cursorFilter = cursor
+        ? `FILTER(STR(?followerUri) > ${sparqlLiteral(cursor)})`
+        : '';
+      return retryWithBackoff(
+        () =>
+          ctx.call('triplestore.query', {
+            query: `
+              PREFIX as: <https://www.w3.org/ns/activitystreams#>
+              SELECT DISTINCT ?followerUri
+              WHERE {
+                <${collectionUri}> as:items ?followerUri .
+                FILTER(isIRI(?followerUri))
+                ${cursorFilter}
+              }
+              ORDER BY STR(?followerUri)
+              LIMIT ${REBUILD_PAGE_SIZE}
+            `,
+            dataset,
+            webId: 'system',
+            accept: MIME_TYPES.JSON
+          }),
+        {
+          maxRetries: 2,
+          baseDelayMs: 50,
+          maxDelayMs: 500,
+          retryIf: error => Number(error?.code) === 429 || Number(error?.code) >= 500
+        }
+      );
+    },
+
+    renderProjectionEntry(collectionUri, followerUri) {
+      const domain = domainForFollower(followerUri);
+      if (!domain) return null;
+      const entryUri = this.entryUri(collectionUri, followerUri);
+      return `<${entryUri}> a ${ENTRY_TYPE} ;\n` +
+        `  apods:collectionUri ${sparqlLiteral(collectionUri)} ;\n` +
+        `  apods:domain ${sparqlLiteral(domain)} ;\n` +
+        `  apods:followerUri ${sparqlLiteral(followerUri)} .`;
+    },
+
+    async clearCollectionProjection(ctx, collectionUri) {
+      const stateUri = this.stateUri(collectionUri);
+      await this.triUpdate(
+        ctx,
+        `
+          PREFIX apods: <${APODS}>
+          DELETE {
+            ?entry ?p ?o .
+            <${stateUri}> ?stateP ?stateO .
+          }
+          WHERE {
+            OPTIONAL {
+              ?entry a ${ENTRY_TYPE} ;
+                     apods:collectionUri ${sparqlLiteral(collectionUri)} ;
+                     ?p ?o .
+            }
+            OPTIONAL { <${stateUri}> ?stateP ?stateO . }
+          }
+        `
+      );
+    },
+
+    async insertProjectionEntries(ctx, collectionUri, followerUris) {
+      const entries = followerUris
+        .map(followerUri => ({ followerUri, block: this.renderProjectionEntry(collectionUri, followerUri) }))
+        .filter(entry => entry.block);
+
+      const batches = chunkByRenderedSize(
+        entries,
+        entry => entry.block,
+        REBUILD_INSERT_MAX_ITEMS,
+        REBUILD_INSERT_MAX_CHARS
+      );
+      for (const batch of batches) {
+        const blocks = batch.map(entry => entry.block).join('\n');
+        await this.triUpdate(
+          ctx,
+          `
+            PREFIX apods: <${APODS}>
+            INSERT DATA {
+              ${blocks}
+            }
+          `
+        );
+      }
+      return entries.length;
+    },
+
     async rebuildCollection(ctx, collectionUri) {
       const active = this.rebuilds.get(collectionUri);
       if (active) return active;
 
       const promise = (async () => {
         const dataset = getDatasetFromUri(collectionUri);
-        const rows = await ctx.call('triplestore.query', {
-          query: `
-            PREFIX as: <https://www.w3.org/ns/activitystreams#>
-            SELECT DISTINCT ?followerUri
-            WHERE {
-              <${collectionUri}> as:items ?followerUri .
-            }
-          `,
-          dataset,
-          webId: 'system',
-          accept: MIME_TYPES.JSON
-        });
-
-        const followers = (Array.isArray(rows) ? rows : [])
-          .map(row => normalizeHttpUri(this.readBinding(row, 'followerUri')))
-          .filter(Boolean);
-
         const stateUri = this.stateUri(collectionUri);
-        const entryBlocks = followers
-          .map(followerUri => {
-            const domain = domainForFollower(followerUri);
-            if (!domain) return null;
-            const entryUri = this.entryUri(collectionUri, followerUri);
-            return `<${entryUri}> a ${ENTRY_TYPE} ;\n` +
-              `  apods:collectionUri ${sparqlLiteral(collectionUri)} ;\n` +
-              `  apods:domain ${sparqlLiteral(domain)} ;\n` +
-              `  apods:followerUri ${sparqlLiteral(followerUri)} .`;
-          })
-          .filter(Boolean)
-          .join('\n');
+        let cursor = null;
+        let projectedCount = 0;
 
-        await this.triUpdate(
-          ctx,
-          `
-            PREFIX apods: <${APODS}>
-            DELETE {
-              ?entry ?p ?o .
-              <${stateUri}> ?stateP ?stateO .
-            }
-            INSERT {
-              ${entryBlocks}
-            }
-            WHERE {
-              OPTIONAL {
-                ?entry a ${ENTRY_TYPE} ;
-                       apods:collectionUri ${sparqlLiteral(collectionUri)} ;
-                       ?p ?o .
-              }
-              OPTIONAL { <${stateUri}> ?stateP ?stateO . }
-            }
-          `
-        );
+        // Always clear old/partially-written projection data first. A failed
+        // rebuild remains dirty and the next attempt restarts from authority,
+        // so partial batches can never be treated as a ready projection.
+        await this.clearCollectionProjection(ctx, collectionUri);
 
-        // Apply mutations that happened after the authoritative snapshot was
-        // read. Event handlers queue while this rebuild promise is registered.
+        for (;;) {
+          const rows = await this.queryFollowerPage(ctx, collectionUri, dataset, cursor);
+          const pageRows = Array.isArray(rows) ? rows : [];
+          if (pageRows.length === 0) break;
+
+          const rawUris = pageRows.map(row => this.readBinding(row, 'followerUri')).filter(Boolean);
+          if (rawUris.length === 0) {
+            throw new Error(`Follower projection page for ${collectionUri} contained no usable cursor binding`);
+          }
+
+          const nextCursor = rawUris[rawUris.length - 1];
+          if (cursor && nextCursor <= cursor) {
+            throw new Error(`Follower projection cursor did not advance for ${collectionUri}`);
+          }
+
+          const followers = rawUris.map(normalizeHttpUri).filter(Boolean);
+          projectedCount += await this.insertProjectionEntries(ctx, collectionUri, followers);
+          cursor = nextCursor;
+
+          if (pageRows.length < REBUILD_PAGE_SIZE) break;
+        }
+
+        // Mutations that arrived after their keyset position was scanned are
+        // queued while the rebuild is registered. Reconcile them before and
+        // immediately after publishing readiness, preserving the projection's
+        // acceleration-only contract.
         await this.drainPendingMutations(ctx, collectionUri);
-
         await this.triUpdate(
           ctx,
           `
@@ -319,13 +446,9 @@ module.exports = {
             WHERE { OPTIONAL { <${stateUri}> ?p ?o . } }
           `
         );
-
-        // Mutations can arrive while the marker write is awaiting Fuseki. They
-        // are still queued because the rebuild remains registered; drain once
-        // more before allowing reads through this process.
         await this.drainPendingMutations(ctx, collectionUri);
         this.dirtyCollections.delete(collectionUri);
-        return followers.length;
+        return projectedCount;
       })();
 
       this.rebuilds.set(collectionUri, promise);
@@ -366,10 +489,7 @@ module.exports = {
 
       let owner;
       try {
-        owner = await ctx.call('activitypub.collection.getOwner', {
-          collectionUri,
-          collectionKey: 'followers'
-        });
+        owner = await ctx.call('activitypub.collection.getOwner', { collectionUri, collectionKey: 'followers' });
       } catch {
         return;
       }
@@ -379,7 +499,6 @@ module.exports = {
         this.queueMutation(collectionUri, { operation, itemUri });
         return;
       }
-
       try {
         await this.applyMutation(ctx, operation, collectionUri, itemUri);
       } catch (error) {
@@ -398,7 +517,6 @@ module.exports = {
         await this.triUpdate(ctx, `DELETE WHERE { <${entryUri}> ?p ?o . }`);
         return;
       }
-
       const domain = domainForFollower(followerUri);
       if (!domain) return;
       await this.triUpdate(
@@ -419,17 +537,19 @@ module.exports = {
 
     async deleteEntries(ctx, entries) {
       if (!entries.length) return;
-      const values = entries.map(entry => `<${entry}>`).join(' ');
-      await this.triUpdate(
-        ctx,
-        `
-          DELETE { ?entry ?p ?o . }
-          WHERE {
-            VALUES ?entry { ${values} }
-            ?entry ?p ?o .
-          }
-        `
-      );
+      for (const batch of chunkSparqlIris(entries)) {
+        const values = batch.map(entry => `<${entry}>`).join(' ');
+        await this.triUpdate(
+          ctx,
+          `
+            DELETE { ?entry ?p ?o . }
+            WHERE {
+              VALUES ?entry { ${values} }
+              ?entry ?p ?o .
+            }
+          `
+        );
+      }
     }
   }
 };
