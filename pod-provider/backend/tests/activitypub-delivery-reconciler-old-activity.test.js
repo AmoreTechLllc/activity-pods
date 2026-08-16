@@ -10,8 +10,15 @@ test('APDM P4 reconciler skips persisted activities outside the lookback window'
   const enqueued = jest.fn();
   const ctx = {
     async call(action, params) {
-      if (action === 'activitypub.actor.getCollectionUri') return 'https://pods.example/alice/outbox';
+      if (action === 'activitypub.actor.getCollectionUri') {
+        throw new Error('heavy actor materialization path must not be used by reconciliation');
+      }
       if (action === 'triplestore.query') {
+        expect(params.dataset).toBe('alice');
+        expect(params.webId).toBe('system');
+        if (params.query.includes('as:outbox ?outboxUri')) {
+          return [{ outboxUri: { value: 'https://pods.example/alice/outbox' } }];
+        }
         return [{
           activityUri: { value: 'https://pods.example/alice/activities/old' },
           published: { value: oldPublished }
@@ -38,6 +45,7 @@ test('APDM P4 reconciler skips persisted activities outside the lookback window'
       lookbackMs: 15 * 60 * 1000,
       maxActivitiesPerAccount: 50
     },
+    resolveLocalOutboxUri: service.methods.resolveLocalOutboxUri,
     reconcileActivity: service.methods.reconcileActivity,
     expandConcreteRecipients: service.methods.expandConcreteRecipients,
     listOutboxActivityPage: service.methods.listOutboxActivityPage,
