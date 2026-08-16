@@ -522,6 +522,46 @@ module.exports = {
       };
     },
 
+    async listSenderFollowerUris(ctx, actorUri, dataset) {
+      const normalizedActorUri = normalizeTrailingSlash(actorUri);
+      if (!normalizedActorUri) throw new Error('Sender follower reconciliation requires an actor URI');
+      if (typeof dataset !== 'string' || dataset.length === 0) {
+        throw new Error(`Sender follower reconciliation requires a dataset for ${actorUri}`);
+      }
+      const collectionUri = `${normalizedActorUri}/followers`;
+      const query = sanitizeSparqlQuery`
+        PREFIX as: <https://www.w3.org/ns/activitystreams#>
+        SELECT DISTINCT ?itemUri
+        WHERE {
+          <${collectionUri}> a as:Collection .
+          OPTIONAL { <${collectionUri}> as:items ?itemUri . }
+        }
+      `;
+      const rows = await ctx.call('triplestore.query', {
+        query,
+        accept: MIME_TYPES.SPARQL_JSON,
+        dataset,
+        webId: actorUri
+      });
+      if (!Array.isArray(rows) || rows.length === 0) {
+        throw new Error(`Unable to resolve sender followers collection ${collectionUri}`);
+      }
+
+      const itemUris = [];
+      for (const row of rows) {
+        if (!row || typeof row !== 'object') {
+          throw new Error(`Malformed sender followers query result for ${collectionUri}`);
+        }
+        if (row.itemUri === undefined) continue;
+        const value = row.itemUri?.value;
+        if (typeof value !== 'string' || value.length === 0) {
+          throw new Error(`Malformed sender follower URI for ${collectionUri}`);
+        }
+        itemUris.push(value);
+      }
+      return [...new Set(itemUris)];
+    },
+
     async expandConcreteRecipients(ctx, activity, recipients, dataset, senderFollowersSnapshot = null) {
       const actorUri = actorUriOf(activity);
       const output = [];
@@ -545,6 +585,12 @@ module.exports = {
         let expanded;
         if (canReuseSnapshot && Array.isArray(senderFollowersSnapshot.items)) {
           expanded = senderFollowersSnapshot.items;
+        } else if (canReuseSnapshot) {
+          expanded = await this.listSenderFollowerUris(ctx, snapshotActorUri, dataset);
+          senderFollowersSnapshot.items = Object.freeze([...expanded]);
+          if (expanded.length === 0) {
+            this.logger.debug?.('ActivityPub reconciliation expanded an empty followers collection', { recipientUri });
+          }
         } else {
           const collection = await ctx.call(
             'activitypub.collection.get',
@@ -552,7 +598,6 @@ module.exports = {
             { meta: { dataset } }
           );
           expanded = collectionItemUris(collection);
-          if (canReuseSnapshot) senderFollowersSnapshot.items = Object.freeze([...expanded]);
           if (expanded.length === 0) {
             this.logger.debug?.('ActivityPub reconciliation expanded an empty followers collection', { recipientUri });
           }

@@ -24,6 +24,7 @@ function createServiceContext(overrides = {}) {
     reconcileAccount: service.methods.reconcileAccount,
     reconcileActivity: service.methods.reconcileActivity,
     expandConcreteRecipients: service.methods.expandConcreteRecipients,
+    listSenderFollowerUris: service.methods.listSenderFollowerUris,
     findLocalAccountsByWebIds: service.methods.findLocalAccountsByWebIds,
     listAccountPage: service.methods.listAccountPage,
     listOutboxActivityPage: service.methods.listOutboxActivityPage,
@@ -92,6 +93,16 @@ function createContext({ includeRemote = true, unresolvedFollowers = false } = {
             return [{ inboxUri: { value: 'https://pods.example/bob/inbox' } }];
           }
           expect(params.dataset).toBe('alice');
+          if (
+            params.query.includes('<https://pods.example/alice/followers> a as:Collection') &&
+            params.query.includes('as:items ?itemUri')
+          ) {
+            expect(params.webId).toBe('https://pods.example/alice');
+            return [
+              { itemUri: { value: 'https://pods.example/bob' } },
+              { itemUri: { value: 'https://remote.example/users/carol' } }
+            ];
+          }
           expect(params.webId).toBe('system');
           if (params.query.includes('as:outbox ?outboxUri')) {
             expect(params.query).toContain('<https://pods.example/alice> as:outbox ?outboxUri');
