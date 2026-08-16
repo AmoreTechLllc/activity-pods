@@ -40,7 +40,7 @@ Workstreams:
 
 The Fedify sidecar does not replace local Pod delivery. Local fan-out remains inside ActivityPods/SemApps because that is where Pod, dataset, WebACL, LDP, collection, and activity-attachment authority lives.
 
-## 2. Remote ActivityPub delivery previously duplicated routing and execution work
+### 2. Remote ActivityPub delivery previously duplicated routing and execution work
 
 Before APDM cutover, SemApps could create native `remotePost` jobs while the custom downstream emitter separately reconstructed remote targets for the sidecar. This created two routing/execution paths, duplicate actor/inbox resolution, and the risk of duplicate federation.
 
@@ -55,7 +55,7 @@ APDM resolves the architecture before optimizing it:
 
 This reduces duplicate work and makes later remote scaling—shared-inbox collapse, per-domain concurrency, retry/DLQ, FEP support, and queue batching—safe because there is one execution authority.
 
-## 3. Provider-wide scans make work scale with every account even when only a page or one account is needed
+### 3. Provider-wide scans make work scale with every account even when only a page or one account is needed
 
 Several paths historically materialized broad provider state in Node or asked Fuseki for more state than the caller needed.
 
@@ -64,11 +64,11 @@ Examples already addressed:
 - PR #49 replaces reconciliation account population materialization with a bounded settings-dataset keyset query;
 - PR #41 keyset-pages the identity change feed and performs authoritative LDP reads only for the selected page;
 - PRs #42/#43 turn blocked/muted legacy collection bootstrap into one-time provider migrations, so normal warm startup becomes O(1) with respect to account count after migration completion;
-- PR #32/37 replace exact DID/handle population scans with selective predicate/object lookups plus authoritative LDP verification.
+- PRs #32/#37 replace exact DID/handle population scans with selective predicate/object lookups plus authoritative LDP verification.
 
 General rule: a request for one item or one page must not silently materialize the entire provider population in application memory.
 
-## 4. OFFSET and post-query filtering make later pages increasingly expensive
+### 4. OFFSET and post-query filtering make later pages increasingly expensive
 
 OFFSET can force Fuseki/TDB2 to walk and discard prior rows. Application-side filtering can also transfer a large superset and then throw most of it away.
 
@@ -80,7 +80,7 @@ Examples:
 
 The preferred pagination contract is stable keyset/range paging over authoritative indexed fields, with deterministic tie breakers and bounded result sizes.
 
-## 5. Full collection materialization is especially costly for large follower sets
+### 5. Full collection materialization is especially costly for large follower sets
 
 ActivityPub follower collections can become some of the largest structures owned by a Pod. Materializing every follower to answer a domain-specific or reconciliation question creates cost proportional to total followers even when only a small subset is relevant.
 
@@ -95,7 +95,7 @@ Examples:
 
 Projections are never treated as membership authority. They narrow the candidate set; authoritative Pod membership validates the result.
 
-## 6. Per-item authority checks can create N datastore round trips where bounded batches are safe
+### 6. Per-item authority checks can create N datastore round trips where bounded batches are safe
 
 Some semantics require separate Pod datasets, so not every N can become one query. But operations sharing the same authoritative dataset can often be checked in bounded groups.
 
@@ -108,7 +108,7 @@ Examples:
 
 General rule: batching must follow authority boundaries. We do not collapse data across Pod datasets merely to reduce query count.
 
-## 7. Heavy actor/LDP materialization was being used to read a single persisted property
+### 7. Heavy actor/LDP materialization was being used to read a single persisted property
 
 Several hot paths invoked full actor/resource materialization just to retrieve `ldp:inbox`, `as:outbox`, or another persisted relation. That can traverse remote checks, existence checks, RDF CONSTRUCT, JSON-LD framing, and caches for one scalar value.
 
@@ -121,7 +121,7 @@ Examples:
 
 The optimization reads the authoritative persisted predicate; it does not derive collection URLs from string conventions or introduce a second source of truth.
 
-## 8. Reconciliation can multiply normal delivery costs across accounts × history × recipients
+### 8. Reconciliation can multiply normal delivery costs across accounts × history × recipients
 
 Durable external delivery reconciliation is necessary for crash recovery, but an unbounded reconciler can become a provider-wide background load generator.
 
@@ -137,7 +137,7 @@ The current direction bounds every dimension:
 
 The goal is that reconciliation cost scales with the bounded recovery window and selected pages, not with all accounts × all history × all followers.
 
-## 9. Startup migrations must not remain permanent O(total accounts) startup work
+### 9. Startup migrations must not remain permanent O(total accounts) startup work
 
 Compatibility migrations are sometimes population-wide once. They should not become an unconditional cost of every restart.
 
@@ -145,7 +145,7 @@ PRs #42 and #43 use durable provider-level completion markers for blocked/muted 
 
 This pattern should be reused for future one-time provider migrations.
 
-## 10. Identity and ATProto integration must not add provider-population scans
+### 10. Identity and ATProto integration must not add provider-population scans
 
 The parallel ATProto/SemApps integration adds identity bindings and change feeds that can become provider-wide hot paths if implemented as full scans.
 
@@ -158,7 +158,7 @@ Current safeguards include:
 
 The same design rule applies to future ATProto repository/provisioning features: incremental consumers should read bounded changes, not repeatedly enumerate the provider population.
 
-## 11. Fuseki/TDB2 resource usage must be improved by query shape before simply allocating more memory
+### 11. Fuseki/TDB2 resource usage must be improved by query shape before simply allocating more memory
 
 PR #35 exposes deployment-specific `FUSEKI_JVM_ARGS` and low-cost health visibility, but deliberately does not treat heap growth as the primary scalability strategy.
 
@@ -172,7 +172,7 @@ Priority order:
 
 A larger heap cannot repair an O(N) query or an application path that transfers the full provider population unnecessarily.
 
-## 12. Memory, concurrency, queue and response fan-out must stay bounded
+### 12. Memory, concurrency, queue and response fan-out must stay bounded
 
 Performance work must not replace database amplification with memory or scheduler amplification.
 
