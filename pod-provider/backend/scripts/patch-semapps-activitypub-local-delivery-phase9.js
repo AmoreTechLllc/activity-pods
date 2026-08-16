@@ -12,6 +12,7 @@ const {
 } = require('./patch-semapps-activitypub-local-delivery');
 
 const PHASE9_CONCURRENCY_MARKER = 'APDM-P9_BOUNDED_LOCAL_DELIVERY_CONCURRENCY';
+const PHASE9_C4_DEFAULT_MARKER = 'APDM-P9_DEFAULT_LOCAL_DELIVERY_CONCURRENCY_C4';
 const LOCAL_DELIVERY_CONCURRENCY_ENV = 'APDM_LOCAL_DELIVERY_CONCURRENCY';
 // Canonical APDM Phase 9 run 31956939507 selected c4 under the hardened
 // sustained-speedup/work-drift/CPU gate. Invalid explicit configuration stays
@@ -40,8 +41,47 @@ function replaceExactlyOnce(source, searchValue, replacement, label) {
   return source.replace(searchValue, replacement);
 }
 
+const LEGACY_PHASE9_CONCURRENCY_BLOCK = `      const successResults = new Array(recipients.length); // ${PHASE9_CONCURRENCY_MARKER}\n      const failureResults = new Array(recipients.length);\n      const localDeliveryConcurrencyRaw = process.env.${LOCAL_DELIVERY_CONCURRENCY_ENV};\n      const localDeliveryConcurrencyParsed =\n        typeof localDeliveryConcurrencyRaw === 'string' && /^[1-9]\\d*$/u.test(localDeliveryConcurrencyRaw)\n          ? Number(localDeliveryConcurrencyRaw)\n          : NaN;\n      const localDeliveryConcurrency = Number.isSafeInteger(localDeliveryConcurrencyParsed)\n        ? Math.min(localDeliveryConcurrencyParsed, ${MAX_LOCAL_DELIVERY_CONCURRENCY})\n        : 1;`;
+
+const PROMOTED_PHASE9_CONCURRENCY_BLOCK = `      const successResults = new Array(recipients.length); // ${PHASE9_CONCURRENCY_MARKER}; ${PHASE9_C4_DEFAULT_MARKER}\n      const failureResults = new Array(recipients.length);\n      const localDeliveryConcurrencyRaw = process.env.${LOCAL_DELIVERY_CONCURRENCY_ENV};\n      const localDeliveryConcurrencyParsed =\n        typeof localDeliveryConcurrencyRaw === 'string' && /^[1-9]\\d*$/u.test(localDeliveryConcurrencyRaw)\n          ? Number(localDeliveryConcurrencyRaw)\n          : NaN;\n      const localDeliveryConcurrency =\n        localDeliveryConcurrencyRaw === undefined || localDeliveryConcurrencyRaw === ''\n          ? ${DEFAULT_LOCAL_DELIVERY_CONCURRENCY}\n          : Number.isSafeInteger(localDeliveryConcurrencyParsed) && localDeliveryConcurrencyParsed >= 1\n            ? Math.min(localDeliveryConcurrencyParsed, ${MAX_LOCAL_DELIVERY_CONCURRENCY})\n            : ${INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK};`;
+
+function assertPhase9WorkerShape(source) {
+  for (const expected of [
+    'const workerCount = Math.min(localDeliveryConcurrency, recipients.length);',
+    'await Promise.all(workers);',
+    'successResults[recipientIndex] = recipientUri;',
+    'failureResults[recipientIndex] = recipientUri;'
+  ]) {
+    if (!source.includes(expected)) {
+      throw new Error(`[APDM-P9] Existing Phase 9 marker has unsupported worker shape; missing: ${expected}`);
+    }
+  }
+}
+
 function patchPhase9OutboxSource(source) {
-  if (source.includes(PHASE9_CONCURRENCY_MARKER)) return { source, changed: false };
+  if (source.includes(PHASE9_C4_DEFAULT_MARKER)) {
+    if (!source.includes(PHASE9_CONCURRENCY_MARKER)) {
+      throw new Error('[APDM-P9] c4 promotion marker exists without the Phase 9 concurrency marker');
+    }
+    assertPhase9WorkerShape(source);
+    return { source, changed: false };
+  }
+
+  if (source.includes(PHASE9_CONCURRENCY_MARKER)) {
+    for (const marker of [PATCH_MARKER, PHASE8_COMPLETION_MARKER, PHASE8_RESULT_MARKER]) {
+      if (!source.includes(marker)) {
+        throw new Error(`[APDM-P9] Existing Phase 9 artifact is missing predecessor marker ${marker}`);
+      }
+    }
+    assertPhase9WorkerShape(source);
+    const migrated = replaceExactlyOnce(
+      source,
+      LEGACY_PHASE9_CONCURRENCY_BLOCK,
+      PROMOTED_PHASE9_CONCURRENCY_BLOCK,
+      'reviewed Phase 9 c1 concurrency configuration block'
+    );
+    return { source: migrated, changed: true };
+  }
 
   for (const marker of [PATCH_MARKER, PHASE8_COMPLETION_MARKER, PHASE8_RESULT_MARKER]) {
     if (!source.includes(marker)) {
@@ -54,7 +94,7 @@ function patchPhase9OutboxSource(source) {
   patched = replaceExactlyOnce(
     patched,
     '      const success = [];\n      const failures = [];',
-    `      const successResults = new Array(recipients.length); // ${PHASE9_CONCURRENCY_MARKER}\n      const failureResults = new Array(recipients.length);\n      const localDeliveryConcurrencyRaw = process.env.${LOCAL_DELIVERY_CONCURRENCY_ENV};\n      const localDeliveryConcurrencyParsed =\n        typeof localDeliveryConcurrencyRaw === 'string' && /^[1-9]\\d*$/u.test(localDeliveryConcurrencyRaw)\n          ? Number(localDeliveryConcurrencyRaw)\n          : NaN;\n      const localDeliveryConcurrency =\n        localDeliveryConcurrencyRaw === undefined || localDeliveryConcurrencyRaw === ''\n          ? ${DEFAULT_LOCAL_DELIVERY_CONCURRENCY}\n          : Number.isSafeInteger(localDeliveryConcurrencyParsed) && localDeliveryConcurrencyParsed >= 1\n            ? Math.min(localDeliveryConcurrencyParsed, ${MAX_LOCAL_DELIVERY_CONCURRENCY})\n            : ${INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK};`,
+    PROMOTED_PHASE9_CONCURRENCY_BLOCK,
     'local delivery result arrays'
   );
 
@@ -101,7 +141,7 @@ function applyPatch() {
       `[APDM-P9] Patched ${outboxFile} with bounded local delivery concurrency (default ${DEFAULT_LOCAL_DELIVERY_CONCURRENCY}, invalid fallback ${INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK}, max ${MAX_LOCAL_DELIVERY_CONCURRENCY})\n`
     );
   } else {
-    process.stdout.write(`[APDM-P9] ${outboxFile} already patched\n`);
+    process.stdout.write(`[APDM-P9] ${outboxFile} already patched with c4 default\n`);
   }
 
   return { packageRoot, outboxFile, changed: result.changed };
@@ -111,11 +151,15 @@ if (require.main === module) applyPatch();
 
 module.exports = {
   PHASE9_CONCURRENCY_MARKER,
+  PHASE9_C4_DEFAULT_MARKER,
   LOCAL_DELIVERY_CONCURRENCY_ENV,
   DEFAULT_LOCAL_DELIVERY_CONCURRENCY,
   INVALID_LOCAL_DELIVERY_CONCURRENCY_FALLBACK,
   MAX_LOCAL_DELIVERY_CONCURRENCY,
+  LEGACY_PHASE9_CONCURRENCY_BLOCK,
+  PROMOTED_PHASE9_CONCURRENCY_BLOCK,
   resolveLocalDeliveryConcurrency,
+  assertPhase9WorkerShape,
   patchPhase9OutboxSource,
   applyPatch
 };
