@@ -19,6 +19,9 @@ function manifest(overrides = {}) {
     imageOs: 'ubuntu24',
     imageVersion: '20260810.271.1',
     hostNode: 'v22.23.2',
+    hostCpuModel: 'AMD EPYC',
+    hostCpuCount: 4,
+    hostTotalMemoryBytes: 17179869184,
     backendImageId: 'sha256:backend',
     fusekiImageId: 'sha256:fuseki',
     redisImageId: 'sha256:redis',
@@ -29,10 +32,7 @@ function manifest(overrides = {}) {
 
 describe('APDM Phase 10 environment provenance', () => {
   test('accepts matched c4 environments with opposite proven memo arms', () => {
-    const result = validateEnvironment(
-      manifest(),
-      manifest({ arm: 'on', memoEnabled: true })
-    );
+    const result = validateEnvironment(manifest(), manifest({ arm: 'on', memoEnabled: true }));
     expect(result.passed).toBe(true);
     expect(result.failures).toEqual([]);
   });
@@ -55,14 +55,21 @@ describe('APDM Phase 10 environment provenance', () => {
     expect(result.failures.join('\n')).toContain('concurrency 4');
   });
 
-  test('rejects cross-commit or cross-runtime evidence', () => {
+  test('rejects cross-commit runtime or host-hardware evidence', () => {
     const result = validateEnvironment(
       manifest(),
-      manifest({ arm: 'on', memoEnabled: true, commitSha: 'different', fusekiImageId: 'sha256:other' })
+      manifest({
+        arm: 'on',
+        memoEnabled: true,
+        commitSha: 'different',
+        fusekiImageId: 'sha256:other',
+        hostCpuModel: 'Intel Xeon'
+      })
     );
     expect(result.passed).toBe(false);
     expect(result.failures.join('\n')).toContain('commitSha');
     expect(result.failures.join('\n')).toContain('fusekiImageId');
+    expect(result.failures.join('\n')).toContain('hostCpuModel');
   });
 
   test('rejects incomplete provenance instead of treating missing values as equal', () => {
