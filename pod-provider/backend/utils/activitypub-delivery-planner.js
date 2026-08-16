@@ -16,9 +16,15 @@ const {
 } = require('./activitypub-delivery-plan');
 
 const DEFAULT_TARGET_RESOLUTION_CONCURRENCY = 10;
-const LOCAL_COLLECTION_PREDICATES = Object.freeze({
-  inbox: 'http://www.w3.org/ns/ldp#inbox',
-  outbox: 'https://www.w3.org/ns/activitystreams#outbox'
+const LOCAL_COLLECTION_QUERIES = Object.freeze({
+  inbox: Object.freeze({
+    prefix: 'PREFIX ldp: <http://www.w3.org/ns/ldp#>',
+    predicate: 'ldp:inbox'
+  }),
+  outbox: Object.freeze({
+    prefix: 'PREFIX as: <https://www.w3.org/ns/activitystreams#>',
+    predicate: 'as:outbox'
+  })
 });
 
 function normalizeActorUri(value) {
@@ -81,18 +87,18 @@ async function resolveLocalActorCollectionUri(ctx, { actorUri, dataset, collecti
   if (typeof dataset !== 'string' || dataset.length === 0) {
     throw new Error(`Local ${collection || 'collection'} resolution requires a dataset for ${actorUri}`);
   }
-  if (!Object.prototype.hasOwnProperty.call(LOCAL_COLLECTION_PREDICATES, collection)) {
+  const querySpec = LOCAL_COLLECTION_QUERIES[collection];
+  if (!querySpec) {
     throw new Error(`Unsupported local ActivityPub collection predicate ${collection}`);
   }
 
-  const predicateIri = LOCAL_COLLECTION_PREDICATES[collection];
   const bindingName = `${collection}Uri`;
   const actorIri = sanitizeSparqlQuery`<${actorUri}>`;
-  const predicate = sanitizeSparqlQuery`<${predicateIri}>`;
   const query = `
+    ${querySpec.prefix}
     SELECT DISTINCT ?${bindingName}
     WHERE {
-      ${actorIri} ${predicate} ?${bindingName} .
+      ${actorIri} ${querySpec.predicate} ?${bindingName} .
     }
     LIMIT 2
   `;
