@@ -4,7 +4,10 @@ process.env.SEMAPPS_AVAILABLE_LOCALES ||= 'en';
 process.env.SEMAPPS_AUTH_RESERVED_USER_NAMES ||= 'admin';
 
 const service = require('../services/activitypub-delivery-reconciler.service');
-const { buildDeliveryPlanV1 } = require('../utils/activitypub-delivery-planner');
+const {
+  buildDeliveryPlanV1,
+  resolveRemoteDeliveryTargetWithCache
+} = require('../utils/activitypub-delivery-planner');
 
 const LOCAL_ACTOR = 'https://pods.example/alice';
 const REMOTE_ACTOR = 'https://remote.example/users/bob';
@@ -110,6 +113,30 @@ test.each([
   ).rejects.toThrow(pattern);
 
   expect(ctx.call).not.toHaveBeenCalled();
+});
+
+test('remote target snapshot stops retaining new actors at its configured bound', async () => {
+  const firstActor = 'https://remote.example/users/first';
+  const secondActor = 'https://remote.example/users/second';
+  const remoteDeliveryTargets = new Map();
+  const ctx = {
+    call: jest.fn(async (action, params) => {
+      if (action !== 'activitypub.actor.get') throw new Error(`Unexpected call ${action}`);
+      return {
+        id: params.actorUri,
+        inbox: `${params.actorUri}/inbox`,
+        endpoints: { sharedInbox: 'https://remote.example/inbox' }
+      };
+    })
+  };
+
+  await resolveRemoteDeliveryTargetWithCache(ctx, firstActor, remoteDeliveryTargets, 1);
+  await resolveRemoteDeliveryTargetWithCache(ctx, secondActor, remoteDeliveryTargets, 1);
+
+  expect(remoteDeliveryTargets.size).toBe(1);
+  expect(remoteDeliveryTargets.has(firstActor)).toBe(true);
+  expect(remoteDeliveryTargets.has(secondActor)).toBe(false);
+  expect(ctx.call).toHaveBeenCalledTimes(2);
 });
 
 test('reconcileAccount shares one remote-target snapshot across activities but not across account scans', async () => {
