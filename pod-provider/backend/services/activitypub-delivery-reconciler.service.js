@@ -386,10 +386,10 @@ module.exports = {
     },
 
     async findLocalAccountsByWebIds(ctx, webIds) {
-      const uniqueWebIds = [...new Set((webIds || []).filter(value => typeof value === 'string' && value.length > 0))];
-      if (uniqueWebIds.length === 0) return new Map();
+      const requestedWebIds = new Set((webIds || []).filter(value => typeof value === 'string' && value.length > 0));
+      if (requestedWebIds.size === 0) return new Map();
 
-      const renderedIris = uniqueWebIds.map(webId => {
+      const renderedIris = [...requestedWebIds].map(webId => {
         if (webId.length > LOCAL_ACCOUNT_MAX_WEBID_LENGTH) {
           throw new Error(`Local ActivityPub recipient WebID exceeds ${LOCAL_ACCOUNT_MAX_WEBID_LENGTH} characters`);
         }
@@ -399,20 +399,22 @@ module.exports = {
       let batch = [];
       let batchBytes = 0;
       for (const entry of renderedIris) {
-        const entryBytes = Buffer.byteLength(entry.iri, 'utf8') + (batch.length > 0 ? 1 : 0);
-        if (entryBytes > LOCAL_ACCOUNT_BATCH_MAX_IRI_BYTES) {
+        const iriBytes = Buffer.byteLength(entry.iri, 'utf8');
+        if (iriBytes > LOCAL_ACCOUNT_BATCH_MAX_IRI_BYTES) {
           throw new Error('Local ActivityPub recipient WebID exceeds bounded SPARQL payload size');
         }
+        const separatorBytes = batch.length > 0 ? 1 : 0;
         if (
           batch.length > 0 &&
-          (batch.length >= LOCAL_ACCOUNT_BATCH_MAX_COUNT || batchBytes + entryBytes > LOCAL_ACCOUNT_BATCH_MAX_IRI_BYTES)
+          (batch.length >= LOCAL_ACCOUNT_BATCH_MAX_COUNT ||
+            batchBytes + separatorBytes + iriBytes > LOCAL_ACCOUNT_BATCH_MAX_IRI_BYTES)
         ) {
           batches.push(batch);
           batch = [];
           batchBytes = 0;
         }
+        batchBytes += (batch.length > 0 ? 1 : 0) + iriBytes;
         batch.push(entry);
-        batchBytes += Buffer.byteLength(entry.iri, 'utf8') + (batch.length > 1 ? 1 : 0);
       }
       if (batch.length > 0) batches.push(batch);
 
@@ -446,7 +448,7 @@ module.exports = {
             typeof account['@id'] !== 'string' ||
             typeof account.webId !== 'string' ||
             typeof account.username !== 'string' ||
-            !uniqueWebIds.includes(account.webId)
+            !requestedWebIds.has(account.webId)
           ) {
             continue;
           }
