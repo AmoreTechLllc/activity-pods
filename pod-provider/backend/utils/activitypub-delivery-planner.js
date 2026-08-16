@@ -162,12 +162,13 @@ function parseRemoteDeliveryUrl(value, actorUri, label) {
   return parsed;
 }
 
-async function resolveRemoteDeliveryTarget(ctx, actorUri) {
-  const actor = await ctx.call('activitypub.actor.get', { actorUri, webId: 'system' });
-  const inboxUrl = actor && actor.inbox;
-  const inbox = parseRemoteDeliveryUrl(inboxUrl, actorUri, 'inbox');
+function normalizeRemoteDeliveryTarget(actorUri, target) {
+  if (!target || typeof target !== 'object' || Array.isArray(target) || target.actorUri !== actorUri) {
+    throw new Error(`Cached remote delivery target does not match ${actorUri}`);
+  }
 
-  const rawSharedInboxUrl = actor?.endpoints?.sharedInbox;
+  const inbox = parseRemoteDeliveryUrl(target.inboxUrl, actorUri, 'inbox');
+  const rawSharedInboxUrl = target.sharedInboxUrl;
   let sharedInboxUrl;
   let deliveryUrl = inbox;
   if (rawSharedInboxUrl !== undefined && rawSharedInboxUrl !== null && rawSharedInboxUrl !== '') {
@@ -187,6 +188,27 @@ async function resolveRemoteDeliveryTarget(ctx, actorUri) {
     ...(sharedInboxUrl ? { sharedInboxUrl } : {}),
     targetDomain
   };
+}
+
+async function resolveRemoteDeliveryTarget(ctx, actorUri) {
+  const actor = await ctx.call('activitypub.actor.get', { actorUri, webId: 'system' });
+  return normalizeRemoteDeliveryTarget(actorUri, {
+    actorUri,
+    inboxUrl: actor && actor.inbox,
+    sharedInboxUrl: actor?.endpoints?.sharedInbox
+  });
+}
+
+async function resolveRemoteDeliveryTargetWithCache(ctx, actorUri, remoteDeliveryTargets) {
+  if (!(remoteDeliveryTargets instanceof Map)) return resolveRemoteDeliveryTarget(ctx, actorUri);
+
+  if (remoteDeliveryTargets.has(actorUri)) {
+    return normalizeRemoteDeliveryTarget(actorUri, remoteDeliveryTargets.get(actorUri));
+  }
+
+  const target = await resolveRemoteDeliveryTarget(ctx, actorUri);
+  remoteDeliveryTargets.set(actorUri, Object.freeze({ ...target }));
+  return target;
 }
 
 function assertConcreteRecipientUris(recipientUris, classification, actorUri) {
@@ -219,6 +241,7 @@ async function buildDeliveryPlanV1(
     localRecipientUris = [],
     remoteRecipientUris = [],
     localRecipientAccounts,
+    remoteDeliveryTargets,
     podProvider = true,
     concurrency = DEFAULT_TARGET_RESOLUTION_CONCURRENCY
   }
@@ -257,7 +280,7 @@ async function buildDeliveryPlanV1(
               ? localRecipientAccounts.get(target.actor)
               : undefined
           )
-        : await resolveRemoteDeliveryTarget(ctx, target.actor)
+        : await resolveRemoteDeliveryTargetWithCache(ctx, target.actor, remoteDeliveryTargets)
   }));
   const localRecipients = resolvedTargets
     .filter(target => target.classification === 'local')
@@ -305,9 +328,11 @@ module.exports = {
   isFollowersCollectionUri,
   mapWithConcurrency,
   normalizeActorUri,
+  normalizeRemoteDeliveryTarget,
   resolveLocalActorCollectionUri,
   resolveLocalDeliveryTarget,
   resolveLocalInboxUri,
   resolveLocalOutboxUri,
-  resolveRemoteDeliveryTarget
+  resolveRemoteDeliveryTarget,
+  resolveRemoteDeliveryTargetWithCache
 };
