@@ -112,6 +112,8 @@ jobs:
           export REDIS_IMAGE_ID="$(docker inspect "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q redis)" --format '{{.Image}}')"
           export MAILCATCHER_IMAGE_ID="$(docker inspect "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q mailcatcher)" --format '{{.Image}}')"
           node - <<'NODE' > "measurements/apdm-p10-environment-${APDM_P10_ARM}.json"
+          const os = require('os');
+          const cpus = os.cpus();
           const manifest = {
             phase: 'APDM-P10-A',
             arm: process.env.APDM_P10_ARM,
@@ -125,6 +127,9 @@ jobs:
             imageOs: process.env.ImageOS || 'unknown',
             imageVersion: process.env.ImageVersion || 'unknown',
             hostNode: process.version,
+            hostCpuModel: cpus[0] && cpus[0].model,
+            hostCpuCount: cpus.length,
+            hostTotalMemoryBytes: os.totalmem(),
             backendImageId: process.env.BACKEND_IMAGE_ID,
             fusekiImageId: process.env.FUSEKI_IMAGE_ID,
             redisImageId: process.env.REDIS_IMAGE_ID,
