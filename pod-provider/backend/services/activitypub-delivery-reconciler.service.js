@@ -9,6 +9,7 @@ const { isProviderOwnedUri, partitionProviderUris } = require('../utils/activity
 const {
   buildDeliveryPlanV1,
   mapWithConcurrency,
+  resolveLocalFollowersUri,
   resolveLocalOutboxUri
 } = require('../utils/activitypub-delivery-planner');
 
@@ -19,6 +20,7 @@ const BLIND_SNAPSHOT_TTL_SECONDS = 259200;
 const LOCAL_ACCOUNT_BATCH_MAX_COUNT = 250;
 const LOCAL_ACCOUNT_BATCH_MAX_IRI_BYTES = 65536;
 const LOCAL_ACCOUNT_MAX_WEBID_LENGTH = 4096;
+const PUBLIC_RECIPIENT_URIS = new Set(['https://www.w3.org/ns/activitystreams#Public', 'as:Public', 'Public']);
 
 function isExternalMode() {
   return String(CONFIG.ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native').trim().toLowerCase() === 'external';
@@ -37,6 +39,11 @@ function entityId(value) {
 function normalizedStrings(value) {
   const values = Array.isArray(value) ? value : [value];
   return values.map(entityId).filter(item => typeof item === 'string' && item.length > 0).sort();
+}
+
+function recipientValues(value) {
+  if (value === null || value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
 }
 
 function activityTypeValues(activity) {
@@ -523,19 +530,19 @@ module.exports = {
       };
     },
 
-    async listSenderFollowerUris(ctx, actorUri, dataset) {
+    async listSenderFollowerUris(ctx, actorUri, dataset, collectionUri = null) {
       const normalizedActorUri = normalizeTrailingSlash(actorUri);
       if (!normalizedActorUri) throw new Error('Sender follower reconciliation requires an actor URI');
       if (typeof dataset !== 'string' || dataset.length === 0) {
         throw new Error(`Sender follower reconciliation requires a dataset for ${actorUri}`);
       }
-      const collectionUri = `${normalizedActorUri}/followers`;
+      const resolvedCollectionUri = collectionUri || `${normalizedActorUri}/followers`;
       const query = sanitizeSparqlQuery`
         PREFIX as: <https://www.w3.org/ns/activitystreams#>
         SELECT DISTINCT ?itemUri
         WHERE {
-          <${collectionUri}> a as:Collection .
-          OPTIONAL { <${collectionUri}> as:items ?itemUri . }
+          <${resolvedCollectionUri}> a as:Collection .
+          OPTIONAL { <${resolvedCollectionUri}> as:items ?itemUri . }
         }
       `;
       const rows = await ctx.call('triplestore.query', {
@@ -545,22 +552,77 @@ module.exports = {
         webId: actorUri
       });
       if (!Array.isArray(rows) || rows.length === 0) {
-        throw new Error(`Unable to resolve sender followers collection ${collectionUri}`);
+        throw new Error(`Unable to resolve sender followers collection ${resolvedCollectionUri}`);
       }
 
       const itemUris = [];
       for (const row of rows) {
         if (!row || typeof row !== 'object') {
-          throw new Error(`Malformed sender followers query result for ${collectionUri}`);
+          throw new Error(`Malformed sender followers query result for ${resolvedCollectionUri}`);
         }
         if (row.itemUri === undefined) continue;
         const value = row.itemUri?.value;
         if (typeof value !== 'string' || value.length === 0) {
-          throw new Error(`Malformed sender follower URI for ${collectionUri}`);
+          throw new Error(`Malformed sender follower URI for ${resolvedCollectionUri}`);
         }
         itemUris.push(value);
       }
       return [...new Set(itemUris)];
+    },
+
+    async resolveReconciliationRecipients(ctx, activity, dataset, senderFollowersSnapshot = null) {
+      const actorUri = actorUriOf(activity);
+      const snapshotActorUri = senderFollowersSnapshot?.actorUri;
+      const canUseSelectiveSenderSnapshot =
+        senderFollowersSnapshot &&
+        typeof senderFollowersSnapshot === 'object' &&
+        normalizeTrailingSlash(actorUri) === normalizeTrailingSlash(snapshotActorUri);
+
+      if (!actorUri || !canUseSelectiveSenderSnapshot) {
+        return ctx.call('activitypub.activity.getRecipients', { activity });
+      }
+
+      let followersUri = senderFollowersSnapshot.followersUri;
+      if (typeof followersUri !== 'string' || followersUri.length === 0) {
+        try {
+          followersUri = await resolveLocalFollowersUri(ctx, actorUri, dataset);
+          senderFollowersSnapshot.followersUri = followersUri;
+        } catch (error) {
+          this.logger.debug?.('ActivityPub reconciliation falling back to SemApps recipient resolution', {
+            actorUri,
+            error: error.message
+          });
+          return ctx.call('activitypub.activity.getRecipients', { activity });
+        }
+      }
+
+      const output = [];
+      for (const predicate of ['to', 'bto', 'cc', 'bcc']) {
+        for (const recipient of recipientValues(activity[predicate])) {
+          if (PUBLIC_RECIPIENT_URIS.has(recipient)) continue;
+          if (recipient === followersUri) {
+            if (!isProviderOwnedUri(followersUri, this.settings.baseUri)) continue;
+            try {
+              let expanded = senderFollowersSnapshot.items;
+              if (!Array.isArray(expanded)) {
+                expanded = await this.listSenderFollowerUris(ctx, actorUri, dataset, followersUri);
+                senderFollowersSnapshot.items = Object.freeze([...expanded]);
+              }
+              output.push(...expanded);
+            } catch (error) {
+              this.logger.debug?.('ActivityPub reconciliation falling back after selective follower expansion failed', {
+                actorUri,
+                followersUri,
+                error: error.message
+              });
+              return ctx.call('activitypub.activity.getRecipients', { activity });
+            }
+            continue;
+          }
+          output.push(recipient);
+        }
+      }
+      return [...new Set(output)];
     },
 
     async expandConcreteRecipients(ctx, activity, recipients, dataset, senderFollowersSnapshot = null) {
@@ -620,7 +682,9 @@ module.exports = {
         ? await this.loadBlindRecipientSnapshot(activity)
         : null;
       const routingActivity = blindSnapshot ? { ...activity, ...blindSnapshot } : activity;
-      const recipients = await ctx.call('activitypub.activity.getRecipients', { activity: routingActivity });
+      const recipients = typeof this.resolveReconciliationRecipients === 'function'
+        ? await this.resolveReconciliationRecipients(ctx, routingActivity, dataset, senderFollowersSnapshot)
+        : await ctx.call('activitypub.activity.getRecipients', { activity: routingActivity });
       const concreteRecipients = await this.expandConcreteRecipients(
         ctx,
         routingActivity,

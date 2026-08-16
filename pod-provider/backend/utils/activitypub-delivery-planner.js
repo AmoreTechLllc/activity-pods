@@ -19,6 +19,10 @@ const DEFAULT_TARGET_RESOLUTION_CONCURRENCY = 10;
 const DEFAULT_LOCAL_TARGET_CACHE_MAX_ENTRIES = 4096;
 const DEFAULT_REMOTE_TARGET_CACHE_MAX_ENTRIES = 4096;
 const LOCAL_COLLECTION_QUERIES = Object.freeze({
+  followers: Object.freeze({
+    prefix: 'PREFIX as: <https://www.w3.org/ns/activitystreams#>',
+    predicate: 'as:followers'
+  }),
   inbox: Object.freeze({
     prefix: 'PREFIX ldp: <http://www.w3.org/ns/ldp#>',
     predicate: 'ldp:inbox'
@@ -127,6 +131,10 @@ async function resolveLocalActorCollectionUri(ctx, { actorUri, dataset, collecti
     throw new Error(`Unable to resolve safe local ${collection} for ${actorUri}`);
   }
   return collectionUri;
+}
+
+async function resolveLocalFollowersUri(ctx, actorUri, dataset) {
+  return resolveLocalActorCollectionUri(ctx, { actorUri, dataset, collection: 'followers' });
 }
 
 async function resolveLocalInboxUri(ctx, actorUri, dataset) {
@@ -404,6 +412,7 @@ module.exports = {
   resolveLocalActorCollectionUri,
   resolveLocalDeliveryTarget,
   resolveLocalDeliveryTargetWithCache,
+  resolveLocalFollowersUri,
   resolveLocalInboxUri,
   resolveLocalOutboxUri,
   resolveRemoteDeliveryTarget,
