@@ -16,6 +16,9 @@ const MATCHED_FIELDS = [
   'imageOs',
   'imageVersion',
   'hostNode',
+  'hostCpuModel',
+  'hostCpuCount',
+  'hostTotalMemoryBytes',
   'backendImageId',
   'fusekiImageId',
   'redisImageId',
@@ -27,7 +30,9 @@ function readManifest(file) {
 }
 
 function assertNonEmpty(value, label) {
-  if (value === undefined || value === null || value === '') throw new Error(`Missing Phase 10 provenance field: ${label}`);
+  if (value === undefined || value === null || value === '') {
+    throw new Error(`Missing Phase 10 provenance field: ${label}`);
+  }
 }
 
 function validateEnvironment(control, enabled) {
