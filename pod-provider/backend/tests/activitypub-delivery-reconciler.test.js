@@ -73,7 +73,6 @@ function createContext({ includeRemote = true, unresolvedFollowers = false } = {
           return [{ webId: 'https://pods.example/alice', username: 'alice' }];
         case 'activitypub.actor.getCollectionUri':
           if (params.predicate === 'outbox') return 'https://pods.example/alice/outbox';
-          if (params.predicate === 'inbox') return `${params.actorUri}/inbox`;
           throw new Error(`Unexpected predicate ${params.predicate}`);
         case 'triplestore.query':
           if (params.dataset === 'settings') {
@@ -85,6 +84,12 @@ function createContext({ includeRemote = true, unresolvedFollowers = false } = {
               webId: { value: 'https://pods.example/bob' },
               username: { value: 'bob' }
             }];
+          }
+          if (params.dataset === 'bob') {
+            expect(params.webId).toBe('system');
+            expect(params.query).toContain('<https://pods.example/bob> ldp:inbox ?inboxUri');
+            expect(params.query).toMatch(/LIMIT 2/u);
+            return [{ inboxUri: { value: 'https://pods.example/bob/inbox' } }];
           }
           expect(params.query).toContain('LIMIT 50');
           expect(params.query).not.toContain('OFFSET');

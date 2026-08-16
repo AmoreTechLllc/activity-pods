@@ -1,5 +1,7 @@
 'use strict';
 
+const { MIME_TYPES } = require('@semapps/mime-types');
+const { sanitizeSparqlQuery } = require('@semapps/triplestore');
 const {
   DELIVERY_PLAN_SCHEMA,
   computeDeliveryPlanIntentId,
@@ -68,6 +70,40 @@ function createDeliveryIntentId({ activityId, actorUri, localRecipientUris, remo
   return computeDeliveryPlanIntentId({ activityId, actorUri, localRecipientUris, remoteRecipientUris });
 }
 
+async function resolveLocalInboxUri(ctx, actorUri, dataset) {
+  const query = sanitizeSparqlQuery`
+    PREFIX ldp: <http://www.w3.org/ns/ldp#>
+    SELECT DISTINCT ?inboxUri
+    WHERE {
+      <${actorUri}> ldp:inbox ?inboxUri .
+    }
+    LIMIT 2
+  `;
+  const rows = await ctx.call('triplestore.query', {
+    query,
+    accept: MIME_TYPES.SPARQL_JSON,
+    dataset,
+    webId: 'system'
+  });
+  const inboxUris = (Array.isArray(rows) ? rows : [])
+    .map(row => row?.inboxUri?.value)
+    .filter(value => typeof value === 'string' && value.length > 0);
+
+  if (inboxUris.length !== 1) {
+    throw new Error(
+      inboxUris.length === 0
+        ? `Unable to resolve safe local inbox for ${actorUri}`
+        : `Unable to resolve unambiguous local inbox for ${actorUri}`
+    );
+  }
+
+  const inboxUri = inboxUris[0];
+  if (!parseDeliveryEndpointUrl(inboxUri)) {
+    throw new Error(`Unable to resolve safe local inbox for ${actorUri}`);
+  }
+  return inboxUri;
+}
+
 async function resolveLocalDeliveryTarget(ctx, actorUri, podProvider, preResolvedAccount) {
   const account =
     preResolvedAccount === undefined
@@ -80,15 +116,7 @@ async function resolveLocalDeliveryTarget(ctx, actorUri, podProvider, preResolve
     throw new Error(`Unable to resolve local dataset for ${actorUri}`);
   }
 
-  const inboxUri = await ctx.call(
-    'activitypub.actor.getCollectionUri',
-    { actorUri, predicate: 'inbox', webId: 'system' },
-    { meta: { dataset } }
-  );
-  if (!parseDeliveryEndpointUrl(inboxUri)) {
-    throw new Error(`Unable to resolve safe local inbox for ${actorUri}`);
-  }
-
+  const inboxUri = await resolveLocalInboxUri(ctx, actorUri, dataset);
   return { actorUri, dataset, inboxUri };
 }
 
@@ -247,5 +275,6 @@ module.exports = {
   mapWithConcurrency,
   normalizeActorUri,
   resolveLocalDeliveryTarget,
+  resolveLocalInboxUri,
   resolveRemoteDeliveryTarget
 };

@@ -172,8 +172,14 @@ describe('APDM Phase 3 semantic hardening', () => {
     const ctx = {
       async call(action, params) {
         await pause();
-        if (action === 'auth.account.findByWebId') return { username: new URL(params.webId).pathname.split('/').pop() };
-        if (action === 'activitypub.actor.getCollectionUri') return `${params.actorUri}/inbox`;
+        if (action === 'auth.account.findByWebId') {
+          return { username: new URL(params.webId).pathname.split('/').pop() };
+        }
+        if (action === 'triplestore.query') {
+          const match = params.query.match(/<(https:\/\/pods\.example\/[^>]+)> ldp:inbox \?inboxUri/u);
+          if (!match) throw new Error('Unexpected local inbox query');
+          return [{ inboxUri: { value: `${match[1]}/inbox` } }];
+        }
         if (action === 'activitypub.actor.get') {
           return { id: params.actorUri, inbox: `${params.actorUri}/inbox` };
         }

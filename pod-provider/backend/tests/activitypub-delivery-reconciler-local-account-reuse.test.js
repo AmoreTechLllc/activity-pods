@@ -23,17 +23,26 @@ test('reconcileActivity resolves accepted local accounts once in a batch and reu
     expect(params.query).toContain(`<${LOCAL}>`);
     return [accountBinding()];
   });
+  const localInboxQuery = jest.fn(async params => {
+    expect(params.dataset).toBe('bob');
+    expect(params.webId).toBe('system');
+    expect(params.query).toContain(`<${LOCAL}> ldp:inbox ?inboxUri`);
+    expect(params.query).toMatch(/LIMIT 2/u);
+    return [{ inboxUri: { value: `${LOCAL}/inbox` } }];
+  });
   const calls = [];
   const ctx = {
     async call(action, params, options) {
       calls.push({ action, params, options });
       if (action === 'activitypub.activity.getRecipients') return [LOCAL, REMOTE];
-      if (action === 'triplestore.query') return accountQuery(params);
+      if (action === 'triplestore.query') {
+        if (params.dataset === 'settings') return accountQuery(params);
+        if (params.dataset === 'bob') return localInboxQuery(params);
+        throw new Error(`Unexpected triplestore dataset ${params.dataset}`);
+      }
       if (action === 'auth.account.findByWebId') throw new Error('duplicate account lookup');
       if (action === 'activitypub.actor.getCollectionUri') {
-        expect(params).toEqual({ actorUri: LOCAL, predicate: 'inbox', webId: 'system' });
-        expect(options).toEqual({ meta: { dataset: 'bob' } });
-        return `${LOCAL}/inbox`;
+        throw new Error('heavy actor materialization path must not be used');
       }
       if (action === 'activitypub.actor.get') {
         expect(params).toEqual({ actorUri: REMOTE, webId: 'system' });
@@ -70,6 +79,7 @@ test('reconcileActivity resolves accepted local accounts once in a batch and reu
   const plan = await service.methods.reconcileActivity.call(context, ctx, activity, 'alice');
 
   expect(accountQuery).toHaveBeenCalledTimes(1);
+  expect(localInboxQuery).toHaveBeenCalledTimes(1);
   expect(plan.localRecipients).toEqual([
     { actorUri: LOCAL, dataset: 'bob', inboxUri: `${LOCAL}/inbox` }
   ]);
@@ -77,6 +87,7 @@ test('reconcileActivity resolves accepted local accounts once in a batch and reu
     expect.objectContaining({ actorUri: REMOTE, targetDomain: 'remote.example' })
   ]);
   expect(calls.some(call => call.action === 'auth.account.findByWebId')).toBe(false);
+  expect(calls.some(call => call.action === 'activitypub.actor.getCollectionUri')).toBe(false);
 });
 
 test('reconcileActivity preserves fail-closed coverage when a directly addressed local-looking recipient has no account', async () => {
@@ -86,14 +97,17 @@ test('reconcileActivity preserves fail-closed coverage when a directly addressed
   const ctx = {
     async call(action, params) {
       if (action === 'activitypub.activity.getRecipients') return [missing, REMOTE];
-      if (action === 'triplestore.query') return accountQuery(params);
+      if (action === 'triplestore.query') {
+        if (params.dataset === 'settings') return accountQuery(params);
+        localInboxLookup();
+        throw new Error('missing local account must never reach local inbox resolution');
+      }
       if (action === 'auth.account.findByWebId') throw new Error('per-recipient account lookup must not run');
       if (action === 'activitypub.actor.get') {
         return { id: REMOTE, inbox: `${REMOTE}/inbox` };
       }
       if (action === 'activitypub.actor.getCollectionUri') {
-        localInboxLookup();
-        throw new Error('missing local account must never reach local inbox resolution');
+        throw new Error('heavy actor materialization path must not be used');
       }
       throw new Error(`Unexpected call ${action}`);
     }
