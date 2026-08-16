@@ -12,7 +12,7 @@
   "scripts": {
     "dev": "moleculer-runner --repl --hot services/*.js services/**/*.js",
     "start": "moleculer-runner services/*.js services/**/*.js",
-    "postinstall": "node scripts/patch-semapps-activitypub-local-delivery.js",
+    "postinstall": "node scripts/patch-semapps-activitypub-local-delivery.js && node scripts/patch-semapps-activitypub-local-delivery-phase9.js",
     "test": "NODE_ENV=test moleculer-runner --repl --hot services/*.js services/**/*.js",
     "test:unit": "cd ../.. && node tests/node_modules/.bin/jest --testEnvironment=node --roots=pod-provider/backend/tests",
     "test:atproto:multibase": "node scripts/atproto-multibase-smoke.js",
