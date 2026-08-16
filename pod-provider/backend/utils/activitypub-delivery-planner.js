@@ -86,10 +86,13 @@ async function resolveLocalActorCollectionUri(ctx, { actorUri, dataset, collecti
   }
 
   const predicateIri = LOCAL_COLLECTION_PREDICATES[collection];
-  const query = sanitizeSparqlQuery`
-    SELECT DISTINCT ?collectionUri
+  const bindingName = `${collection}Uri`;
+  const actorIri = sanitizeSparqlQuery`<${actorUri}>`;
+  const predicate = sanitizeSparqlQuery`<${predicateIri}>`;
+  const query = `
+    SELECT DISTINCT ?${bindingName}
     WHERE {
-      <${actorUri}> <${predicateIri}> ?collectionUri .
+      ${actorIri} ${predicate} ?${bindingName} .
     }
     LIMIT 2
   `;
@@ -100,7 +103,7 @@ async function resolveLocalActorCollectionUri(ctx, { actorUri, dataset, collecti
     webId: 'system'
   });
   const collectionUris = (Array.isArray(rows) ? rows : [])
-    .map(row => row?.collectionUri?.value)
+    .map(row => row?.[bindingName]?.value)
     .filter(value => typeof value === 'string' && value.length > 0);
 
   if (collectionUris.length !== 1) {
