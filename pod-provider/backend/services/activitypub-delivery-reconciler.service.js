@@ -608,7 +608,13 @@ module.exports = {
       return [...new Set(output)];
     },
 
-    async reconcileActivity(ctx, activity, dataset, senderFollowersSnapshot = null) {
+    async reconcileActivity(
+      ctx,
+      activity,
+      dataset,
+      senderFollowersSnapshot = null,
+      remoteDeliveryTargetSnapshot = null
+    ) {
       const blindSnapshot = typeof this.loadBlindRecipientSnapshot === 'function'
         ? await this.loadBlindRecipientSnapshot(activity)
         : null;
@@ -635,6 +641,7 @@ module.exports = {
         localRecipientUris,
         remoteRecipientUris,
         localRecipientAccounts,
+        remoteDeliveryTargets: remoteDeliveryTargetSnapshot,
         podProvider: true
       });
     },
@@ -652,6 +659,7 @@ module.exports = {
         const cutoffPublished = new Date(cutoffMs).toISOString();
         const pageSize = Math.max(1, Math.min(1000, Math.floor(Number(this.settings.maxActivitiesPerAccount) || 50)));
         const senderFollowersSnapshot = { actorUri: account.webId, items: null };
+        const remoteDeliveryTargetSnapshot = new Map();
         let activityCursor = null;
         let reachedCutoff = false;
 
@@ -682,7 +690,13 @@ module.exports = {
                 break;
               }
 
-              const deliveryPlan = await this.reconcileActivity(ctx, activity, dataset, senderFollowersSnapshot);
+              const deliveryPlan = await this.reconcileActivity(
+                ctx,
+                activity,
+                dataset,
+                senderFollowersSnapshot,
+                remoteDeliveryTargetSnapshot
+              );
               if (!deliveryPlan) continue;
 
               await ctx.call('activitypub.outbox.enqueueDeliveryHandoff', { deliveryPlan });
