@@ -21,7 +21,7 @@ function createContext(params, overrides = {}) {
 }
 
 describe('FEP-8fcf v2 server-base authority contract', () => {
-  test('filters same-host candidates by scheme and port rather than hostname alone', async () => {
+  test('queries the exact server-base projection including scheme and port', async () => {
     const service = createService({
       findActorByIdentifier: jest.fn(async () => ({
         id: 'https://pods.example/users/alice',
@@ -33,15 +33,13 @@ describe('FEP-8fcf v2 server-base authority contract', () => {
       baseUri: 'https://remote.example:8443/'
     });
     ctx.call.mockImplementation(async (action, params) => {
-      expect(action).toBe('activitypub.follower-domain-index.getForDomain');
+      expect(action).toBe('activitypub.follower-server-base-index.getForServerBaseUri');
       expect(params).toEqual({
         collectionUri: 'https://pods.example/users/alice/followers',
-        domain: 'remote.example'
+        serverBaseUri: 'https://remote.example:8443/'
       });
       return [
         'https://remote.example:8443/users/bob',
-        'https://remote.example/users/default-port',
-        'http://remote.example:8443/users/plain-http',
         'https://remote.example:8443/users/charlie'
       ];
     });
@@ -55,6 +53,24 @@ describe('FEP-8fcf v2 server-base authority contract', () => {
         'https://remote.example:8443/users/charlie'
       ]
     });
+  });
+
+  test('fails closed if the exact projection returns a different server base', async () => {
+    const service = createService({
+      findActorByIdentifier: jest.fn(async () => ({
+        followers: 'https://pods.example/users/alice/followers'
+      }))
+    });
+    const ctx = createContext({
+      actorIdentifier: 'alice',
+      baseUri: 'https://remote.example:8443/'
+    });
+    ctx.call.mockResolvedValue(['https://remote.example/users/wrong-port']);
+
+    const result = await schema.actions.getPartialCollection.handler.call(service, ctx);
+
+    expect(ctx.meta.$statusCode).toBe(500);
+    expect(result.error).toBe('internal_error');
   });
 
   test('normalizes a valid root server base URI and preserves explicit ports', () => {
@@ -85,7 +101,7 @@ describe('FEP-8fcf v2 server-base authority contract', () => {
     }
   });
 
-  test('fails closed if the domain projection returns malformed actor data', async () => {
+  test('fails closed if the exact projection returns malformed actor data', async () => {
     const service = createService({
       findActorByIdentifier: jest.fn(async () => ({
         followers: 'https://pods.example/users/alice/followers'
