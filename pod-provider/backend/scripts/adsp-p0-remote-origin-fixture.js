@@ -50,10 +50,22 @@ function createRunnerBroker(transporterUrl, runId) {
 function createEvidenceLatch(broker, { senderWebIdRef, marker, timeoutMs }) {
   let settle;
   let reject;
-  let timer;
+  let timer = null;
+  let armed = false;
+  let settled = false;
   const promise = new Promise((resolve, rejectPromise) => {
-    settle = resolve;
-    reject = rejectPromise;
+    settle = value => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(value);
+    };
+    reject = error => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      rejectPromise(error);
+    };
   });
 
   broker.createService({
@@ -64,22 +76,26 @@ function createEvidenceLatch(broker, { senderWebIdRef, marker, timeoutMs }) {
           const activity = ctx?.params?.activity;
           const actorUri = typeof activity?.actor === 'string' ? activity.actor : activity?.actor?.id || activity?.actor?.['@id'];
           const object = activity?.object && typeof activity.object === 'object' ? activity.object : null;
-          if (!senderWebIdRef.value || actorUri !== senderWebIdRef.value || object?.content !== marker) return;
-          clearTimeout(timer);
+          if (!armed || !senderWebIdRef.value || actorUri !== senderWebIdRef.value || object?.content !== marker) return;
           settle(ctx.params);
         }
       }
     }
   });
 
-  timer = setTimeout(() => {
-    reject(new Error(`Timed out waiting for ${REMOTE_DELIVERY_PLANNED_EVENT}`));
-  }, timeoutMs);
-
   return {
     promise,
+    arm() {
+      if (armed) throw new Error('Remote-origin evidence latch is already armed');
+      if (settled) throw new Error('Remote-origin evidence latch is already settled');
+      armed = true;
+      timer = setTimeout(() => {
+        reject(new Error(`Timed out waiting for ${REMOTE_DELIVERY_PLANNED_EVENT}`));
+      }, timeoutMs);
+    },
     cancel() {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
+      timer = null;
     }
   };
 }
@@ -153,6 +169,10 @@ async function runRemoteOriginFixture({
     await awaitActorBootstrap(broker, sender, 'outbox', readyTimeoutMs);
     senderWebIdRef.value = sender.webId;
 
+    // Only bound the actual evidence window. Account provisioning/bootstrap is
+    // intentionally outside this deadline because it may legitimately take
+    // longer and must not make a healthy federation path look failed.
+    latch.arm();
     const postResult = await broker.call(
       'activitypub.outbox.post',
       {
