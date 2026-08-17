@@ -43,6 +43,20 @@ function resolvePhase6ObservationConfig({
   observationWebhookTimeoutMs
 } = {}) {
   const mode = normalizeRemoteDeliveryMode(remoteDeliveryMode);
+
+  // External authority never invokes the native rollback observation transport.
+  // Keep stale observation-only settings completely outside the external
+  // authorization/startup boundary rather than coupling the two authorities.
+  if (mode === 'external') {
+    return {
+      remoteDeliveryMode: mode,
+      sidecarObservationWebhookUrl,
+      sidecarToken,
+      observationWebhookRetries: 3,
+      observationWebhookTimeoutMs: 5000
+    };
+  }
+
   const retries = parseInteger(observationWebhookRetries, 3, {
     label: 'ActivityPub observation webhook retries',
     min: 1,
@@ -53,19 +67,6 @@ function resolvePhase6ObservationConfig({
     min: 100,
     max: 60000
   });
-
-  // External authority never invokes the legacy/native observation transport.
-  // Do not make external startup depend on an endpoint it cannot use.
-  if (mode === 'external') {
-    return {
-      remoteDeliveryMode: mode,
-      sidecarObservationWebhookUrl,
-      sidecarToken,
-      observationWebhookRetries: retries,
-      observationWebhookTimeoutMs: timeoutMs
-    };
-  }
-
   const url = parseExactHttpUrl(
     sidecarObservationWebhookUrl,
     'ActivityPub native observation webhook URL'
