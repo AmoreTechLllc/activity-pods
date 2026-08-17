@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 const REQUIRED_RECIPIENT_COUNTS = [1, 10, 100, 200, 1000];
+const MIN_MEASURED_SAMPLES = 3;
 
 function parseJsonLines(source) {
   return source
@@ -35,9 +36,7 @@ function aggregateCounts(records, field) {
   const result = Object.create(null);
   for (const record of records) {
     const values = record[field] || {};
-    for (const [key, value] of Object.entries(values)) {
-      result[key] = (result[key] || 0) + Number(value || 0);
-    }
+    for (const [key, value] of Object.entries(values)) result[key] = (result[key] || 0) + Number(value || 0);
   }
   return result;
 }
@@ -46,9 +45,7 @@ function aggregateNestedCounts(records, parentField, field) {
   const result = Object.create(null);
   for (const record of records) {
     const values = record[parentField]?.[field] || {};
-    for (const [key, value] of Object.entries(values)) {
-      result[key] = (result[key] || 0) + Number(value || 0);
-    }
+    for (const [key, value] of Object.entries(values)) result[key] = (result[key] || 0) + Number(value || 0);
   }
   return result;
 }
@@ -60,50 +57,22 @@ function isSuccessfulRecord(record) {
 function summarizeRecipientCase(records) {
   const successfulRecords = records.filter(isSuccessfulRecord);
   const elapsed = successfulRecords.map(record => Number(record.elapsedMs)).filter(Number.isFinite);
-  const cpu = successfulRecords
-    .map(record => Number(record.cpuUserMs || 0) + Number(record.cpuSystemMs || 0))
-    .filter(Number.isFinite);
+  const cpu = successfulRecords.map(record => Number(record.cpuUserMs || 0) + Number(record.cpuSystemMs || 0)).filter(Number.isFinite);
   const heapDelta = successfulRecords.map(record => Number(record.heapUsedDelta)).filter(Number.isFinite);
   const actionCounts = successfulRecords.map(record => Number(record.actionCount)).filter(Number.isFinite);
-  const fusekiCounts = successfulRecords
-    .map(record => Number(record.fuseki && record.fuseki.requestCount))
-    .filter(Number.isFinite);
+  const fusekiCounts = successfulRecords.map(record => Number(record.fuseki && record.fuseki.requestCount)).filter(Number.isFinite);
 
   return {
     samples: records.length,
     successfulSamples: successfulRecords.length,
     failedSamples: records.length - successfulRecords.length,
-    elapsedMs: {
-      mean: mean(elapsed),
-      p50: percentile(elapsed, 0.5),
-      p95: percentile(elapsed, 0.95),
-      p99: percentile(elapsed, 0.99)
-    },
-    cpuMs: {
-      mean: mean(cpu),
-      p50: percentile(cpu, 0.5),
-      p95: percentile(cpu, 0.95)
-    },
-    heapUsedDeltaBytes: {
-      mean: mean(heapDelta),
-      p50: percentile(heapDelta, 0.5),
-      p95: percentile(heapDelta, 0.95)
-    },
-    actionCount: {
-      mean: mean(actionCounts),
-      p50: percentile(actionCounts, 0.5),
-      p95: percentile(actionCounts, 0.95)
-    },
-    fusekiRequestCount: {
-      mean: mean(fusekiCounts),
-      p50: percentile(fusekiCounts, 0.5),
-      p95: percentile(fusekiCounts, 0.95)
-    },
+    elapsedMs: { mean: mean(elapsed), p50: percentile(elapsed, 0.5), p95: percentile(elapsed, 0.95), p99: percentile(elapsed, 0.99) },
+    cpuMs: { mean: mean(cpu), p50: percentile(cpu, 0.5), p95: percentile(cpu, 0.95) },
+    heapUsedDeltaBytes: { mean: mean(heapDelta), p50: percentile(heapDelta, 0.5), p95: percentile(heapDelta, 0.95) },
+    actionCount: { mean: mean(actionCounts), p50: percentile(actionCounts, 0.5), p95: percentile(actionCounts, 0.95) },
+    fusekiRequestCount: { mean: mean(fusekiCounts), p50: percentile(fusekiCounts, 0.5), p95: percentile(fusekiCounts, 0.95) },
     actionCounts: aggregateCounts(successfulRecords, 'actionCounts'),
     categoryCounts: aggregateCounts(successfulRecords, 'categoryCounts'),
-    // Preserve real HTTP evidence separately from Moleculer action invocation
-    // counts. requestKeyCounts correlates method and path so later phases can
-    // distinguish GET existence probes from lifecycle writes to the same path.
     fusekiPathCounts: aggregateNestedCounts(successfulRecords, 'fuseki', 'pathCounts'),
     fusekiMethodCounts: aggregateNestedCounts(successfulRecords, 'fuseki', 'methodCounts'),
     fusekiStatusCounts: aggregateNestedCounts(successfulRecords, 'fuseki', 'statusCounts'),
@@ -137,41 +106,30 @@ function summarize(records, requiredRecipientCounts = REQUIRED_RECIPIENT_COUNTS)
   }
 
   const cases = {};
-  for (const count of [...byCount.keys()].sort((a, b) => a - b)) {
-    cases[count] = summarizeRecipientCase(byCount.get(count));
-  }
+  for (const count of [...byCount.keys()].sort((a, b) => a - b)) cases[count] = summarizeRecipientCase(byCount.get(count));
 
   const missingRecipientCounts = requiredRecipientCounts.filter(count => {
     const caseRecords = byCount.get(count) || [];
-    return !caseRecords.some(isSuccessfulRecord);
+    return caseRecords.filter(isSuccessfulRecord).length < MIN_MEASURED_SAMPLES;
   });
 
   const usableEntries = [...byCount.entries()]
     .map(([count, caseRecords]) => [count, caseRecords.filter(isSuccessfulRecord)])
-    .filter(([, caseRecords]) => caseRecords.length > 0);
+    .filter(([count, caseRecords]) => requiredRecipientCounts.includes(count) && caseRecords.length >= MIN_MEASURED_SAMPLES);
 
   const actionFitPoints = usableEntries
-    .map(([count, caseRecords]) => ({
-      x: count,
-      y: mean(caseRecords.map(record => Number(record.actionCount)).filter(Number.isFinite))
-    }))
+    .map(([count, caseRecords]) => ({ x: count, y: mean(caseRecords.map(record => Number(record.actionCount)).filter(Number.isFinite)) }))
     .filter(point => Number.isFinite(point.y));
 
   const fusekiFitPoints = usableEntries
-    .map(([count, caseRecords]) => ({
-      x: count,
-      y: mean(
-        caseRecords
-          .map(record => Number(record.fuseki && record.fuseki.requestCount))
-          .filter(Number.isFinite)
-      )
-    }))
+    .map(([count, caseRecords]) => ({ x: count, y: mean(caseRecords.map(record => Number(record.fuseki && record.fuseki.requestCount)).filter(Number.isFinite)) }))
     .filter(point => Number.isFinite(point.y));
 
   return {
     phase: 'APDM-P8-A',
     generatedAt: new Date().toISOString(),
     requiredRecipientCounts,
+    minimumMeasuredSamples: MIN_MEASURED_SAMPLES,
     missingRecipientCounts,
     complete: missingRecipientCounts.length === 0,
     cases,
@@ -192,18 +150,13 @@ function main(argv = process.argv.slice(2)) {
   const source = fs.readFileSync(inputPath, 'utf8');
   const summary = summarize(parseJsonLines(source));
   const rendered = `${JSON.stringify(summary, null, 2)}\n`;
-
   if (outputPath) {
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     fs.writeFileSync(outputPath, rendered, 'utf8');
-  } else {
-    process.stdout.write(rendered);
-  }
+  } else process.stdout.write(rendered);
 
   if (!summary.complete) {
-    process.stderr.write(
-      `[APDM-P8] Missing successful recipient measurements: ${summary.missingRecipientCounts.join(', ')}\n`
-    );
+    process.stderr.write(`[APDM-P8] Recipient cases below ${MIN_MEASURED_SAMPLES} successful samples: ${summary.missingRecipientCounts.join(', ')}\n`);
     process.exitCode = 2;
   }
 }
@@ -211,6 +164,7 @@ function main(argv = process.argv.slice(2)) {
 if (require.main === module) main();
 
 module.exports = {
+  MIN_MEASURED_SAMPLES,
   REQUIRED_RECIPIENT_COUNTS,
   aggregateCounts,
   aggregateNestedCounts,
