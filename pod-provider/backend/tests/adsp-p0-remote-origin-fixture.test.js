@@ -2,6 +2,8 @@
 
 const {
   buildFixtureEvidence,
+  createEvidenceLatch,
+  REMOTE_DELIVERY_PLANNED_EVENT,
   validateRemoteActorUri
 } = require('../scripts/adsp-p0-remote-origin-fixture');
 
@@ -43,6 +45,19 @@ function createPlannedEvent(overrides = {}) {
   };
 }
 
+function createFakeBroker() {
+  let service;
+  return {
+    createService(schema) {
+      service = schema;
+      return schema;
+    },
+    emitPlanned(params) {
+      return service.events[REMOTE_DELIVERY_PLANNED_EVENT].handler({ params });
+    }
+  };
+}
+
 describe('ADSP P0 ActivityPods remote-origin fixture', () => {
   test('accepts credential-free HTTP(S) remote actor URIs and rejects unsafe forms', () => {
     expect(validateRemoteActorUri('http://127.0.0.1:8787/actor/success')).toBe(
@@ -60,6 +75,44 @@ describe('ADSP P0 ActivityPods remote-origin fixture', () => {
       'https://remote.example/users/alice#fragment'
     ]) {
       expect(() => validateRemoteActorUri(value)).toThrow(/remote actor URI/u);
+    }
+  });
+
+  test('does not arm the evidence deadline until the actual outbox boundary', async () => {
+    jest.useFakeTimers();
+    try {
+      const broker = createFakeBroker();
+      const senderWebIdRef = { value: 'https://pods.example/alice' };
+      const marker = 'unique fixture marker';
+      const latch = createEvidenceLatch(broker, { senderWebIdRef, marker, timeoutMs: 1000 });
+
+      jest.advanceTimersByTime(10_000);
+      await Promise.resolve();
+
+      broker.emitPlanned({
+        activity: {
+          actor: senderWebIdRef.value,
+          object: { content: marker }
+        },
+        ignoredBeforeArm: true
+      });
+
+      latch.arm();
+      expect(() => latch.arm()).toThrow(/already armed/u);
+      broker.emitPlanned({
+        activity: {
+          actor: senderWebIdRef.value,
+          object: { content: marker }
+        },
+        capturedAfterArm: true
+      });
+
+      await expect(latch.promise).resolves.toEqual(
+        expect.objectContaining({ capturedAfterArm: true })
+      );
+      latch.cancel();
+    } finally {
+      jest.useRealTimers();
     }
   });
 
