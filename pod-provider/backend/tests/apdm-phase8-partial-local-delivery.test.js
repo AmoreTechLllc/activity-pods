@@ -30,7 +30,7 @@ describe('APDM Phase 8 partial local delivery accounting', () => {
     expect(source).toContain("phase8LocalDeliveryObserver('finish', activityToPost, phase8LocalDeliveryError)");
   });
 
-  test('a caught per-recipient localPost failure makes the trace unusable', async () => {
+  test('a caught per-recipient localPost failure makes the trace unusable without serializing recipient identifiers', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'apdm-p8-partial-'));
     const outputPath = path.join(directory, 'measurement.jsonl');
     const instrumentation = createPhase8Tier1Instrumentation({
@@ -55,12 +55,14 @@ describe('APDM Phase 8 partial local delivery accounting', () => {
       }, { name: 'activitypub.outbox.post' });
 
       await expect(root({ id: 'root-partial', requestID: 'request-partial' })).resolves.toBe('root-returned');
+      const artifactText = fs.readFileSync(outputPath, 'utf8');
       const record = readRecord(outputPath);
       expect(record.errors).toContainEqual({
         source: 'detached-local-delivery-partial',
-        failureCount: 1,
-        failures: ['https://pod.example/failed']
+        failureCount: 1
       });
+      expect(artifactText).not.toContain('pod.example/failed');
+      expect(artifactText).not.toContain('pod.example/ok');
     } finally {
       instrumentation.dispose();
       fs.rmSync(directory, { recursive: true, force: true });
