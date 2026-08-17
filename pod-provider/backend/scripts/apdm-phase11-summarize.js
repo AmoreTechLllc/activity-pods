@@ -7,7 +7,7 @@ const REQUIRED_COUNTS = Object.freeze([1, 10, 100, 200, 1000]);
 const MIN_MEASURED_SAMPLES = 3;
 const QUERY_ACTION = 'triplestore.query';
 const ALLOWED_OPERATIONS = new Set([
-  'unknown', 'select', 'ask', 'construct', 'describe', 'insert', 'delete',
+  'select', 'ask', 'construct', 'describe', 'insert', 'delete',
   'load', 'clear', 'create', 'drop', 'copy', 'move', 'add', 'with'
 ]);
 const RECORD_KEYS = Object.freeze([
@@ -52,7 +52,9 @@ function assertPrivacySafeRawArtifact(raw, filePath) {
 function validateQueryEntry(query, label) {
   assertExactKeys(query, QUERY_KEYS, label);
   if (!/^[A-Za-z0-9_.-]+$/u.test(query.caller || '')) throw new Error(`${label}.caller is unsafe`);
-  if (!ALLOWED_OPERATIONS.has(query.operation)) throw new Error(`${label}.operation is invalid`);
+  if (!ALLOWED_OPERATIONS.has(query.operation)) {
+    throw new Error(`${label}.operation is unsupported; opaque query shapes are not valid attribution evidence`);
+  }
   if (!/^[a-f0-9]{64}$/u.test(query.shapeHash || '')) throw new Error(`${label}.shapeHash is invalid`);
   if (!Number.isInteger(query.count) || query.count < 1) throw new Error(`${label}.count must be positive`);
   if (!Number.isInteger(query.errorCount) || query.errorCount < 0 || query.errorCount > query.count) {
@@ -188,7 +190,8 @@ function buildSummary(pairs) {
       passed: true,
       minimumMeasuredSamples: MIN_MEASURED_SAMPLES,
       independentActionCount: QUERY_ACTION,
-      requiresZeroUnattributedCalls: true
+      requiresZeroUnattributedCalls: true,
+      requiresKnownOperation: true
     },
     counts,
     n1000TopByDuration: n1000?.queries.slice(0, 25) || []
