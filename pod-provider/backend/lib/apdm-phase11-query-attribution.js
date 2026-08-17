@@ -16,6 +16,25 @@ function normalizeWhitespace(value) {
   return value.replace(/\s+/gu, ' ').trim();
 }
 
+function iriRefEnd(query, startIndex) {
+  for (let index = startIndex + 1; index < query.length; index += 1) {
+    const char = query[index];
+    if (char === '>') return index + 1;
+    if (/\s/u.test(char) || char === '<' || char === '"' || char === '{' || char === '}' || char === '|' || char === '^' || char === '`') {
+      return undefined;
+    }
+    if (char === '\\') {
+      const marker = query[index + 1];
+      const digits = marker === 'u' ? 4 : marker === 'U' ? 8 : 0;
+      if (!digits) return undefined;
+      const escaped = query.slice(index + 2, index + 2 + digits);
+      if (escaped.length !== digits || !/^[0-9A-Fa-f]+$/u.test(escaped)) return undefined;
+      index += digits + 1;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Produces a structural representation used only as SHA-256 input.
  * The returned value must never be written to benchmark artifacts or logs.
@@ -39,22 +58,17 @@ function normalizeQueryShape(query) {
       continue;
     }
 
-    // IRI reference. Preserve only the fact that an IRI occupies this position.
+    // `<` is both the opening delimiter for IRIREF and a comparison operator in
+    // SPARQL. Treat it as an IRI only when a lexically plausible IRIREF closes
+    // before whitespace or an IRIREF-forbidden delimiter; otherwise preserve the
+    // comparison operator so FILTER shapes cannot collapse into one fingerprint.
     if (char === '<') {
-      index += 1;
-      while (index < query.length) {
-        if (query[index] === '\\') {
-          index += 2;
-          continue;
-        }
-        if (query[index] === '>') {
-          index += 1;
-          break;
-        }
-        index += 1;
+      const end = iriRefEnd(query, index);
+      if (end !== undefined) {
+        index = end;
+        output += '<IRI>';
+        continue;
       }
-      output += '<IRI>';
-      continue;
     }
 
     // Single-, double-, or triple-quoted SPARQL string literal. Literal content
@@ -101,7 +115,8 @@ function fingerprintQueryShape(query) {
 
 function classifyQueryOperation(query) {
   if (typeof query !== 'string') return 'unknown';
-  const match = query.match(
+  const sanitized = normalizeQueryShape(query);
+  const match = sanitized.match(
     /\b(SELECT|ASK|CONSTRUCT|DESCRIBE|INSERT|DELETE|LOAD|CLEAR|CREATE|DROP|COPY|MOVE|ADD|WITH)\b/iu
   );
   return match ? match[1].toLowerCase() : 'unknown';
@@ -341,6 +356,7 @@ module.exports = {
   classifyQueryOperation,
   createPhase11QueryAttribution,
   fingerprintQueryShape,
+  iriRefEnd,
   normalizeQueryShape,
   queryFromContext,
   safeCallerName
