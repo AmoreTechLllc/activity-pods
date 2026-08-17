@@ -8,6 +8,7 @@ const {
   classifyQueryOperation,
   createPhase11QueryAttribution,
   fingerprintQueryShape,
+  iriRefEnd,
   normalizeQueryShape,
   queryFromContext,
   safeCallerName
@@ -35,9 +36,24 @@ describe('APDM Phase 11 query attribution', () => {
     expect(normalizeQueryShape(first)).not.toContain('42');
   });
 
-  test('classifies read and update operations without exposing query text', () => {
+  test('distinguishes IRI references from less-than comparison operators', () => {
+    const iri = '<https://example.test/resource>';
+    expect(iriRefEnd(iri, 0)).toBe(iri.length);
+    expect(iriRefEnd('?n < 10', 3)).toBeUndefined();
+
+    const lessThan = 'SELECT * WHERE { ?s ?p ?n . FILTER(?n < 10) }';
+    const greaterThan = 'SELECT * WHERE { ?s ?p ?n . FILTER(?n > 10) }';
+    const lessThanOtherConstant = 'SELECT * WHERE { ?s ?p ?n . FILTER(?n < 999) }';
+
+    expect(normalizeQueryShape(lessThan)).toContain('?n < NUMBER');
+    expect(fingerprintQueryShape(lessThan)).toBe(fingerprintQueryShape(lessThanOtherConstant));
+    expect(fingerprintQueryShape(lessThan)).not.toBe(fingerprintQueryShape(greaterThan));
+  });
+
+  test('classifies operations after stripping comments, literals and IRIs', () => {
     expect(classifyQueryOperation('PREFIX ex: <https://example.test/> SELECT * WHERE { ?s ?p ?o }')).toBe('select');
     expect(classifyQueryOperation('WITH <https://example.test/g> DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }')).toBe('with');
+    expect(classifyQueryOperation('# SELECT is only a comment\nASK { ?s ?p "DELETE" }')).toBe('ask');
     expect(classifyQueryOperation(undefined)).toBe('unknown');
   });
 
