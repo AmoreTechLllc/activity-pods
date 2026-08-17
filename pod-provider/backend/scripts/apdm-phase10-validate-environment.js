@@ -53,6 +53,14 @@ function parsePositiveIntegerString(value, label) {
   return parsed;
 }
 
+function captureValidation(failures, validator) {
+  try {
+    validator();
+  } catch (error) {
+    failures.push(error.message);
+  }
+}
+
 function validateEnvironment(control, enabled) {
   const failures = [];
   const resourceDifferences = [];
@@ -60,19 +68,11 @@ function validateEnvironment(control, enabled) {
 
   for (const [label, manifest] of [['control', control], ['enabled', enabled]]) {
     for (const field of REQUIRED_FIELDS) {
-      try {
-        assertNonEmpty(manifest[field], `${label}.${field}`);
-      } catch (error) {
-        failures.push(error.message);
-      }
+      captureValidation(failures, () => assertNonEmpty(manifest[field], `${label}.${field}`));
     }
-    try {
-      assertPositiveInteger(manifest.hostCpuCount, `${label}.hostCpuCount`);
-      assertPositiveInteger(manifest.hostTotalMemoryBytes, `${label}.hostTotalMemoryBytes`);
-      parsePositiveIntegerString(manifest.runAttempt, `${label}.runAttempt`);
-    } catch (error) {
-      failures.push(error.message);
-    }
+    captureValidation(failures, () => assertPositiveInteger(manifest.hostCpuCount, `${label}.hostCpuCount`));
+    captureValidation(failures, () => assertPositiveInteger(manifest.hostTotalMemoryBytes, `${label}.hostTotalMemoryBytes`));
+    captureValidation(failures, () => parsePositiveIntegerString(manifest.runAttempt, `${label}.runAttempt`));
   }
 
   try {
