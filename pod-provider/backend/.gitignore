@@ -13,4 +13,5 @@
 /exports
 /logs
 /.tmp
-/*.rdb
+dump.rdb
+*.rdb
