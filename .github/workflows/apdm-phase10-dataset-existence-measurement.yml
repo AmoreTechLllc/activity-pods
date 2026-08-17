@@ -38,30 +38,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  measure:
-    name: memo ${{ matrix.arm }}
+  measure-paired:
+    name: paired memo OFF ON evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        include:
-          - arm: off
-            memo_enabled: 'false'
-          - arm: on
-            memo_enabled: 'true'
+    timeout-minutes: 360
     defaults:
       run:
         working-directory: pod-provider
     env:
-      APDM_P8_RUN_ID: 'p10-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arm }}'
       APDM_P8_SAMPLES: "${{ github.event.inputs.samples || '3' }}"
       APDM_P8_WARMUPS: "${{ github.event.inputs.warmups || '1' }}"
       APDM_P8_PROVISION_CONCURRENCY: '4'
       APDM_P9_CONCURRENCY: '4'
-      APDM_P10_ARM: '${{ matrix.arm }}'
-      APDM_P10_DATASET_EXIST_MEMO_ENABLED: '${{ matrix.memo_enabled }}'
 
     steps:
       - name: Checkout repository
@@ -72,23 +60,12 @@ jobs:
         with:
           node-version: 22
 
-      - name: Prepare isolated measurement directory
+      - name: Prepare measurement directory
         run: |
           rm -rf measurements
-          mkdir -p measurements
+          mkdir -p measurements/off measurements/on
 
-      - name: Start isolated Fuseki Redis and mailcatcher
-        run: |
-          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d fuseki_test redis mailcatcher
-
-      - name: Bootstrap Fuseki datasets
-        env:
-          FUSEKI_URL: http://localhost:3040
-          AUTH_DATASET: settings
-          WAIT_SECONDS: '60'
-        run: ./scripts/fuseki-bootstrap.sh
-
-      - name: Build benchmark backend image
+      - name: Build benchmark backend image once
         shell: bash
         run: |
           set -euo pipefail
@@ -103,15 +80,21 @@ jobs:
             sleep $((attempt * 10))
           done
 
-      - name: Record measured-arm runtime provenance
+      - name: Measure paired OFF and ON arms on the same runner
         shell: bash
         run: |
           set -euo pipefail
-          export BACKEND_IMAGE_ID="$(docker image inspect apdm-phase8-backend:local --format '{{.Id}}')"
-          export FUSEKI_IMAGE_ID="$(docker inspect "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q fuseki_test)" --format '{{.Image}}')"
-          export REDIS_IMAGE_ID="$(docker inspect "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q redis)" --format '{{.Image}}')"
-          export MAILCATCHER_IMAGE_ID="$(docker inspect "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q mailcatcher)" --format '{{.Image}}')"
-          node - <<'NODE' > "measurements/apdm-p10-environment-${APDM_P10_ARM}.json"
+
+          record_provenance() {
+            local arm="$1"
+            local memo="$2"
+            export APDM_P10_ARM="${arm}"
+            export APDM_P10_DATASET_EXIST_MEMO_ENABLED="${memo}"
+            export BACKEND_IMAGE_ID="$(docker image inspect apdm-phase8-backend:local --format '{{.Id}}')"
+            export FUSEKI_IMAGE_ID="$(docker inspect "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q fuseki_test)" --format '{{.Image}}')"
+            export REDIS_IMAGE_ID="$(docker inspect "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q redis)" --format '{{.Image}}')"
+            export MAILCATCHER_IMAGE_ID="$(docker inspect "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q mailcatcher)" --format '{{.Image}}')"
+            node - <<'NODE' > "measurements/apdm-p10-environment-${APDM_P10_ARM}.json"
           const os = require('os');
           const cpus = os.cpus();
           const manifest = {
@@ -137,92 +120,114 @@ jobs:
           };
           process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
           NODE
-          cat "measurements/apdm-p10-environment-${APDM_P10_ARM}.json"
+          }
 
-      # Fixture creation is held identical across arms. Keep the Phase 10 memo
-      # disabled during provisioning so the only experimental difference occurs
-      # in the measured local fan-out backend recreations below.
-      - name: Start backend for actor provisioning
-        env:
-          APDM_P8_ENABLED: 'false'
-          APDM_P8_COUNT: '0'
-          APDM_P10_DATASET_EXIST_MEMO_ENABLED: 'false'
-        run: |
-          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d --no-deps backend
-          for attempt in $(seq 1 120); do
-            if curl -sS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then exit 0; fi
-            sleep 1
-          done
-          echo 'Backend did not become reachable for provisioning' >&2
-          exit 1
+          run_arm() {
+            local arm="$1"
+            local memo="$2"
+            export APDM_P10_ARM="${arm}"
+            export APDM_P10_DATASET_EXIST_MEMO_ENABLED="${memo}"
+            export APDM_P8_RUN_ID="p10-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arm}"
 
-      - name: Provision fresh sender and 1000 real local recipients
-        env:
-          APDM_P8_ENABLED: 'false'
-          APDM_P8_COUNT: '0'
-          APDM_P10_DATASET_EXIST_MEMO_ENABLED: 'false'
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
-            node scripts/apdm-phase8-real-measure.js provision /app/backend/measurements/apdm-p8-actors.json 1000 \
-            2>&1 | tee "measurements/apdm-p10-provision-${APDM_P10_ARM}.log"
+            # Every arm receives fresh Fuseki/Redis/mailcatcher volumes and a fresh
+            # sender + 1000-recipient fixture. The backend image itself is built
+            # exactly once above and reused byte-for-byte across both arms.
+            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v || true
+            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d fuseki_test redis mailcatcher
 
-      - name: Measure canonical local fanout matrix
-        shell: bash
-        run: |
-          set -euo pipefail
-          for count in 1 10 100 200 1000; do
-            export APDM_P8_ENABLED=true
-            export APDM_P8_COUNT="${count}"
-            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml \
-              up -d --force-recreate --no-deps backend
+            FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=60 ./scripts/fuseki-bootstrap.sh
+            record_provenance "${arm}" "${memo}"
 
-            ready=false
+            APDM_P8_ENABLED=false APDM_P8_COUNT=0 APDM_P10_DATASET_EXIST_MEMO_ENABLED=false \
+              docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d --no-deps backend
+
+            local ready=false
             for attempt in $(seq 1 120); do
               if curl -sS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then ready=true; break; fi
               sleep 1
             done
             if [[ "${ready}" != true ]]; then
-              echo "Backend did not become reachable for Phase 10 arm=${APDM_P10_ARM} N=${count}" >&2
+              echo "Backend did not become reachable for provisioning arm=${arm}" >&2
               exit 1
             fi
 
-            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
-              node scripts/apdm-phase8-warm-restart-ready.js
-            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
-              node scripts/apdm-phase8-real-measure.js measure /app/backend/measurements/apdm-p8-actors.json "${count}"
-          done
+            APDM_P10_DATASET_EXIST_MEMO_ENABLED=false \
+              docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+                node scripts/apdm-phase8-real-measure.js provision /app/backend/measurements/apdm-p8-actors.json 1000 \
+                2>&1 | tee "measurements/apdm-p10-provision-${arm}.log"
 
-      - name: Summarize isolated Phase 10 arm
-        shell: bash
+            for count in 1 10 100 200 1000; do
+              export APDM_P8_ENABLED=true
+              export APDM_P8_COUNT="${count}"
+              docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml \
+                up -d --force-recreate --no-deps backend
+
+              ready=false
+              for attempt in $(seq 1 120); do
+                if curl -sS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then ready=true; break; fi
+                sleep 1
+              done
+              if [[ "${ready}" != true ]]; then
+                echo "Backend did not become reachable for Phase 10 arm=${arm} N=${count}" >&2
+                exit 1
+              fi
+
+              docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+                node scripts/apdm-phase8-warm-restart-ready.js
+              docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+                node scripts/apdm-phase8-real-measure.js measure /app/backend/measurements/apdm-p8-actors.json "${count}"
+            done
+
+            cat measurements/apdm-p8-1.jsonl measurements/apdm-p8-10.jsonl measurements/apdm-p8-100.jsonl \
+                measurements/apdm-p8-200.jsonl measurements/apdm-p8-1000.jsonl \
+                > "measurements/apdm-p10-${arm}-all.jsonl"
+            node backend/scripts/apdm-phase8-summarize.js \
+              "measurements/apdm-p10-${arm}-all.jsonl" \
+              "measurements/apdm-p10-${arm}-summary.json"
+
+            cp "measurements/apdm-p10-provision-${arm}.log" "measurements/${arm}/"
+            cp measurements/apdm-p8-1.jsonl measurements/apdm-p8-10.jsonl measurements/apdm-p8-100.jsonl \
+               measurements/apdm-p8-200.jsonl measurements/apdm-p8-1000.jsonl "measurements/${arm}/"
+            cp "measurements/apdm-p10-${arm}-all.jsonl" "measurements/${arm}/"
+            cp "measurements/apdm-p10-${arm}-summary.json" "measurements/${arm}/"
+            cp "measurements/apdm-p10-environment-${arm}.json" "measurements/${arm}/"
+
+            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v
+          }
+
+          run_arm off false
+          run_arm on true
+
+      - name: Validate evidence provenance
         run: |
-          set -euo pipefail
-          cat measurements/apdm-p8-1.jsonl measurements/apdm-p8-10.jsonl measurements/apdm-p8-100.jsonl \
-              measurements/apdm-p8-200.jsonl measurements/apdm-p8-1000.jsonl \
-              > "measurements/apdm-p10-${APDM_P10_ARM}-all.jsonl"
-          node backend/scripts/apdm-phase8-summarize.js \
-            "measurements/apdm-p10-${APDM_P10_ARM}-all.jsonl" \
-            "measurements/apdm-p10-${APDM_P10_ARM}-summary.json"
-          cat "measurements/apdm-p10-${APDM_P10_ARM}-summary.json"
+          node backend/scripts/apdm-phase10-validate-environment.js \
+            measurements/off/apdm-p10-environment-off.json \
+            measurements/on/apdm-p10-environment-on.json \
+            measurements/apdm-p10-environment-validation.json
+          cat measurements/apdm-p10-environment-validation.json
 
-      - name: Upload isolated Phase 10 evidence
+      - name: Produce Phase 10 comparison
+        run: |
+          node backend/scripts/apdm-phase10-compare.js \
+            measurements/off/apdm-p10-off-summary.json \
+            measurements/on/apdm-p10-on-summary.json \
+            measurements/apdm-p10-comparison.json \
+            measurements/apdm-p10-comparison.md
+          cat measurements/apdm-p10-comparison.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload paired Phase 10 evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: apdm-p10-${{ matrix.arm }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: apdm-p10-paired-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            pod-provider/measurements/apdm-p10-provision-${{ matrix.arm }}.log
-            pod-provider/measurements/apdm-p8-1.jsonl
-            pod-provider/measurements/apdm-p8-10.jsonl
-            pod-provider/measurements/apdm-p8-100.jsonl
-            pod-provider/measurements/apdm-p8-200.jsonl
-            pod-provider/measurements/apdm-p8-1000.jsonl
-            pod-provider/measurements/apdm-p10-${{ matrix.arm }}-all.jsonl
-            pod-provider/measurements/apdm-p10-${{ matrix.arm }}-summary.json
-            pod-provider/measurements/apdm-p10-environment-${{ matrix.arm }}.json
+            pod-provider/measurements/off/
+            pod-provider/measurements/on/
+            pod-provider/measurements/apdm-p10-environment-validation.json
+            pod-provider/measurements/apdm-p10-comparison.json
+            pod-provider/measurements/apdm-p10-comparison.md
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
       - name: Show service logs on failure
         if: failure()
@@ -231,56 +236,3 @@ jobs:
       - name: Stop isolated stack
         if: always()
         run: docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v || true
-
-  compare:
-    name: compare Phase 10 OFF ON evidence
-    needs: measure
-    runs-on: ubuntu-latest
-    if: always() && needs.measure.result == 'success'
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download control evidence
-        uses: actions/download-artifact@v4
-        with:
-          name: apdm-p10-off-${{ github.run_id }}-${{ github.run_attempt }}
-          path: measurements/off
-
-      - name: Download enabled evidence
-        uses: actions/download-artifact@v4
-        with:
-          name: apdm-p10-on-${{ github.run_id }}-${{ github.run_attempt }}
-          path: measurements/on
-
-      - name: Validate evidence provenance
-        run: |
-          node pod-provider/backend/scripts/apdm-phase10-validate-environment.js \
-            measurements/off/apdm-p10-environment-off.json \
-            measurements/on/apdm-p10-environment-on.json \
-            measurements/apdm-p10-environment-validation.json
-          cat measurements/apdm-p10-environment-validation.json
-
-      - name: Produce Phase 10 comparison
-        run: |
-          node pod-provider/backend/scripts/apdm-phase10-compare.js \
-            measurements/off/apdm-p10-off-summary.json \
-            measurements/on/apdm-p10-on-summary.json \
-            measurements/apdm-p10-comparison.json \
-            measurements/apdm-p10-comparison.md
-          cat measurements/apdm-p10-comparison.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload comparative Phase 10 evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: apdm-p10-comparison-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            measurements/apdm-p10-environment-validation.json
-            measurements/apdm-p10-comparison.json
-            measurements/apdm-p10-comparison.md
-            measurements/off/apdm-p10-off-summary.json
-            measurements/on/apdm-p10-on-summary.json
-            measurements/off/apdm-p10-environment-off.json
-            measurements/on/apdm-p10-environment-on.json
-          if-no-files-found: error
-          retention-days: 30
