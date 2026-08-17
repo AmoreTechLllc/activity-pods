@@ -10,7 +10,25 @@ const DEFAULT_ROOT_ACTION = 'activitypub.outbox.post';
 const DEFAULT_QUERY_ACTION = 'triplestore.query';
 const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'apdm-phase11-query-attribution.jsonl');
 const DEFAULT_MAX_KEYS = 4096;
+const DEFAULT_MAX_CONTEXTS = 65536;
 const LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY = 'semapps-atproto.apdm-p8.local-delivery-observer';
+const SAFE_QUERY_OPERATIONS = new Set([
+  'select', 'ask', 'construct', 'describe', 'insert', 'delete',
+  'load', 'clear', 'create', 'drop', 'copy', 'move', 'add', 'with'
+]);
+const SAFE_AST_TYPE_VALUES = new Set([
+  'query', 'update', 'bgp', 'graph', 'group', 'filter', 'bind', 'service',
+  'optional', 'union', 'minus', 'values', 'path', 'operation', 'expression'
+]);
+const SAFE_TERM_TYPES = new Set([
+  'NamedNode', 'BlankNode', 'Literal', 'Variable', 'DefaultGraph', 'Quad'
+]);
+const SAFE_AST_KEYS = new Set([
+  'type', 'queryType', 'where', 'patterns', 'triples', 'name', 'termType', 'value',
+  'variables', 'template', 'expression', 'operator', 'args', 'values', 'group',
+  'having', 'order', 'limit', 'offset', 'distinct', 'reduced', 'silent', 'from',
+  'prefixes', 'updates', 'insert', 'delete', 'using', 'graph', 'source', 'destination'
+]);
 
 function normalizeWhitespace(value) {
   return value.replace(/\s+/gu, ' ').trim();
@@ -35,33 +53,19 @@ function iriRefEnd(query, startIndex) {
   return undefined;
 }
 
-/**
- * Produces a structural representation used only as SHA-256 input.
- * The returned value must never be written to benchmark artifacts or logs.
- * IRIs, quoted literals, blank-node labels and scalar constants are removed so
- * the fingerprint groups equivalent query shapes without retaining Pod/user data.
- */
-function normalizeQueryShape(query) {
-  if (typeof query !== 'string') return `NON_STRING:${query === null ? 'null' : typeof query}`;
-
+function normalizeStringQueryShape(query) {
   let output = '';
   let index = 0;
 
   while (index < query.length) {
     const char = query[index];
 
-    // SPARQL comments run to the end of the line. This branch is reached only
-    // outside strings/IRIs because those constructs are consumed atomically.
     if (char === '#') {
       while (index < query.length && query[index] !== '\n' && query[index] !== '\r') index += 1;
       output += ' ';
       continue;
     }
 
-    // `<` is both the opening delimiter for IRIREF and a comparison operator in
-    // SPARQL. Treat it as an IRI only when a lexically plausible IRIREF closes
-    // before whitespace or an IRIREF-forbidden delimiter; otherwise preserve the
-    // comparison operator so FILTER shapes cannot collapse into one fingerprint.
     if (char === '<') {
       const end = iriRefEnd(query, index);
       if (end !== undefined) {
@@ -71,9 +75,6 @@ function normalizeQueryShape(query) {
       }
     }
 
-    // Single-, double-, or triple-quoted SPARQL string literal. Literal content
-    // is never retained. Language/datatype suffixes are processed normally so
-    // query structure remains distinguishable without revealing the value.
     if (char === '"' || char === "'") {
       const quote = char;
       const triple = query.slice(index, index + 3) === quote.repeat(3);
@@ -109,13 +110,73 @@ function normalizeQueryShape(query) {
     .replace(/\b(?:true|false)\b/giu, 'BOOLEAN');
 }
 
+/**
+ * Normalize a SPARQL.js-style query object without retaining RDF term values,
+ * graph IRIs, literal lexical forms, variable names, arbitrary strings, or
+ * unapproved object-key text. SemApps 1.1.4 triplestore.tripleExist uses this
+ * exact public contract: an object AST whose queryType is ASK. Keeping only
+ * approved structural keys/enums lets equivalent AST templates aggregate while
+ * preventing Pod/user payload material from entering the fingerprint input.
+ */
+function normalizeQueryObjectShape(value, key = undefined, depth = 0) {
+  if (depth > 32) return 'DEPTH_LIMIT';
+  if (value === null) return 'NULL';
+  if (Array.isArray(value)) {
+    return `[${value.map(item => normalizeQueryObjectShape(item, undefined, depth + 1)).join(',')}]`;
+  }
+
+  const valueType = typeof value;
+  if (valueType === 'string') {
+    if (key === 'queryType') {
+      const operation = value.toLowerCase();
+      return SAFE_QUERY_OPERATIONS.has(operation) ? operation.toUpperCase() : 'OPERATION';
+    }
+    if (key === 'type') {
+      const type = value.toLowerCase();
+      return SAFE_AST_TYPE_VALUES.has(type) ? type : 'TYPE';
+    }
+    if (key === 'termType') return SAFE_TERM_TYPES.has(value) ? value : 'TERM';
+    return 'STRING';
+  }
+  if (valueType === 'number' || valueType === 'bigint') return 'NUMBER';
+  if (valueType === 'boolean') return 'BOOLEAN';
+  if (valueType === 'undefined') return 'UNDEFINED';
+  if (valueType !== 'object') return 'SCALAR';
+
+  const entries = Object.entries(value)
+    .map(([rawKey, child]) => {
+      const safeKey = SAFE_AST_KEYS.has(rawKey) ? rawKey : 'FIELD';
+      return [safeKey, normalizeQueryObjectShape(child, safeKey === 'FIELD' ? undefined : rawKey, depth + 1)];
+    })
+    .sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+      leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue)
+    );
+  return `{${entries.map(([entryKey, entryValue]) => `${entryKey}:${entryValue}`).join(',')}}`;
+}
+
+/**
+ * Produces a structural representation used only as SHA-256 input.
+ * The returned value must never be written to benchmark artifacts or logs.
+ */
+function normalizeQueryShape(query) {
+  if (typeof query === 'string') return normalizeStringQueryShape(query);
+  if (query && typeof query === 'object' && !Array.isArray(query)) {
+    return `OBJECT:${normalizeQueryObjectShape(query)}`;
+  }
+  return `UNSUPPORTED:${query === null ? 'null' : typeof query}`;
+}
+
 function fingerprintQueryShape(query) {
   return crypto.createHash('sha256').update(normalizeQueryShape(query), 'utf8').digest('hex');
 }
 
 function classifyQueryOperation(query) {
+  if (query && typeof query === 'object' && !Array.isArray(query)) {
+    const queryType = typeof query.queryType === 'string' ? query.queryType.toLowerCase() : undefined;
+    return queryType && SAFE_QUERY_OPERATIONS.has(queryType) ? queryType : 'unknown';
+  }
   if (typeof query !== 'string') return 'unknown';
-  const sanitized = normalizeQueryShape(query);
+  const sanitized = normalizeStringQueryShape(query);
   const match = sanitized.match(
     /\b(SELECT|ASK|CONSTRUCT|DESCRIBE|INSERT|DELETE|LOAD|CLEAR|CREATE|DROP|COPY|MOVE|ADD|WITH)\b/iu
   );
@@ -125,13 +186,14 @@ function classifyQueryOperation(query) {
 function queryFromContext(ctx) {
   if (!ctx || !ctx.params || typeof ctx.params !== 'object') return undefined;
   if (typeof ctx.params.query === 'string') return ctx.params.query;
+  if (ctx.params.query && typeof ctx.params.query === 'object' && !Array.isArray(ctx.params.query)) return ctx.params.query;
   if (typeof ctx.params.sparql === 'string') return ctx.params.sparql;
   return undefined;
 }
 
-function safeCallerName(ctx, activeActions) {
+function safeCallerName(ctx, contextActions) {
   if (ctx && ctx.parentID != null) {
-    const parent = activeActions.get(String(ctx.parentID));
+    const parent = contextActions.get(String(ctx.parentID));
     if (parent) return parent;
   }
   if (ctx && typeof ctx.caller === 'string' && /^[A-Za-z0-9_.-]+$/u.test(ctx.caller)) return ctx.caller;
@@ -156,6 +218,8 @@ function createPhase11QueryAttribution(options = {}) {
   const queryAction = options.queryAction || DEFAULT_QUERY_ACTION;
   const outputPath = path.resolve(options.outputPath || DEFAULT_OUTPUT);
   const maxKeys = Number.isInteger(options.maxKeys) && options.maxKeys > 0 ? options.maxKeys : DEFAULT_MAX_KEYS;
+  const maxContexts =
+    Number.isInteger(options.maxContexts) && options.maxContexts > 0 ? options.maxContexts : DEFAULT_MAX_CONTEXTS;
   const defaultRecipientCount = Number(options.recipientCount);
   const caseLabel = options.caseLabel || undefined;
   const onInstrumentationError =
@@ -177,7 +241,12 @@ function createPhase11QueryAttribution(options = {}) {
       caseLabel,
       recipientCount: Number.isFinite(defaultRecipientCount) ? defaultRecipientCount : undefined,
       startedAt: new Date().toISOString(),
-      activeActions: new Map(),
+      // Retain context IDs for the bounded lifetime of this one measured root.
+      // Detached local delivery may outlive the JS promise that created a parent
+      // Moleculer action; deleting parent IDs on action settlement loses lineage.
+      contextActions: new Map(),
+      lineageOverflowed: false,
+      droppedLineageContexts: 0,
       aggregates: new Map(),
       totalQueryCalls: 0,
       attributedQueryCalls: 0,
@@ -190,9 +259,19 @@ function createPhase11QueryAttribution(options = {}) {
     };
   }
 
+  function rememberContext(trace, contextId, actionName) {
+    if (!contextId || trace.contextActions.has(contextId)) return;
+    if (trace.contextActions.size >= maxContexts) {
+      trace.lineageOverflowed = true;
+      trace.droppedLineageContexts += 1;
+      return;
+    }
+    trace.contextActions.set(contextId, actionName || 'unknown');
+  }
+
   function recordQuery(trace, ctx, query, durationMs, failed) {
     trace.totalQueryCalls += 1;
-    const caller = safeCallerName(ctx, trace.activeActions);
+    const caller = safeCallerName(ctx, trace.contextActions);
     if (caller === 'unknown') trace.unattributedQueryCalls += 1;
     else trace.attributedQueryCalls += 1;
 
@@ -249,6 +328,9 @@ function createPhase11QueryAttribution(options = {}) {
       distinctAttributionKeys: queries.length,
       overflowed: trace.overflowed,
       droppedCalls: trace.droppedCalls,
+      lineageContextCount: trace.contextActions.size,
+      lineageOverflowed: trace.lineageOverflowed,
+      droppedLineageContexts: trace.droppedLineageContexts,
       queries
     };
 
@@ -264,8 +346,6 @@ function createPhase11QueryAttribution(options = {}) {
   const previousLocalDeliveryObserver = globalThis[observerKey];
 
   const localDeliveryObserver = (phase, activity, error) => {
-    // Preserve the previously installed Phase 8 observer. Its exceptions are
-    // isolated so an observation failure can never alter real delivery.
     if (typeof previousLocalDeliveryObserver === 'function') {
       try {
         previousLocalDeliveryObserver(phase, activity, error);
@@ -299,7 +379,7 @@ function createPhase11QueryAttribution(options = {}) {
         if (!trace) return next(ctx);
 
         const contextId = ctx && ctx.id != null ? String(ctx.id) : undefined;
-        if (contextId) trace.activeActions.set(contextId, actionName || 'unknown');
+        rememberContext(trace, contextId, actionName);
 
         const invoke = async () => {
           if (actionName !== queryAction) return next(ctx);
@@ -325,7 +405,6 @@ function createPhase11QueryAttribution(options = {}) {
           if (isRoot) return await storage.run(trace, invoke);
           return await invoke();
         } finally {
-          if (contextId) trace.activeActions.delete(contextId);
           if (isRoot) {
             trace.rootSettled = true;
             finalize(trace);
@@ -349,6 +428,7 @@ function createPhase11QueryAttribution(options = {}) {
 }
 
 module.exports = {
+  DEFAULT_MAX_CONTEXTS,
   DEFAULT_MAX_KEYS,
   DEFAULT_OUTPUT,
   DEFAULT_QUERY_ACTION,
@@ -357,6 +437,7 @@ module.exports = {
   createPhase11QueryAttribution,
   fingerprintQueryShape,
   iriRefEnd,
+  normalizeQueryObjectShape,
   normalizeQueryShape,
   queryFromContext,
   safeCallerName
