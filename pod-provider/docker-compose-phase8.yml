@@ -69,10 +69,12 @@ services:
 
       # Phase 11 query attribution is measurement-only. The implementation emits
       # only action names, operation classes and SHA-256 structural fingerprints;
-      # the raw SPARQL/IRI/literal payload never enters the artifact.
+      # the raw SPARQL/IRI/literal payload never enters the artifact. Context IDs
+      # are retained only inside one measured trace and are bounded separately.
       SEMAPPS_APDM_PHASE11_QUERY_ATTRIBUTION_ENABLED: '${APDM_P11_ENABLED:-false}'
       SEMAPPS_APDM_PHASE11_QUERY_ATTRIBUTION_OUTPUT: '/app/backend/measurements/apdm-p11-${APDM_P8_COUNT:-0}.jsonl'
       SEMAPPS_APDM_PHASE11_QUERY_ATTRIBUTION_MAX_KEYS: '${APDM_P11_MAX_KEYS:-4096}'
+      SEMAPPS_APDM_PHASE11_QUERY_ATTRIBUTION_MAX_CONTEXTS: '${APDM_P11_MAX_CONTEXTS:-65536}'
 
       # Fixture creation is pipelined in bounded windows. Four simultaneous
       # non-replayable signups cap write pressure; at most 24 actors may have
