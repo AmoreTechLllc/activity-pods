@@ -4,6 +4,8 @@ const crypto = require('crypto');
 const signingService = require('../services/signing.service');
 const {
   MAX_AUTHORIZATION_HEADER_BYTES,
+  MAX_BEARER_TOKEN_BYTES,
+  MIN_SIGNING_TOKEN_BYTES,
   configuredSigningToken,
   isDateWithinSkew,
   parseBearerToken,
@@ -27,12 +29,26 @@ function expectMoleculerError(fn, { code, type, message }) {
 }
 
 describe('signing internal authentication hardening', () => {
-  test('requires an explicit ACTIVITYPODS_TOKEN and never falls back to other shared secrets', () => {
+  test('requires an explicit high-entropy ACTIVITYPODS_TOKEN and never falls back to other shared secrets', () => {
+    const validToken = 'a'.repeat(MIN_SIGNING_TOKEN_BYTES);
+
     expect(configuredSigningToken({})).toBeNull();
     expect(configuredSigningToken({ SIDECAR_TOKEN: 'sidecar-only' })).toBeNull();
     expect(configuredSigningToken({ ACTIVITYPODS_TOKEN: '' })).toBeNull();
-    expect(configuredSigningToken({ ACTIVITYPODS_TOKEN: 'token with spaces' })).toBeNull();
-    expect(configuredSigningToken({ ACTIVITYPODS_TOKEN: 'valid-token_123' })).toBe('valid-token_123');
+    expect(configuredSigningToken({ ACTIVITYPODS_TOKEN: 'a'.repeat(MIN_SIGNING_TOKEN_BYTES - 1) })).toBeNull();
+    expect(configuredSigningToken({ ACTIVITYPODS_TOKEN: 'token with spaces'.padEnd(MIN_SIGNING_TOKEN_BYTES, 'x') })).toBeNull();
+    expect(configuredSigningToken({ ACTIVITYPODS_TOKEN: validToken })).toBe(validToken);
+  });
+
+  test('keeps configured token bounds compatible with the maximum accepted Authorization header', () => {
+    const maxToken = 'a'.repeat(MAX_BEARER_TOKEN_BYTES);
+    const tooLargeToken = 'a'.repeat(MAX_BEARER_TOKEN_BYTES + 1);
+
+    expect(Buffer.byteLength(`Bearer ${maxToken}`, 'utf8')).toBe(MAX_AUTHORIZATION_HEADER_BYTES);
+    expect(configuredSigningToken({ ACTIVITYPODS_TOKEN: maxToken })).toBe(maxToken);
+    expect(parseBearerToken(`Bearer ${maxToken}`)).toBe(maxToken);
+    expect(configuredSigningToken({ ACTIVITYPODS_TOKEN: tooLargeToken })).toBeNull();
+    expect(parseBearerToken(`Bearer ${tooLargeToken}`)).toBeNull();
   });
 
   test('parses RFC 6750 bearer tokens strictly and rejects oversized or ambiguous headers', () => {
