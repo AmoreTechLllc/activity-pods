@@ -141,9 +141,9 @@ async function validateRemoteActorTarget(
     interopPrivateHostnames = interopPrivateHostnamesFromEnvironment()
   } = {}
 ) {
-  let url;
+  let identityUrl;
   try {
-    url = new URL(value);
+    identityUrl = new URL(value);
   } catch {
     throw new UnsafeActivityPubActorTargetError('Remote ActivityPub actor target is not a valid URL');
   }
@@ -151,17 +151,20 @@ async function validateRemoteActorTarget(
   if (typeof value !== 'string' || value.length === 0 || value !== value.trim()) {
     throw new UnsafeActivityPubActorTargetError('Remote ActivityPub actor target must be an exact URL');
   }
-  if (url.username || url.password) {
+  if (identityUrl.username || identityUrl.password) {
     throw new UnsafeActivityPubActorTargetError('Remote ActivityPub actor target must not contain credentials');
   }
-  if (url.hash) {
-    throw new UnsafeActivityPubActorTargetError('Remote ActivityPub actor target must not contain a fragment');
-  }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+  if (identityUrl.protocol !== 'https:' && identityUrl.protocol !== 'http:') {
     throw new UnsafeActivityPubActorTargetError('Remote ActivityPub actor target must use HTTP(S)');
   }
 
-  const hostname = normalizeHostname(url.hostname);
+  // A fragment may be part of the ActivityPub identity IRI, but it is never
+  // transmitted in the HTTP request. Validate and pin the fragmentless network
+  // target while retaining the full identity for response binding.
+  const requestUrl = new URL(identityUrl.toString());
+  requestUrl.hash = '';
+
+  const hostname = normalizeHostname(requestUrl.hostname);
   if (!hostname) throw new UnsafeActivityPubActorTargetError('Remote ActivityPub actor target must contain a hostname');
 
   const literalFamily = isIP(hostname);
@@ -172,12 +175,12 @@ async function validateRemoteActorTarget(
 
   const loopbackException =
     allowLoopbackHttp === true &&
-    url.protocol === 'http:' &&
+    requestUrl.protocol === 'http:' &&
     isExplicitLoopbackHost(hostname) &&
     addresses.every(entry => isLoopbackAddress(entry.address));
 
   const interopPrivateException =
-    url.protocol === 'https:' &&
+    requestUrl.protocol === 'https:' &&
     interopPrivateHostnames?.has(hostname) === true &&
     addresses.every(entry => isInteropPrivateAddress(entry.address));
 
@@ -185,14 +188,15 @@ async function validateRemoteActorTarget(
   if (forbidden && !loopbackException && !interopPrivateException) {
     throw new UnsafeActivityPubActorTargetError('Remote ActivityPub actor target resolved to a forbidden address');
   }
-  if (url.protocol === 'http:' && !loopbackException) {
+  if (requestUrl.protocol === 'http:' && !loopbackException) {
     throw new UnsafeActivityPubActorTargetError(
       'Plain HTTP remote ActivityPub actor discovery is restricted to explicitly permitted loopback tests'
     );
   }
 
   return {
-    url,
+    identityUrl,
+    requestUrl,
     hostname,
     address: addresses[0].address,
     family: addresses[0].family
@@ -214,7 +218,7 @@ function createPinnedLookup(target) {
 }
 
 function createPinnedAgent(target) {
-  const Agent = target.url.protocol === 'https:' ? https.Agent : http.Agent;
+  const Agent = target.requestUrl.protocol === 'https:' ? https.Agent : http.Agent;
   return new Agent({ keepAlive: false, lookup: createPinnedLookup(target) });
 }
 
@@ -245,7 +249,7 @@ async function fetchRemoteActivityPubActor(
   const agent = createPinnedAgent(target);
 
   try {
-    const response = await fetchImpl(target.url.toString(), {
+    const response = await fetchImpl(target.requestUrl.toString(), {
       method: 'GET',
       headers: {
         Accept: 'application/activity+json, application/ld+json, application/json'
@@ -262,7 +266,7 @@ async function fetchRemoteActivityPubActor(
       throw new Error('Remote ActivityPub actor response must be a JSON object');
     }
     const returnedActorUri = actor.id || actor['@id'];
-    if (typeof returnedActorUri !== 'string' || returnedActorUri !== target.url.toString()) {
+    if (typeof returnedActorUri !== 'string' || returnedActorUri !== target.identityUrl.toString()) {
       throw new Error('Remote ActivityPub actor response identity does not match the requested actor URI');
     }
     return actor;
