@@ -173,22 +173,27 @@ async function runRemoteOriginFixture({
     // intentionally outside this deadline because it may legitimately take
     // longer and must not make a healthy federation path look failed.
     latch.arm();
-    const postResult = await broker.call(
-      'activitypub.outbox.post',
-      {
-        collectionUri: sender.outbox,
-        type: 'Create',
-        actor: sender.webId,
-        to: [normalizedRemoteActorUri],
-        object: { type: 'Note', content: marker }
-      },
-      {
-        meta: { webId: sender.webId, dataset: sender.username },
-        requestID: `adsp-p0-origin-${crypto.randomBytes(12).toString('hex')}`
-      }
-    );
+    const [postResult, plannedEvent] = await Promise.all([
+      broker.call(
+        'activitypub.outbox.post',
+        {
+          collectionUri: sender.outbox,
+          type: 'Create',
+          actor: sender.webId,
+          to: [normalizedRemoteActorUri],
+          object: { type: 'Note', content: marker }
+        },
+        {
+          meta: { webId: sender.webId, dataset: sender.username },
+          requestID: `adsp-p0-origin-${crypto.randomBytes(12).toString('hex')}`
+        }
+      ),
+      // Attach the rejection handler at the same boundary as the outbox call;
+      // a slow call cannot leave a timed-out evidence promise temporarily
+      // unobserved and trigger an unhandled-rejection failure.
+      latch.promise
+    ]);
 
-    const plannedEvent = await latch.promise;
     const evidence = buildFixtureEvidence({
       postResult,
       plannedEvent,
