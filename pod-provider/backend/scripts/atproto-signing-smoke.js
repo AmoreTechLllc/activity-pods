@@ -27,8 +27,10 @@
  *   ATPROTO_SMOKE_CANONICAL_ACCOUNT_ID  optional; default: http://localhost:3000/atproto365133
  */
 
+const { configuredSigningToken } = require('../utils/signing-security');
+
 const BASE_URL = process.env.ATPROTO_SMOKE_BASE_URL || "http://localhost:3000";
-const TOKEN = process.env.ACTIVITYPODS_TOKEN;
+const TOKEN = configuredSigningToken();
 const CANONICAL_ACCOUNT_ID =
   process.env.ATPROTO_SMOKE_CANONICAL_ACCOUNT_ID || "http://localhost:3000/atproto365133";
 
@@ -76,8 +78,10 @@ async function getJson(path) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  if (typeof TOKEN !== "string" || TOKEN.length === 0) {
-    throw new Error("ACTIVITYPODS_TOKEN is required for the ATProto signing smoke test");
+  if (!TOKEN) {
+    throw new Error(
+      "ACTIVITYPODS_TOKEN must be a valid high-entropy bearer token for the ATProto signing smoke test"
+    );
   }
 
   const slug = slugFromUrl(CANONICAL_ACCOUNT_ID);
