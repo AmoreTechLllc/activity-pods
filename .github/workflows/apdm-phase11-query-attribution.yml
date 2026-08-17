@@ -22,6 +22,7 @@ on:
       - 'pod-provider/backend/lib/apdm-phase11-query-attribution.js'
       - 'pod-provider/backend/middlewares/apdm-local-delivery-dataset-exist-memo.js'
       - 'pod-provider/backend/moleculer.config.js'
+      - 'pod-provider/backend/scripts/apdm-phase11-runtime-validate.js'
       - 'pod-provider/backend/scripts/apdm-phase11-summarize.js'
       - 'pod-provider/backend/scripts/apdm-phase11-overhead-compare.js'
       - 'pod-provider/backend/scripts/apdm-phase8-real-measure.js'
@@ -30,6 +31,8 @@ on:
       - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-delivery.js'
       - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-delivery-phase9.js'
       - 'pod-provider/backend/tests/apdm-phase11-query-attribution.test.js'
+      - 'pod-provider/backend/tests/apdm-phase11-query-shape-ast.test.js'
+      - 'pod-provider/backend/tests/apdm-phase11-runtime-validate.test.js'
       - 'pod-provider/backend/tests/apdm-phase11-summarize.test.js'
       - 'pod-provider/backend/tests/apdm-phase11-overhead-compare.test.js'
       - 'pod-provider/docker-compose-phase8.yml'
@@ -179,6 +182,8 @@ jobs:
               done
               [[ "${ready}" == true ]] || { echo "Backend not reachable for arm=${arm} N=${count}" >&2; exit 1; }
 
+              docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+                node scripts/apdm-phase11-runtime-validate.js "${attribution}" "${count}"
               docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
                 node scripts/apdm-phase8-warm-restart-ready.js
               docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
