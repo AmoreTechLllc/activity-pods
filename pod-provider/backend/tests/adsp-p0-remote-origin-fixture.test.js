@@ -6,43 +6,76 @@ const {
   REMOTE_DELIVERY_PLANNED_EVENT,
   validateRemoteActorUri
 } = require('../scripts/adsp-p0-remote-origin-fixture');
+const { computeDeliveryPlanIntentId } = require('../utils/activitypub-delivery-plan');
+
+const ACTIVITY_ID = 'https://pods.example/alice/as/activity/1';
+const SENDER_WEB_ID = 'https://pods.example/alice';
+const REMOTE_ACTOR_URI = 'http://127.0.0.1:8787/actor/success';
 
 function createDeliveryPlan(overrides = {}) {
-  return {
+  const plan = {
     schema: 'ap.delivery-plan.v1',
-    intentId: 'intent-123',
-    activityId: 'https://pods.example/alice/as/activity/1',
-    actorUri: 'https://pods.example/alice',
+    activityId: ACTIVITY_ID,
+    actorUri: SENDER_WEB_ID,
     activity: {
-      id: 'https://pods.example/alice/as/activity/1',
+      id: ACTIVITY_ID,
       type: 'Create',
-      actor: 'https://pods.example/alice',
+      actor: SENDER_WEB_ID,
+      to: [REMOTE_ACTOR_URI],
       object: { type: 'Note', content: 'fixture' }
     },
     localRecipients: [],
     remoteRecipients: [
       {
-        actorUri: 'http://127.0.0.1:8787/actor/success',
+        actorUri: REMOTE_ACTOR_URI,
         inboxUrl: 'http://127.0.0.1:8787/inbox/success',
-        targetDomain: '127.0.0.1:8787'
+        targetDomain: '127.0.0.1'
       }
     ],
     meta: { visibility: 'direct', isPublicActivity: false },
     ...overrides
   };
+  plan.intentId = Object.prototype.hasOwnProperty.call(overrides, 'intentId')
+    ? overrides.intentId
+    : computeDeliveryPlanIntentId({
+        activityId: plan.activityId,
+        actorUri: plan.actorUri,
+        localRecipientUris: plan.localRecipients.map(target => target.actorUri),
+        remoteRecipientUris: plan.remoteRecipients.map(target => target.actorUri)
+      });
+  return plan;
 }
 
 function createPlannedEvent(overrides = {}) {
+  const deliveryPlan = overrides.deliveryPlan || createDeliveryPlan();
   return {
-    activity: createDeliveryPlan().activity,
-    deliveryPlan: createDeliveryPlan(),
-    remoteRecipients: ['http://127.0.0.1:8787/actor/success'],
-    localRecipients: [],
+    activity: deliveryPlan.activity,
+    deliveryPlan,
+    remoteRecipients: deliveryPlan.remoteRecipients.map(target => target.actorUri),
+    localRecipients: deliveryPlan.localRecipients.map(target => target.actorUri),
     suppressedNativeRemotePostCount: 1,
     deliveryMode: 'external',
     durableHandoffQueued: true,
     ...overrides
   };
+}
+
+function createPostResult(overrides = {}) {
+  return {
+    id: ACTIVITY_ID,
+    actor: SENDER_WEB_ID,
+    ...overrides
+  };
+}
+
+function buildEvidence(overrides = {}) {
+  return buildFixtureEvidence({
+    postResult: createPostResult(),
+    plannedEvent: createPlannedEvent(),
+    remoteActorUri: REMOTE_ACTOR_URI,
+    senderWebId: SENDER_WEB_ID,
+    ...overrides
+  });
 }
 
 function createFakeBroker() {
@@ -60,9 +93,7 @@ function createFakeBroker() {
 
 describe('ADSP P0 ActivityPods remote-origin fixture', () => {
   test('accepts credential-free HTTP(S) remote actor URIs and rejects unsafe forms', () => {
-    expect(validateRemoteActorUri('http://127.0.0.1:8787/actor/success')).toBe(
-      'http://127.0.0.1:8787/actor/success'
-    );
+    expect(validateRemoteActorUri(REMOTE_ACTOR_URI)).toBe(REMOTE_ACTOR_URI);
     expect(validateRemoteActorUri('https://remote.example/users/alice')).toBe(
       'https://remote.example/users/alice'
     );
@@ -82,7 +113,7 @@ describe('ADSP P0 ActivityPods remote-origin fixture', () => {
     jest.useFakeTimers();
     try {
       const broker = createFakeBroker();
-      const senderWebIdRef = { value: 'https://pods.example/alice' };
+      const senderWebIdRef = { value: SENDER_WEB_ID };
       const marker = 'unique fixture marker';
       const latch = createEvidenceLatch(broker, { senderWebIdRef, marker, timeoutMs: 1000 });
 
@@ -117,22 +148,19 @@ describe('ADSP P0 ActivityPods remote-origin fixture', () => {
   });
 
   test('projects only authority emitted after the real external outbox path durably queues the plan', () => {
-    const result = buildFixtureEvidence({
-      postResult: { id: 'https://pods.example/alice/as/activity/1' },
-      plannedEvent: createPlannedEvent(),
-      remoteActorUri: 'http://127.0.0.1:8787/actor/success'
-    });
+    const plan = createDeliveryPlan();
+    const result = buildEvidence();
 
     expect(result).toEqual({
       schema: 'adsp.p0.activitypods-remote-origin.v1',
-      activityId: 'https://pods.example/alice/as/activity/1',
-      actorUri: 'https://pods.example/alice',
-      activity: createDeliveryPlan().activity,
+      activityId: ACTIVITY_ID,
+      actorUri: SENDER_WEB_ID,
+      activity: plan.activity,
       deliveryPlanSchema: 'ap.delivery-plan.v1',
-      deliveryPlanIntentId: 'intent-123',
-      remoteActorUri: 'http://127.0.0.1:8787/actor/success',
+      deliveryPlanIntentId: plan.intentId,
+      remoteActorUri: REMOTE_ACTOR_URI,
       inboxUrl: 'http://127.0.0.1:8787/inbox/success',
-      targetDomain: '127.0.0.1:8787',
+      targetDomain: '127.0.0.1',
       suppressedNativeRemotePostCount: 1,
       durableHandoffQueued: true
     });
@@ -143,25 +171,41 @@ describe('ADSP P0 ActivityPods remote-origin fixture', () => {
       createPlannedEvent({ deliveryMode: 'native' }),
       createPlannedEvent({ durableHandoffQueued: false })
     ]) {
-      expect(() =>
-        buildFixtureEvidence({
-          postResult: { id: 'https://pods.example/alice/as/activity/1' },
-          plannedEvent,
-          remoteActorUri: 'http://127.0.0.1:8787/actor/success'
-        })
-      ).toThrow(/external durable-handoff authority/u);
+      expect(() => buildEvidence({ plannedEvent })).toThrow(/external durable-handoff authority/u);
     }
   });
 
-  test('fails closed on Activity identity drift or remote-recipient ambiguity', () => {
+  test('fails closed on persisted, event, or Delivery Plan Activity identity drift', () => {
     expect(() =>
-      buildFixtureEvidence({
-        postResult: { id: 'https://pods.example/alice/as/activity/different' },
-        plannedEvent: createPlannedEvent(),
-        remoteActorUri: 'http://127.0.0.1:8787/actor/success'
-      })
+      buildEvidence({ postResult: createPostResult({ id: `${ACTIVITY_ID}-different` }) })
     ).toThrow(/does not match the persisted outbox Activity/u);
 
+    const plannedEvent = createPlannedEvent();
+    plannedEvent.activity = { ...plannedEvent.activity, id: `${ACTIVITY_ID}-different` };
+    expect(() => buildEvidence({ plannedEvent })).toThrow(/does not match the persisted outbox Activity/u);
+  });
+
+  test('fails closed when persisted, emitted, or planned actor authority differs from the genuine sender', () => {
+    expect(() =>
+      buildEvidence({ postResult: createPostResult({ actor: 'https://pods.example/mallory' }) })
+    ).toThrow(/does not match the genuine sender authority/u);
+
+    const eventActorDrift = createPlannedEvent();
+    eventActorDrift.activity = { ...eventActorDrift.activity, actor: 'https://pods.example/mallory' };
+    expect(() => buildEvidence({ plannedEvent: eventActorDrift })).toThrow(/genuine sender authority/u);
+
+    const planActorDrift = createDeliveryPlan({
+      actorUri: 'https://pods.example/mallory',
+      activity: {
+        ...createDeliveryPlan().activity,
+        actor: 'https://pods.example/mallory'
+      }
+    });
+    expect(() => buildEvidence({ plannedEvent: createPlannedEvent({ deliveryPlan: planActorDrift }) }))
+      .toThrow(/genuine sender authority/u);
+  });
+
+  test('fails closed on remote-recipient ambiguity or requested-actor drift', () => {
     const ambiguous = createDeliveryPlan({
       remoteRecipients: [
         createDeliveryPlan().remoteRecipients[0],
@@ -173,21 +217,52 @@ describe('ADSP P0 ActivityPods remote-origin fixture', () => {
       ]
     });
     expect(() =>
-      buildFixtureEvidence({
-        postResult: { id: ambiguous.activityId },
-        plannedEvent: createPlannedEvent({ deliveryPlan: ambiguous }),
-        remoteActorUri: 'http://127.0.0.1:8787/actor/success'
-      })
+      buildEvidence({ plannedEvent: createPlannedEvent({ deliveryPlan: ambiguous }) })
     ).toThrow(/exactly one authoritative remote recipient/u);
+
+    expect(() =>
+      buildEvidence({ remoteActorUri: 'http://127.0.0.1:8787/actor/transient' })
+    ).toThrow(/does not match requested actor/u);
   });
 
-  test('does not accept evidence for a different requested remote actor', () => {
+  test('fails closed if local-recipient or emitted-recipient evidence contaminates the controlled case', () => {
+    const localTarget = {
+      actorUri: 'https://pods.example/bob',
+      dataset: 'bob',
+      inboxUri: 'https://pods.example/bob/inbox'
+    };
+    const contaminatedPlan = createDeliveryPlan({
+      localRecipients: [localTarget]
+    });
     expect(() =>
-      buildFixtureEvidence({
-        postResult: { id: 'https://pods.example/alice/as/activity/1' },
-        plannedEvent: createPlannedEvent(),
-        remoteActorUri: 'http://127.0.0.1:8787/actor/transient'
-      })
-    ).toThrow(/does not match requested actor/u);
+      buildEvidence({ plannedEvent: createPlannedEvent({ deliveryPlan: contaminatedPlan }) })
+    ).toThrow(/authoritative local recipients/u);
+
+    expect(() =>
+      buildEvidence({ plannedEvent: createPlannedEvent({ localRecipients: ['https://pods.example/bob'] }) })
+    ).toThrow(/Emitted local recipient evidence/u);
+
+    expect(() =>
+      buildEvidence({ plannedEvent: createPlannedEvent({ remoteRecipients: ['https://other.example/bob'] }) })
+    ).toThrow(/Emitted remote recipient evidence/u);
+  });
+
+  test('fails closed unless exactly one native remotePost job was suppressed', () => {
+    for (const count of [0, 2, undefined]) {
+      expect(() =>
+        buildEvidence({ plannedEvent: createPlannedEvent({ suppressedNativeRemotePostCount: count }) })
+      ).toThrow(/exactly one suppressed native remotePost job/u);
+    }
+  });
+
+  test('uses the real Delivery Plan validator, including canonical intent and target-domain semantics', () => {
+    const badIntent = createDeliveryPlan({ intentId: 'intent-123' });
+    expect(() => buildEvidence({ plannedEvent: createPlannedEvent({ deliveryPlan: badIntent }) }))
+      .toThrow(/valid authoritative ap\.delivery-plan\.v1/u);
+
+    const badDomain = createDeliveryPlan();
+    badDomain.remoteRecipients = [{ ...badDomain.remoteRecipients[0], targetDomain: '127.0.0.1:8787' }];
+    expect(() => buildEvidence({ plannedEvent: createPlannedEvent({ deliveryPlan: badDomain }) }))
+      .toThrow(/valid authoritative ap\.delivery-plan\.v1/u);
   });
 });
