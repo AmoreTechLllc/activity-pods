@@ -34,6 +34,12 @@ function assertNonEmpty(value, label) {
   }
 }
 
+function assertPositiveInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`Invalid Phase 10 provenance field ${label}: expected a positive safe integer`);
+  }
+}
+
 function validateEnvironment(control, enabled) {
   const failures = [];
   const resourceDifferences = [];
@@ -45,6 +51,12 @@ function validateEnvironment(control, enabled) {
       } catch (error) {
         failures.push(error.message);
       }
+    }
+    try {
+      assertPositiveInteger(manifest.hostCpuCount, `${label}.hostCpuCount`);
+      assertPositiveInteger(manifest.hostTotalMemoryBytes, `${label}.hostTotalMemoryBytes`);
+    } catch (error) {
+      failures.push(error.message);
     }
   }
 
@@ -74,13 +86,19 @@ function validateEnvironment(control, enabled) {
     }
   }
 
+  // This validator is the workflow's authoritative pre-comparison gate. The
+  // paired Phase 10 design promises one runner precisely so elapsed/CPU/heap
+  // interpretation is not mixed across host classes. Resource mismatches are
+  // therefore evidence-invalid, not merely advisory metadata.
+  const passed = failures.length === 0 && resourceDifferences.length === 0;
+
   return {
     phase: REQUIRED_PHASE,
-    passed: failures.length === 0,
+    passed,
     requiredConcurrency: REQUIRED_CONCURRENCY,
     hardMatchedFields: HARD_MATCHED_FIELDS,
     resourceComparabilityFields: RESOURCE_COMPARABILITY_FIELDS,
-    resourceComparable: failures.length === 0 && resourceDifferences.length === 0,
+    resourceComparable: passed,
     resourceDifferences,
     control: { arm: control.arm, memoEnabled: control.memoEnabled },
     enabled: { arm: enabled.arm, memoEnabled: enabled.memoEnabled },
@@ -111,5 +129,6 @@ module.exports = {
   RESOURCE_COMPARABILITY_FIELDS,
   REQUIRED_CONCURRENCY,
   REQUIRED_PHASE,
+  assertPositiveInteger,
   validateEnvironment
 };
