@@ -35,6 +35,14 @@ const SAFE_AST_KEYS = new Set([
   'offset', 'distinct', 'reduced', 'silent', 'from', 'prefixes', 'updates',
   'insert', 'delete', 'using', 'graph', 'source', 'destination'
 ]);
+const TERM_SLOT_PREFIX = Object.freeze({
+  NamedNode: 'IRI',
+  BlankNode: 'BNODE',
+  Literal: 'LITERAL',
+  Variable: 'VAR',
+  DefaultGraph: 'DEFAULT_GRAPH',
+  Quad: 'QUAD'
+});
 
 function normalizeWhitespace(value) {
   return value.replace(/\s+/gu, ' ').trim();
@@ -116,19 +124,28 @@ function normalizeStringQueryShape(query) {
     .replace(/\b(?:true|false)\b/giu, 'BOOLEAN');
 }
 
-/**
- * Normalize a SPARQL.js-style query object without retaining RDF term values,
- * graph IRIs, literal lexical forms, variable names, arbitrary strings, or
- * unapproved object-key text. SemApps 1.1.4 triplestore.tripleExist uses this
- * exact public contract: an object AST whose queryType is ASK. Keeping only
- * approved structural keys/enums lets equivalent AST templates aggregate while
- * preventing Pod/user payload material from entering the fingerprint input.
- */
-function normalizeQueryObjectShape(value, key = undefined, depth = 0) {
+function createObjectShapeState() {
+  return { termSlots: new Map(), nextByPrefix: new Map() };
+}
+
+function opaqueTermSlot(termType, rawValue, state) {
+  const prefix = TERM_SLOT_PREFIX[termType] || 'TERM';
+  const key = `${termType}\u0000${typeof rawValue}\u0000${String(rawValue)}`;
+  const existing = state.termSlots.get(key);
+  if (existing) return existing;
+  const next = (state.nextByPrefix.get(prefix) || 0) + 1;
+  state.nextByPrefix.set(prefix, next);
+  const token = `${prefix}${next}`;
+  state.termSlots.set(key, token);
+  return token;
+}
+
+function normalizeQueryObjectShape(value, key = undefined, depth = 0, state = undefined) {
+  const currentState = state || createObjectShapeState();
   if (depth > 32) return 'DEPTH_LIMIT';
   if (value === null) return 'NULL';
   if (Array.isArray(value)) {
-    return `[${value.map(item => normalizeQueryObjectShape(item, undefined, depth + 1)).join(',')}]`;
+    return `[${value.map(item => normalizeQueryObjectShape(item, undefined, depth + 1, currentState)).join(',')}]`;
   }
 
   const valueType = typeof value;
@@ -150,10 +167,19 @@ function normalizeQueryObjectShape(value, key = undefined, depth = 0) {
   if (valueType === 'undefined') return 'UNDEFINED';
   if (valueType !== 'object') return 'SCALAR';
 
+  const termType = typeof value.termType === 'string' && SAFE_TERM_TYPES.has(value.termType)
+    ? value.termType
+    : undefined;
   const entries = Object.entries(value)
     .map(([rawKey, child]) => {
       const safeKey = SAFE_AST_KEYS.has(rawKey) ? rawKey : 'FIELD';
-      return [safeKey, normalizeQueryObjectShape(child, safeKey === 'FIELD' ? undefined : rawKey, depth + 1)];
+      if (safeKey === 'value' && termType && (typeof child === 'string' || typeof child === 'number' || typeof child === 'boolean')) {
+        return [safeKey, opaqueTermSlot(termType, child, currentState)];
+      }
+      return [
+        safeKey,
+        normalizeQueryObjectShape(child, safeKey === 'FIELD' ? undefined : rawKey, depth + 1, currentState)
+      ];
     })
     .sort(([leftKey, leftValue], [rightKey, rightValue]) =>
       leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue)
@@ -161,10 +187,6 @@ function normalizeQueryObjectShape(value, key = undefined, depth = 0) {
   return `{${entries.map(([entryKey, entryValue]) => `${entryKey}:${entryValue}`).join(',')}}`;
 }
 
-/**
- * Produces a structural representation used only as SHA-256 input.
- * The returned value must never be written to benchmark artifacts or logs.
- */
 function normalizeQueryShape(query) {
   if (typeof query === 'string') return normalizeStringQueryShape(query);
   if (query && typeof query === 'object' && !Array.isArray(query)) {
@@ -214,10 +236,7 @@ function writeJsonLine(outputPath, record) {
 
 function createPhase11QueryAttribution(options = {}) {
   if (options.enabled !== true) {
-    return {
-      middleware: null,
-      dispose() {}
-    };
+    return { middleware: null, dispose() {} };
   }
 
   const storage = new AsyncLocalStorage();
@@ -225,19 +244,13 @@ function createPhase11QueryAttribution(options = {}) {
   const queryAction = options.queryAction || DEFAULT_QUERY_ACTION;
   const outputPath = path.resolve(options.outputPath || DEFAULT_OUTPUT);
   const maxKeys = Number.isInteger(options.maxKeys) && options.maxKeys > 0 ? options.maxKeys : DEFAULT_MAX_KEYS;
-  const maxContexts =
-    Number.isInteger(options.maxContexts) && options.maxContexts > 0 ? options.maxContexts : DEFAULT_MAX_CONTEXTS;
+  const maxContexts = Number.isInteger(options.maxContexts) && options.maxContexts > 0 ? options.maxContexts : DEFAULT_MAX_CONTEXTS;
   const defaultRecipientCount = Number(options.recipientCount);
   const caseLabel = options.caseLabel || undefined;
-  const onInstrumentationError =
-    typeof options.onInstrumentationError === 'function' ? options.onInstrumentationError : () => {};
+  const onInstrumentationError = typeof options.onInstrumentationError === 'function' ? options.onInstrumentationError : () => {};
 
   function reportInstrumentationError(error) {
-    try {
-      onInstrumentationError(error);
-    } catch (_ignored) {
-      // Attribution must never affect delivery semantics.
-    }
+    try { onInstrumentationError(error); } catch (_ignored) {}
   }
 
   function newTrace(ctx) {
@@ -283,25 +296,15 @@ function createPhase11QueryAttribution(options = {}) {
     const operation = classifyQueryOperation(query);
     const key = `${caller}\u0000${operation}\u0000${shapeHash}`;
     let aggregate = trace.aggregates.get(key);
-
     if (!aggregate) {
       if (trace.aggregates.size >= maxKeys) {
         trace.overflowed = true;
         trace.droppedCalls += 1;
         return;
       }
-      aggregate = {
-        caller,
-        operation,
-        shapeHash,
-        count: 0,
-        errorCount: 0,
-        totalDurationMs: 0,
-        maxDurationMs: 0
-      };
+      aggregate = { caller, operation, shapeHash, count: 0, errorCount: 0, totalDurationMs: 0, maxDurationMs: 0 };
       trace.aggregates.set(key, aggregate);
     }
-
     aggregate.count += 1;
     if (failed) aggregate.errorCount += 1;
     aggregate.totalDurationMs += durationMs;
@@ -311,13 +314,11 @@ function createPhase11QueryAttribution(options = {}) {
   function finalize(trace) {
     if (!trace || trace.finalized || !trace.rootSettled || trace.pendingDetachedLocalDeliveries > 0) return false;
     trace.finalized = true;
-
     const queries = [...trace.aggregates.values()].sort((a, b) => {
       if (b.count !== a.count) return b.count - a.count;
       if (b.totalDurationMs !== a.totalDurationMs) return b.totalDurationMs - a.totalDurationMs;
       return `${a.caller}:${a.shapeHash}`.localeCompare(`${b.caller}:${b.shapeHash}`);
     });
-
     const record = {
       version: trace.version,
       phase: trace.phase,
@@ -337,27 +338,16 @@ function createPhase11QueryAttribution(options = {}) {
       droppedLineageContexts: trace.droppedLineageContexts,
       queries
     };
-
-    try {
-      writeJsonLine(outputPath, record);
-    } catch (error) {
-      reportInstrumentationError(error);
-    }
+    try { writeJsonLine(outputPath, record); } catch (error) { reportInstrumentationError(error); }
     return true;
   }
 
   const observerKey = Symbol.for(LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY);
   const previousLocalDeliveryObserver = globalThis[observerKey];
-
   const localDeliveryObserver = (phase, activity, error) => {
     if (typeof previousLocalDeliveryObserver === 'function') {
-      try {
-        previousLocalDeliveryObserver(phase, activity, error);
-      } catch (observerError) {
-        reportInstrumentationError(observerError);
-      }
+      try { previousLocalDeliveryObserver(phase, activity, error); } catch (observerError) { reportInstrumentationError(observerError); }
     }
-
     const trace = storage.getStore();
     if (!trace) return;
     if (phase === 'start') {
@@ -369,7 +359,6 @@ function createPhase11QueryAttribution(options = {}) {
       finalize(trace);
     }
   };
-
   globalThis[observerKey] = localDeliveryObserver;
 
   const middleware = {
@@ -381,30 +370,20 @@ function createPhase11QueryAttribution(options = {}) {
         const isRoot = actionName === rootAction && !currentTrace;
         const trace = currentTrace || (isRoot ? newTrace(ctx) : undefined);
         if (!trace) return next(ctx);
-
         const contextId = ctx && ctx.id != null ? String(ctx.id) : undefined;
         rememberContext(trace, contextId, actionName);
-
         const invoke = async () => {
           if (actionName !== queryAction) return next(ctx);
-
           const query = queryFromContext(ctx);
           const started = performance.now();
           let failed = false;
-          try {
-            return await next(ctx);
-          } catch (error) {
-            failed = true;
-            throw error;
-          } finally {
-            try {
-              recordQuery(trace, ctx, query, performance.now() - started, failed);
-            } catch (error) {
-              reportInstrumentationError(error);
-            }
+          try { return await next(ctx); }
+          catch (error) { failed = true; throw error; }
+          finally {
+            try { recordQuery(trace, ctx, query, performance.now() - started, failed); }
+            catch (error) { reportInstrumentationError(error); }
           }
         };
-
         try {
           if (isRoot) return await storage.run(trace, invoke);
           return await invoke();
@@ -438,11 +417,13 @@ module.exports = {
   DEFAULT_QUERY_ACTION,
   DEFAULT_ROOT_ACTION,
   classifyQueryOperation,
+  createObjectShapeState,
   createPhase11QueryAttribution,
   fingerprintQueryShape,
   iriRefEnd,
   normalizeQueryObjectShape,
   normalizeQueryShape,
+  opaqueTermSlot,
   queryFromContext,
   safeCallerName
 };
