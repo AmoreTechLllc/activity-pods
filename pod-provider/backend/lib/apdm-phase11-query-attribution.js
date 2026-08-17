@@ -151,12 +151,18 @@ function queryFromContext(ctx) {
   if (typeof ctx.params.sparql === 'string') return ctx.params.sparql;
   return undefined;
 }
-function safeCallerName(ctx, contextActions) {
+function safeActionName(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_.-]+$/u.test(value) ? value : undefined;
+}
+function safeCallerName(ctx, contextActions, inheritedActionName) {
   if (ctx && ctx.parentID != null) {
     const parent = contextActions.get(String(ctx.parentID));
     if (parent) return parent;
   }
-  if (ctx && typeof ctx.caller === 'string' && /^[A-Za-z0-9_.-]+$/u.test(ctx.caller)) return ctx.caller;
+  const caller = safeActionName(ctx && ctx.caller);
+  if (caller) return caller;
+  const inheritedCaller = safeActionName(inheritedActionName);
+  if (inheritedCaller) return inheritedCaller;
   return 'unknown';
 }
 function writeJsonLine(outputPath, record) {
@@ -167,6 +173,7 @@ function writeJsonLine(outputPath, record) {
 function createPhase11QueryAttribution(options = {}) {
   if (options.enabled !== true) return { middleware: null, dispose() {} };
   const storage = new AsyncLocalStorage();
+  const actionStorage = new AsyncLocalStorage();
   const rootAction = options.rootAction || DEFAULT_ROOT_ACTION;
   const queryAction = options.queryAction || DEFAULT_QUERY_ACTION;
   const outputPath = path.resolve(options.outputPath || DEFAULT_OUTPUT);
@@ -188,9 +195,9 @@ function createPhase11QueryAttribution(options = {}) {
     if (trace.contextActions.size >= maxContexts) { trace.lineageOverflowed = true; trace.droppedLineageContexts += 1; return; }
     trace.contextActions.set(contextId, actionName || 'unknown');
   }
-  function recordQuery(trace, ctx, query, durationMs, failed) {
+  function recordQuery(trace, ctx, query, durationMs, failed, inheritedActionName) {
     trace.totalQueryCalls += 1;
-    const caller = safeCallerName(ctx, trace.contextActions);
+    const caller = safeCallerName(ctx, trace.contextActions, inheritedActionName);
     if (caller === 'unknown') trace.unattributedQueryCalls += 1; else trace.attributedQueryCalls += 1;
     const shapeHash = fingerprintQueryShape(query);
     const operation = classifyQueryOperation(query);
@@ -238,6 +245,7 @@ function createPhase11QueryAttribution(options = {}) {
       const actionName = action && action.name;
       return async function apdmPhase11AttributedAction(ctx) {
         const currentTrace = storage.getStore();
+        const inheritedActionName = actionStorage.getStore();
         const isRoot = actionName === rootAction && !currentTrace;
         const trace = currentTrace || (isRoot ? newTrace(ctx) : undefined);
         if (!trace) return next(ctx);
@@ -249,9 +257,10 @@ function createPhase11QueryAttribution(options = {}) {
           let failed = false;
           try { return await next(ctx); }
           catch (error) { failed = true; throw error; }
-          finally { try { recordQuery(trace, ctx, query, performance.now()-started, failed); } catch (error) { reportInstrumentationError(error); } }
+          finally { try { recordQuery(trace, ctx, query, performance.now()-started, failed, inheritedActionName); } catch (error) { reportInstrumentationError(error); } }
         };
-        try { return isRoot ? await storage.run(trace, invoke) : await invoke(); }
+        const invokeWithinAction = () => actionStorage.run(actionName, invoke);
+        try { return isRoot ? await storage.run(trace, invokeWithinAction) : await invokeWithinAction(); }
         finally { if (isRoot) { trace.rootSettled = true; finalize(trace); } }
       };
     }
@@ -261,6 +270,7 @@ function createPhase11QueryAttribution(options = {}) {
     if (globalThis[observerKey] === localDeliveryObserver) {
       if (previousLocalDeliveryObserver === undefined) delete globalThis[observerKey]; else globalThis[observerKey] = previousLocalDeliveryObserver;
     }
+    actionStorage.disable();
     storage.disable();
   } };
 }
