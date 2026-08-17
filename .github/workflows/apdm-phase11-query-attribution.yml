@@ -149,6 +149,7 @@ jobs:
             export APDM_P11_ARM="${arm}"
             export APDM_P11_ENABLED="${attribution}"
             export APDM_P8_RUN_ID="p11-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arm}"
+            rm -f "measurements/apdm-p11-runtime-${arm}.jsonl"
 
             reset_arm_storage
             docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d fuseki_test redis mailcatcher
@@ -183,7 +184,8 @@ jobs:
               [[ "${ready}" == true ]] || { echo "Backend not reachable for arm=${arm} N=${count}" >&2; exit 1; }
 
               docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
-                node scripts/apdm-phase11-runtime-validate.js "${attribution}" "${count}"
+                node scripts/apdm-phase11-runtime-validate.js "${attribution}" "${count}" \
+                | tee -a "measurements/apdm-p11-runtime-${arm}.jsonl"
               docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
                 node scripts/apdm-phase8-warm-restart-ready.js
               docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
@@ -195,7 +197,7 @@ jobs:
             node backend/scripts/apdm-phase8-summarize.js \
               "measurements/apdm-p11-${arm}-all.jsonl" "measurements/apdm-p11-${arm}-summary.json"
 
-            cp "measurements/apdm-p11-provision-${arm}.log" "measurements/${arm}/"
+            cp "measurements/apdm-p11-provision-${arm}.log" "measurements/apdm-p11-runtime-${arm}.jsonl" "measurements/${arm}/"
             cp measurements/apdm-p8-1.jsonl measurements/apdm-p8-10.jsonl measurements/apdm-p8-100.jsonl \
                measurements/apdm-p8-200.jsonl measurements/apdm-p8-1000.jsonl "measurements/${arm}/"
             cp "measurements/apdm-p11-${arm}-all.jsonl" "measurements/apdm-p11-${arm}-summary.json" \
