@@ -136,10 +136,8 @@ function tryWriteJsonLine(outputPath, record, onInstrumentationError = () => {})
 function getRequestTarget(args, protocol) {
   if (args.length === 0) return undefined;
   const [first] = args;
-
   if (first instanceof URL) return first;
   if (typeof first === 'string') return normalizeUrl(first);
-
   if (first && typeof first === 'object') {
     if (first.href) return normalizeUrl(first.href);
     let hostname = first.hostname || first.host;
@@ -152,31 +150,42 @@ function getRequestTarget(args, protocol) {
     const requestPath = first.path || first.pathname || '/';
     return normalizeUrl(`${scheme}//${hostname}${port}${requestPath}`);
   }
-
   return undefined;
 }
 
 function getRequestMethod(args) {
   const explicitMethodOptions = args.find(
-    value =>
-      value &&
-      typeof value === 'object' &&
-      !(value instanceof URL) &&
-      typeof value.method === 'string' &&
-      value.method.length > 0
+    value => value && typeof value === 'object' && !(value instanceof URL) && typeof value.method === 'string' && value.method.length > 0
   );
   return String((explicitMethodOptions && explicitMethodOptions.method) || 'GET').toUpperCase();
 }
 
+function matchingFusekiTarget(target, fusekiTargets) {
+  if (!target) return undefined;
+  return fusekiTargets
+    .filter(candidate => {
+      if (!candidate || candidate.origin !== target.origin) return false;
+      const prefix = candidate.pathname.replace(/\/$/u, '');
+      return prefix === '' || target.pathname === prefix || target.pathname.startsWith(`${prefix}/`);
+    })
+    .sort((left, right) => right.pathname.length - left.pathname.length)[0];
+}
+
 function targetMatchesFuseki(target, fusekiTargets) {
-  if (!target) return false;
-  return fusekiTargets.some(candidate => {
-    if (!candidate) return false;
-    if (candidate.origin !== target.origin) return false;
-    const prefix = candidate.pathname.replace(/\/$/u, '');
-    if (prefix === '') return true;
-    return target.pathname === prefix || target.pathname.startsWith(`${prefix}/`);
-  });
+  return matchingFusekiTarget(target, fusekiTargets) !== undefined;
+}
+
+function evidenceFusekiPath(target, fusekiTargets) {
+  if (!target) return undefined;
+  if (/^\/\$\/datasets\/[^/]+\/?$/u.test(target.pathname)) return '/$/datasets/:dataset';
+  const candidate = matchingFusekiTarget(target, fusekiTargets);
+  if (!candidate) return undefined;
+  const configuredPrefix = candidate.pathname.replace(/\/$/u, '');
+  if (configuredPrefix !== '') return target.pathname;
+
+  const segments = target.pathname.split('/').filter(Boolean);
+  if (segments.length === 0 || segments[0] === '$') return target.pathname;
+  return `/:dataset${segments.length > 1 ? `/${segments.slice(1).join('/')}` : ''}`;
 }
 
 function installFusekiHttpProbe({ storage, fusekiUrls = [] }) {
@@ -194,17 +203,16 @@ function installFusekiHttpProbe({ storage, fusekiUrls = [] }) {
     function instrumentedRequest(...args) {
       const trace = storage.getStore();
       const target = getRequestTarget(args, transport === https ? 'https' : 'http');
-      if (!trace || !targetMatchesFuseki(target, targets)) {
-        return originalRequest.apply(this, args);
-      }
+      if (!trace || !targetMatchesFuseki(target, targets)) return originalRequest.apply(this, args);
 
       const method = getRequestMethod(args);
+      const evidencePath = evidenceFusekiPath(target, targets);
       const started = performance.now();
       let accounted = false;
       trace.fuseki.requestCount += 1;
       increment(trace.fuseki.methodCounts, method);
-      increment(trace.fuseki.pathCounts, target.pathname);
-      increment(trace.fuseki.requestKeyCounts, `${method} ${target.pathname}`);
+      increment(trace.fuseki.pathCounts, evidencePath);
+      increment(trace.fuseki.requestKeyCounts, `${method} ${evidencePath}`);
 
       const accountCompletion = error => {
         if (accounted) return;
@@ -239,40 +247,28 @@ function installFusekiHttpProbe({ storage, fusekiUrls = [] }) {
 }
 
 function createPhase8Tier1Instrumentation(options = {}) {
-  const enabled = options.enabled === true;
-  if (!enabled) {
-    return {
-      middleware: null,
-      dispose() {}
-    };
-  }
+  if (options.enabled !== true) return { middleware: null, dispose() {} };
 
   const storage = new AsyncLocalStorage();
   const rootAction = options.rootAction || DEFAULT_ROOT_ACTION;
   const outputPath = path.resolve(options.outputPath || DEFAULT_OUTPUT);
   const defaultRecipientCount = Number(options.recipientCount);
   const caseLabel = options.caseLabel || undefined;
-  const onInstrumentationError =
-    typeof options.onInstrumentationError === 'function' ? options.onInstrumentationError : () => {};
+  const onInstrumentationError = typeof options.onInstrumentationError === 'function' ? options.onInstrumentationError : () => {};
   const restoreHttp = installFusekiHttpProbe({
     storage,
     fusekiUrls: [options.fusekiBase, options.sparqlEndpoint].filter(Boolean)
   });
 
   function reportInstrumentationError(error) {
-    try {
-      onInstrumentationError(error);
-    } catch (_ignored) {
-      // Instrumentation callbacks must never block the real delivery path.
-    }
+    try { onInstrumentationError(error); } catch (_ignored) {}
   }
 
   function maybeFinalizeTrace(trace) {
     if (!trace || trace.finalized || !trace.rootSettled || trace.pendingDetachedLocalDeliveries > 0) return false;
     trace.finalized = true;
     try {
-      const record = finishTrace(trace, trace.rootError);
-      tryWriteJsonLine(outputPath, record, reportInstrumentationError);
+      tryWriteJsonLine(outputPath, finishTrace(trace, trace.rootError), reportInstrumentationError);
     } catch (error) {
       reportInstrumentationError(error);
     }
@@ -286,50 +282,37 @@ function createPhase8Tier1Instrumentation(options = {}) {
 
   const localDeliveryObserver = (phase, activity, error) => {
     if (typeof previousLocalDeliveryObserver === 'function') {
-      try {
-        previousLocalDeliveryObserver(phase, activity, error);
-      } catch (observerError) {
-        reportInstrumentationError(observerError);
-      }
+      try { previousLocalDeliveryObserver(phase, activity, error); } catch (observerError) { reportInstrumentationError(observerError); }
     }
-
     const trace = storage.getStore();
     if (!trace) return;
-
     if (phase === 'start') {
       trace.pendingDetachedLocalDeliveries += 1;
       return;
     }
-
     if (phase === 'finish') {
+      if (trace.pendingDetachedLocalDeliveries <= 0) {
+        trace.errors.push({ source: 'detached-local-delivery-observer-unbalanced' });
+        maybeFinalizeTrace(trace);
+        return;
+      }
       if (error) trace.errors.push(safeErrorMetadata('detached-local-delivery', error));
-      trace.pendingDetachedLocalDeliveries = Math.max(0, trace.pendingDetachedLocalDeliveries - 1);
+      trace.pendingDetachedLocalDeliveries -= 1;
       maybeFinalizeTrace(trace);
+      return;
     }
+    trace.errors.push({ source: 'detached-local-delivery-observer-unknown-phase' });
   };
 
   const localDeliveryResultObserver = (activity, result) => {
     if (typeof previousLocalDeliveryResultObserver === 'function') {
-      try {
-        previousLocalDeliveryResultObserver(activity, result);
-      } catch (observerError) {
-        reportInstrumentationError(observerError);
-      }
+      try { previousLocalDeliveryResultObserver(activity, result); } catch (observerError) { reportInstrumentationError(observerError); }
     }
-
     const trace = storage.getStore();
     if (!trace || !result) return;
-
     const successes = Array.isArray(result.success) ? result.success : [];
     const failures = Array.isArray(result.failures) ? result.failures : [];
-
-    if (failures.length > 0) {
-      trace.errors.push({
-        source: 'detached-local-delivery-partial',
-        failureCount: failures.length
-      });
-    }
-
+    if (failures.length > 0) trace.errors.push({ source: 'detached-local-delivery-partial', failureCount: failures.length });
     if (Number.isInteger(trace.recipientCount) && trace.recipientCount > 0 && successes.length !== trace.recipientCount) {
       trace.errors.push({
         source: 'detached-local-delivery-count-mismatch',
@@ -351,7 +334,6 @@ function createPhase8Tier1Instrumentation(options = {}) {
         const currentTrace = storage.getStore();
         const isRoot = actionName === rootAction && !currentTrace;
         let trace = currentTrace;
-
         if (isRoot) {
           try {
             trace = createTrace({
@@ -364,14 +346,12 @@ function createPhase8Tier1Instrumentation(options = {}) {
             return next(ctx);
           }
         }
-
         if (!trace) return next(ctx);
 
         const started = performance.now();
         trace.actionCount += 1;
         increment(trace.actionCounts, actionName || 'unknown');
         increment(trace.categoryCounts, classifyAction(actionName));
-
         const invoke = async () => {
           try {
             return await next(ctx);
@@ -382,9 +362,7 @@ function createPhase8Tier1Instrumentation(options = {}) {
             increment(trace.actionDurationsMs, actionName || 'unknown', performance.now() - started);
           }
         };
-
         if (!isRoot) return invoke();
-
         try {
           return await storage.run(trace, invoke);
         } catch (error) {
@@ -423,10 +401,12 @@ module.exports = {
   LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY,
   classifyAction,
   createTrace,
+  evidenceFusekiPath,
   finishTrace,
   createPhase8Tier1Instrumentation,
   getRequestMethod,
   installFusekiHttpProbe,
+  matchingFusekiTarget,
   normalizeUrl,
   safeErrorMetadata,
   targetMatchesFuseki,
