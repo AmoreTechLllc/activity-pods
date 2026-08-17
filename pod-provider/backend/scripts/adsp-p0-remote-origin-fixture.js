@@ -37,6 +37,12 @@ function validateRemoteActorUri(value) {
   return parsed.toString();
 }
 
+function normalizeEntityId(value) {
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value.id || value['@id'] || null;
+  return null;
+}
+
 function createRunnerBroker(transporterUrl, runId) {
   return new ServiceBroker({
     nodeID: `adsp-p0-remote-origin-${normalizeRunId(runId)}-${process.pid}`,
@@ -74,8 +80,10 @@ function createEvidenceLatch(broker, { senderWebIdRef, marker, timeoutMs }) {
       [REMOTE_DELIVERY_PLANNED_EVENT]: {
         handler(ctx) {
           const activity = ctx?.params?.activity;
-          const actorUri = typeof activity?.actor === 'string' ? activity.actor : activity?.actor?.id || activity?.actor?.['@id'];
-          const object = activity?.object && typeof activity.object === 'object' ? activity.object : null;
+          const actorUri = normalizeEntityId(activity?.actor);
+          const object = activity?.object && typeof activity.object === 'object' && !Array.isArray(activity.object)
+            ? activity.object
+            : null;
           if (!armed || !senderWebIdRef.value || actorUri !== senderWebIdRef.value || object?.content !== marker) return;
           settle(ctx.params);
         }
@@ -100,20 +108,55 @@ function createEvidenceLatch(broker, { senderWebIdRef, marker, timeoutMs }) {
   };
 }
 
-function buildFixtureEvidence({ postResult, plannedEvent, remoteActorUri }) {
+function assertExactStringArray(value, expected, label) {
+  if (!Array.isArray(value) || value.length !== expected.length || value.some((item, index) => item !== expected[index])) {
+    throw new Error(`${label} does not match the measured Activity authority`);
+  }
+}
+
+function buildFixtureEvidence({ postResult, plannedEvent, remoteActorUri, senderWebId }) {
   if (!postResult || typeof postResult !== 'object' || typeof postResult.id !== 'string' || postResult.id.length === 0) {
     throw new Error('ActivityPods outbox post did not return a persisted Activity with an id');
   }
+  if (typeof senderWebId !== 'string' || senderWebId.length === 0) {
+    throw new Error('ActivityPods remote-origin evidence requires the genuine sender WebID');
+  }
+
   const deliveryPlan = plannedEvent?.deliveryPlan;
   if (!validateDeliveryPlanV1(deliveryPlan)) {
     throw new Error('ActivityPods did not emit a valid authoritative ap.delivery-plan.v1');
   }
-  if (deliveryPlan.activityId !== postResult.id || deliveryPlan.activity?.id !== postResult.id) {
-    throw new Error('ActivityPods Delivery Plan does not match the persisted outbox Activity');
+
+  const postActorUri = normalizeEntityId(postResult.actor);
+  const eventActivityId = normalizeEntityId(plannedEvent?.activity?.id || plannedEvent?.activity?.['@id']);
+  const eventActorUri = normalizeEntityId(plannedEvent?.activity?.actor);
+  if (
+    deliveryPlan.activityId !== postResult.id ||
+    deliveryPlan.activity?.id !== postResult.id ||
+    eventActivityId !== postResult.id
+  ) {
+    throw new Error('ActivityPods Delivery Plan event does not match the persisted outbox Activity');
   }
+  if (
+    deliveryPlan.actorUri !== senderWebId ||
+    normalizeEntityId(deliveryPlan.activity?.actor) !== senderWebId ||
+    postActorUri !== senderWebId ||
+    eventActorUri !== senderWebId
+  ) {
+    throw new Error('ActivityPods Delivery Plan event does not match the genuine sender authority');
+  }
+
   if (plannedEvent.deliveryMode !== 'external' || plannedEvent.durableHandoffQueued !== true) {
     throw new Error('ActivityPods did not prove external durable-handoff authority for the persisted Activity');
   }
+  if (plannedEvent.suppressedNativeRemotePostCount !== 1) {
+    throw new Error('Expected exactly one suppressed native remotePost job for the single controlled recipient');
+  }
+  if (!Array.isArray(deliveryPlan.localRecipients) || deliveryPlan.localRecipients.length !== 0) {
+    throw new Error('Remote-origin fixture unexpectedly produced authoritative local recipients');
+  }
+  assertExactStringArray(plannedEvent.localRecipients, [], 'Emitted local recipient evidence');
+
   if (!Array.isArray(deliveryPlan.remoteRecipients) || deliveryPlan.remoteRecipients.length !== 1) {
     throw new Error(`Expected exactly one authoritative remote recipient, found ${deliveryPlan.remoteRecipients?.length ?? 0}`);
   }
@@ -121,11 +164,15 @@ function buildFixtureEvidence({ postResult, plannedEvent, remoteActorUri }) {
   if (target.actorUri !== remoteActorUri) {
     throw new Error(`Authoritative remote actor ${target.actorUri} does not match requested actor ${remoteActorUri}`);
   }
+  assertExactStringArray(plannedEvent.remoteRecipients, [remoteActorUri], 'Emitted remote recipient evidence');
 
   return {
     schema: 'adsp.p0.activitypods-remote-origin.v1',
     activityId: postResult.id,
     actorUri: deliveryPlan.actorUri,
+    // This is the already-sanitized Activity embedded in the authoritative
+    // Delivery Plan (blind addressing has been removed by the production path).
+    // Fixture B needs the exact delivered body to reconcile immutable retry SHA.
     activity: deliveryPlan.activity,
     deliveryPlanSchema: deliveryPlan.schema,
     deliveryPlanIntentId: deliveryPlan.intentId,
@@ -133,7 +180,7 @@ function buildFixtureEvidence({ postResult, plannedEvent, remoteActorUri }) {
     inboxUrl: target.inboxUrl,
     ...(target.sharedInboxUrl ? { sharedInboxUrl: target.sharedInboxUrl } : {}),
     targetDomain: target.targetDomain,
-    suppressedNativeRemotePostCount: plannedEvent.suppressedNativeRemotePostCount,
+    suppressedNativeRemotePostCount: 1,
     durableHandoffQueued: true
   };
 }
@@ -159,7 +206,7 @@ async function runRemoteOriginFixture({
   await broker.start();
   try {
     await broker.waitForServices(['auth', 'activitypub.outbox', 'activitypub.actor'], readyTimeoutMs);
-    const password = process.env.ADSP_P0_SIGNUP_PASSWORD || 'AdspP0RemoteOriginPass123!';
+    const password = process.env.ADSP_P0_SIGNUP_PASSWORD || `${crypto.randomBytes(24).toString('base64url')}A1!`;
     const sender = await signupWithCandidateRetries({
       baseUrl,
       password,
@@ -197,7 +244,8 @@ async function runRemoteOriginFixture({
     const evidence = buildFixtureEvidence({
       postResult,
       plannedEvent,
-      remoteActorUri: normalizedRemoteActorUri
+      remoteActorUri: normalizedRemoteActorUri,
+      senderWebId: sender.webId
     });
     return {
       ...evidence,
@@ -226,6 +274,7 @@ if (require.main === module) {
 
 module.exports = {
   REMOTE_DELIVERY_PLANNED_EVENT,
+  assertExactStringArray,
   buildFixtureEvidence,
   createEvidenceLatch,
   createRunnerBroker,
