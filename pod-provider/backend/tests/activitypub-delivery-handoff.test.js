@@ -43,23 +43,43 @@ function createSettings() {
 }
 
 describe('APDM durable ActivityPub handoff', () => {
-  test('external durability fails closed without queue, URL, HTTP(S), or token configuration', () => {
-    expect(() => assertDurableHandoffConfigured({ deliveryHandoffUrl: 'http://sidecar', deliveryHandoffToken: 'x' })).toThrow(
+  test('external durability fails closed on unsafe or incomplete worker configuration', () => {
+    expect(() => assertDurableHandoffConfigured({ deliveryHandoffUrl: 'http://sidecar', deliveryHandoffToken: 'x', deliveryHandoffTimeoutMs: 1000 })).toThrow(
       /SEMAPPS_QUEUE_SERVICE_URL/u
     );
-    expect(() => assertDurableHandoffConfigured({ queueServiceUrl: 'redis://queue', deliveryHandoffToken: 'x' })).toThrow(
+    expect(() => assertDurableHandoffConfigured({ queueServiceUrl: 'redis://queue', deliveryHandoffToken: 'x', deliveryHandoffTimeoutMs: 1000 })).toThrow(
       /handoff URL/u
     );
-    expect(() => assertDurableHandoffConfigured({
-      queueServiceUrl: 'redis://queue',
-      deliveryHandoffUrl: 'ftp://sidecar/outbox',
-      deliveryHandoffToken: 'x'
-    })).toThrow(/HTTP\(S\)/u);
-    expect(() => assertDurableHandoffConfigured({
-      queueServiceUrl: 'redis://queue',
-      deliveryHandoffUrl: 'http://sidecar/outbox',
-      deliveryHandoffToken: ''
-    })).toThrow(/SIDECAR_TOKEN/u);
+    for (const deliveryHandoffUrl of [
+      'ftp://sidecar/outbox',
+      ' http://sidecar/outbox',
+      'http://sidecar/outbox ',
+      'http://user:pass@sidecar/outbox',
+      'http://sidecar/outbox#fragment'
+    ]) {
+      expect(() => assertDurableHandoffConfigured({
+        queueServiceUrl: 'redis://queue',
+        deliveryHandoffUrl,
+        deliveryHandoffToken: 'x',
+        deliveryHandoffTimeoutMs: 1000
+      })).toThrow(/credential-free HTTP\(S\)/u);
+    }
+    for (const deliveryHandoffToken of ['', ' ', ' secret', 'secret ']) {
+      expect(() => assertDurableHandoffConfigured({
+        queueServiceUrl: 'redis://queue',
+        deliveryHandoffUrl: 'http://sidecar/outbox',
+        deliveryHandoffToken,
+        deliveryHandoffTimeoutMs: 1000
+      })).toThrow(/SIDECAR_TOKEN/u);
+    }
+    for (const deliveryHandoffTimeoutMs of [undefined, 0, 99, 60001, 1000.5, '1000']) {
+      expect(() => assertDurableHandoffConfigured({
+        queueServiceUrl: 'redis://queue',
+        deliveryHandoffUrl: 'http://sidecar/outbox',
+        deliveryHandoffToken: 'secret',
+        deliveryHandoffTimeoutMs
+      })).toThrow(/timeout must be an integer/u);
+    }
   });
 
   test('maps authoritative Delivery Plan targets onto the Phase 6 sidecar webhook contract', () => {
@@ -121,14 +141,14 @@ describe('APDM durable ActivityPub handoff', () => {
     await expect(enqueueDeliveryHandoff(service, createPlan())).rejects.toThrow(/redis insertion failed/u);
   });
 
-  test('worker treats sidecar 202 acknowledgement as durable acceptance', async () => {
+  test('worker accepts only a 202 acknowledgement bound to the exact Delivery Plan intent', async () => {
     const plan = createPlan();
     const progress = jest.fn();
     const fetchImpl = jest.fn(async () => ({
       ok: true,
       status: 202,
       async json() {
-        return { accepted: true, intentId: 'sidecar-intent-1', jobCount: 1 };
+        return { accepted: true, intentId: plan.intentId, jobCount: 1 };
       }
     }));
     const service = { settings: createSettings() };
@@ -138,7 +158,7 @@ describe('APDM durable ActivityPub handoff', () => {
     expect(result).toEqual({
       status: 'accepted',
       deliveryPlanIntentId: plan.intentId,
-      sidecarIntentId: 'sidecar-intent-1',
+      sidecarIntentId: plan.intentId,
       jobCount: 1
     });
     expect(progress).toHaveBeenCalledWith(100);
@@ -154,12 +174,28 @@ describe('APDM durable ActivityPub handoff', () => {
     });
   });
 
+  test('worker rejects a 202 acknowledgement for a different durable intent so Bull retries', async () => {
+    const plan = createPlan();
+    const progress = jest.fn();
+    const fetchImpl = jest.fn(async () => ({
+      status: 202,
+      async json() {
+        return { accepted: true, intentId: 'apdm-v1-wrong-intent', jobCount: 1 };
+      }
+    }));
+
+    await expect(
+      processDeliveryHandoffJob({ settings: createSettings() }, { data: { deliveryPlan: plan }, progress }, fetchImpl)
+    ).rejects.toThrow(/intentId does not match the Delivery Plan intentId/u);
+    expect(progress).not.toHaveBeenCalled();
+  });
+
   test('worker rejects a generic 200 even when the body says accepted', async () => {
     const fetchImpl = jest.fn(async () => ({
       ok: true,
       status: 200,
       async json() {
-        return { accepted: true, intentId: 'not-durable-proof' };
+        return { accepted: true, intentId: createPlan().intentId };
       }
     }));
     await expect(
