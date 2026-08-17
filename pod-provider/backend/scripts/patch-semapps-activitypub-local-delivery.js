@@ -16,7 +16,8 @@ const LOCAL_DELIVERY_SCOPE_RUNNER_SYMBOL_KEY = 'semapps-atproto.apdm-p10.local-d
 
 const PHASE7_CONTEXT_DECLARATION = `const localRecipients = [];\n        const localRecipientContexts = new Map(); // ${PATCH_MARKER}`;
 const PHASE7_CONTEXT_INSERTION = `localRecipients.push(recipientUri);\n              localRecipientContexts.set(recipientUri, {\n                dataset: this.settings.podProvider ? account.username : undefined\n              });`;
-const PHASE7_CONTEXT_ATTACHMENT = `Object.defineProperty(activity, Symbol.for('${LOCAL_CONTEXT_SYMBOL_KEY}'), {\n            value: localRecipientContexts,\n            configurable: true,\n            enumerable: false\n          });\n          this.localPost(localRecipients, activity);`;
+const PHASE7_CONTEXT_PROPERTY = `Object.defineProperty(activity, Symbol.for('${LOCAL_CONTEXT_SYMBOL_KEY}'), {\n            value: localRecipientContexts,\n            configurable: true,\n            enumerable: false\n          });`;
+const PHASE7_CONTEXT_ATTACHMENT = `${PHASE7_CONTEXT_PROPERTY}\n          this.localPost(localRecipients, activity);`;
 const PHASE7_CONTEXT_EXTRACTION = `async localPost(recipients, activityToPost) {\n      const localRecipientContextKey = Symbol.for('${LOCAL_CONTEXT_SYMBOL_KEY}');\n      const localRecipientContexts =\n        activityToPost && typeof activityToPost === 'object'\n          ? activityToPost[localRecipientContextKey]\n          : undefined;\n      if (activityToPost && typeof activityToPost === 'object') {\n        delete activityToPost[localRecipientContextKey];\n      }`;
 const PHASE7_CONTEXT_AWARE_LOOKUP = `const account = localRecipientContexts instanceof Map && localRecipientContexts.has(recipientUri) &&\n            typeof localRecipientContexts.get(recipientUri)?.dataset === 'string' &&\n            localRecipientContexts.get(recipientUri).dataset.length > 0\n            ? { username: localRecipientContexts.get(recipientUri).dataset }\n            : await this.broker.call('auth.account.findByWebId', { webId: recipientUri });`;
 const PHASE10_SCOPE_DISPATCH = `const phase10LocalDeliveryScopeRunner = globalThis[Symbol.for('${LOCAL_DELIVERY_SCOPE_RUNNER_SYMBOL_KEY}')]; // ${PHASE10_SCOPE_MARKER}\n          if (typeof phase10LocalDeliveryScopeRunner === 'function') {\n            phase10LocalDeliveryScopeRunner(() => this.localPost(localRecipients, activity));\n          } else {\n            this.localPost(localRecipients, activity);\n          }`;
@@ -110,7 +111,7 @@ function assertPhase7PatchShape(source) {
   assertSingleton(source, PATCH_MARKER, 'Phase 7 marker');
   assertSingleton(source, PHASE7_CONTEXT_DECLARATION, 'local recipient context declaration');
   assertSingleton(source, PHASE7_CONTEXT_INSERTION, 'validated local recipient context insertion');
-  assertSingleton(source, PHASE7_CONTEXT_ATTACHMENT, 'Activity-bound context attachment');
+  assertSingleton(source, PHASE7_CONTEXT_PROPERTY, 'Activity-bound context property');
   assertSingleton(source, PHASE7_CONTEXT_EXTRACTION, 'localPost context extraction/removal');
   assertSingleton(source, PHASE7_CONTEXT_AWARE_LOOKUP, 'context-aware account lookup');
   if (source.includes('this.localPost(localRecipients, activity, localRecipientContexts)')) {
@@ -266,6 +267,7 @@ module.exports = {
   LOCAL_DELIVERY_SCOPE_RUNNER_SYMBOL_KEY,
   PHASE7_CONTEXT_DECLARATION,
   PHASE7_CONTEXT_INSERTION,
+  PHASE7_CONTEXT_PROPERTY,
   PHASE7_CONTEXT_ATTACHMENT,
   PHASE7_CONTEXT_EXTRACTION,
   PHASE7_CONTEXT_AWARE_LOOKUP,
