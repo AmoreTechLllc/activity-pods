@@ -23,7 +23,15 @@ function parseConfiguredHandoffUrl(value) {
   }
 }
 
+function assertExternalHandoffAuthority(settings) {
+  const mode = String(settings?.remoteDeliveryMode || 'native').trim().toLowerCase();
+  if (mode !== 'external') {
+    throw new Error('APDM durable sidecar handoff requires external remote delivery authority');
+  }
+}
+
 function assertDurableHandoffConfigured(settings) {
+  assertExternalHandoffAuthority(settings);
   if (!settings || typeof settings.queueServiceUrl !== 'string' || settings.queueServiceUrl.trim().length === 0) {
     throw new Error('APDM external delivery requires SEMAPPS_QUEUE_SERVICE_URL for durable handoff');
   }
@@ -100,6 +108,10 @@ async function enqueueDeliveryHandoff(service, deliveryPlan) {
 }
 
 async function processDeliveryHandoffJob(service, job, fetchImpl = fetch) {
+  // Recheck the authority on every execution, not only when the job was
+  // created. A one-switch rollback to native must stop stale external queue
+  // entries from producing sidecar federation while SemApps native delivery is
+  // authoritative.
   assertDurableHandoffConfigured(service.settings);
   const deliveryPlan = job?.data?.deliveryPlan;
   const intentId = deliveryPlan?.intentId;
@@ -150,6 +162,7 @@ module.exports = {
   DELIVERY_HANDOFF_QUEUE,
   DELIVERY_HANDOFF_QUEUE_OPTIONS,
   assertDurableHandoffConfigured,
+  assertExternalHandoffAuthority,
   enqueueDeliveryHandoff,
   parseConfiguredHandoffUrl,
   processDeliveryHandoffJob,
