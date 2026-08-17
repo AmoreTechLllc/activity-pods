@@ -48,8 +48,23 @@ module.exports = ({ enabled = false } = {}) => {
   const storage = new AsyncLocalStorage();
   const runnerKey = Symbol.for(LOCAL_DELIVERY_SCOPE_RUNNER_SYMBOL_KEY);
   const previousRunner = globalThis[runnerKey];
-  const scopeRunner = callback =>
-    storage.run({ verifiedDatasets: new Set(), mutationEpoch: 0 }, callback);
+
+  // The runner is process-global only because the pinned SemApps localPost seam
+  // needs a dependency-free handoff into this middleware. Two owners would make
+  // it ambiguous which AsyncLocalStorage scope is authoritative. Refuse that
+  // state instead of silently replacing another runner and producing evidence or
+  // delivery behavior whose scope cannot be proven.
+  if (enabled && previousRunner !== undefined) {
+    storage.disable();
+    throw new Error('[APDM-P10] Local-delivery scope runner is already installed; refusing ambiguous ownership');
+  }
+
+  const scopeRunner = callback => {
+    if (typeof callback !== 'function') {
+      throw new TypeError('[APDM-P10] Local-delivery scope runner requires a callback');
+    }
+    return storage.run({ verifiedDatasets: new Set(), mutationEpoch: 0 }, callback);
+  };
 
   if (enabled) globalThis[runnerKey] = scopeRunner;
 
@@ -98,8 +113,7 @@ module.exports = ({ enabled = false } = {}) => {
     // needs to call this explicitly.
     dispose() {
       if (!enabled || globalThis[runnerKey] !== scopeRunner) return;
-      if (previousRunner === undefined) delete globalThis[runnerKey];
-      else globalThis[runnerKey] = previousRunner;
+      delete globalThis[runnerKey];
       storage.disable();
     }
   };
