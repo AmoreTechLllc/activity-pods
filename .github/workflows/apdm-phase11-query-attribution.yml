@@ -57,6 +57,7 @@ jobs:
       APDM_P10_DATASET_EXIST_MEMO_ENABLED: 'true'
       APDM_P10_ARM: 'on'
       APDM_P11_MAX_KEYS: '4096'
+      APDM_P11_MAX_CONTEXTS: '65536'
 
     steps:
       - name: Checkout repository
@@ -120,6 +121,8 @@ jobs:
             workflowRunId: process.env.GITHUB_RUN_ID,
             runAttempt: process.env.GITHUB_RUN_ATTEMPT,
             concurrency: Number(process.env.APDM_P9_CONCURRENCY),
+            maxAttributionKeys: Number(process.env.APDM_P11_MAX_KEYS),
+            maxLineageContexts: Number(process.env.APDM_P11_MAX_CONTEXTS),
             runnerOs: process.env.RUNNER_OS,
             runnerArch: process.env.RUNNER_ARCH,
             imageOs: process.env.ImageOS || 'unknown',
@@ -198,11 +201,6 @@ jobs:
             reset_arm_storage
           }
 
-          # A rerun of the same workflow keeps the exact source SHA but increments
-          # GITHUB_RUN_ATTEMPT. Odd attempts run control first; even attempts run
-          # attributed first. Phase 11 overhead acceptance requires one successful
-          # attempt in each order so second-arm host drift cannot masquerade as
-          # instrumentation cost (or hide it).
           if (( GITHUB_RUN_ATTEMPT % 2 == 1 )); then
             export APDM_P11_ARM_ORDER='control-first'
             run_arm control false
@@ -221,11 +219,13 @@ jobs:
           const fs = require('fs');
           const control = JSON.parse(fs.readFileSync('measurements/control/apdm-p11-environment-control.json'));
           const attributed = JSON.parse(fs.readFileSync('measurements/attributed/apdm-p11-environment-attributed.json'));
-          const equalKeys = ['commitSha','armOrder','concurrency','runnerOs','runnerArch','imageOs','imageVersion','hostNode','hostCpuModel','hostCpuCount','hostTotalMemoryBytes','backendImageId','fusekiImageId','redisImageId','mailcatcherImageId'];
+          const equalKeys = ['commitSha','armOrder','concurrency','maxAttributionKeys','maxLineageContexts','runnerOs','runnerArch','imageOs','imageVersion','hostNode','hostCpuModel','hostCpuCount','hostTotalMemoryBytes','backendImageId','fusekiImageId','redisImageId','mailcatcherImageId'];
           const failures = equalKeys.filter(key => control[key] !== attributed[key]).map(key => `${key} differs`);
           if (control.phase10MemoEnabled !== true || attributed.phase10MemoEnabled !== true) failures.push('Phase 10 memo must be true in both Phase 11 arms');
           if (control.attributionEnabled !== false || attributed.attributionEnabled !== true) failures.push('attribution arm booleans are invalid');
           if (control.concurrency !== 4) failures.push('local delivery concurrency must be 4');
+          if (control.maxAttributionKeys !== 4096) failures.push('Phase 11 attribution-key bound must be exactly 4096');
+          if (control.maxLineageContexts !== 65536) failures.push('Phase 11 lineage-context bound must be exactly 65536');
           if (!['control-first','attributed-first'].includes(control.armOrder)) failures.push('arm order is missing or invalid');
           const expectedOrder = Number(control.runAttempt) % 2 === 1 ? 'control-first' : 'attributed-first';
           if (control.armOrder !== expectedOrder) failures.push(`arm order ${control.armOrder} does not match run attempt ${control.runAttempt}`);
@@ -264,7 +264,8 @@ jobs:
           console.log(`\nArm order: **${environment.control.armOrder}** (attempt ${environment.control.runAttempt})\n`);
           console.log('## N=1000 privacy-safe query attribution\n');
           console.log(`Total triplestore.query median: **${n1000.totalQueryCallsMedian}**`);
-          console.log(`Unattributed median: **${n1000.unattributedQueryCallsMedian}**\n`);
+          console.log(`Unattributed median: **${n1000.unattributedQueryCallsMedian}**`);
+          console.log(`Retained lineage contexts median: **${n1000.lineageContextCountMedian}**\n`);
           console.log('| caller | op | shape | median count | median duration ms |');
           console.log('|---|---|---|---:|---:|');
           for (const item of summary.n1000TopByDuration.slice(0, 15)) {
