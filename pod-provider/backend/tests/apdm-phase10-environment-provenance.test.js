@@ -147,7 +147,7 @@ describe('APDM Phase 10 environment provenance', () => {
     expect(result.failures.join('\n')).toContain('backendImageId');
   });
 
-  test('rejects equal but impossible host resource values', () => {
+  test('rejects equal but impossible host resource values and reports each invalid field', () => {
     const result = validateEnvironment(
       manifest({ hostCpuCount: 0, hostTotalMemoryBytes: -1 }),
       manifest({ arm: 'on', memoEnabled: true, hostCpuCount: 0, hostTotalMemoryBytes: -1 })
