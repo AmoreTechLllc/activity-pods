@@ -46,6 +46,59 @@ The replacement instrumentation now:
 
 The failed attempt also showed that `ldp.resource.getContainers` was already the largest known N=1000 cumulative query-duration bucket by a wide margin, but no optimization is authorized from that provisional ranking until the callerless `CONSTRUCT` work is correctly attributed and opposite-order evidence closes.
 
+## Pre-merge Phase 8 and Phase 9 hardening
+
+Before PR #78 may merge, the Phase 8 measurement authority and Phase 9 bounded-concurrency layer are themselves subject to a fresh Codex-level adversarial review. The hosted Codex review quota remains exhausted, so the absence of a bot review is not approval; the review is being performed manually against the exact branch implementation and tests.
+
+This review found and fixed concrete hardening gaps. **Every Phase 11 evidence run from before this hardening record is superseded**, including the previous replacement candidate and any run that was still executing when these changes landed. Phase 11 attribution must be remeasured from the final post-hardening head.
+
+### Phase 8 hardening
+
+Phase 8 remains observational only, but its evidence boundary is now stricter:
+
+- pre-existing local-delivery completion/result observers are chained rather than overwritten, and their exceptions cannot replace the real delivery result;
+- observer installation is restored on disposal when ownership still matches;
+- partial local-delivery artifacts retain only failure counts, never success/failure recipient identifiers;
+- arbitrary exception messages are not serialized into JSON evidence; only controlled source/action metadata and a sanitized error class name are retained;
+- duplicate Fuseki HTTP-probe ownership fails closed rather than silently producing partial HTTP evidence;
+- HTTP response/request terminal accounting is one-shot across `end`, `aborted`, response `error` and request `error` paths;
+- dynamic Fuseki dataset identifiers are removed from request-path evidence while mechanism shape is preserved, e.g. `/$/datasets/<dataset>` becomes `/$/datasets/:dataset` and dataset query routes become `/:dataset/query`;
+- an unmatched local-delivery `finish` or unknown observer phase invalidates the sample instead of being silently ignored;
+- the Phase 8 summarizer now requires at least three **valid successful** samples for every canonical N=1/10/100/200/1000 before `complete=true`;
+- a successful record must contain an explicit empty `errors` array plus finite/nonnegative core elapsed/CPU/action/Fuseki metrics; missing or malformed schema can no longer count as success;
+- failed or malformed samples remain reported but cannot influence the fitted action/Fuseki models.
+
+The route redaction deliberately preserves the Phase 10 mechanism distinction between `GET` dataset-registry existence probes and lifecycle writes. Phase 10's comparator is covered against the redacted `GET /$/datasets/:dataset` representation.
+
+### Phase 9 hardening
+
+The promoted Phase 9 scheduling semantics remain unchanged: default concurrency 4, fail-safe serial fallback 1 for invalid explicit values, cap 32, bounded workers, per-recipient error isolation and deterministic recipient-order result arrays.
+
+Hardening now makes those semantics fail closed against patch drift:
+
+- the pinned SemApps predecessor/Phase 8/Phase 9 markers must occur exactly once;
+- an already-promoted artifact must contain the exact reviewed c4 concurrency configuration block;
+- it must contain the exact bounded worker block and indexed success/failure aggregation shape;
+- legacy unordered `push` aggregation is rejected;
+- marker-preserving changes to default, fallback, cap, worker count or result ordering are rejected rather than trusted as “already patched”.
+
+The Phase 9 evidence comparator also now rejects non-finite derived decision metrics explicitly. A zero/corrupt denominator can no longer turn `speedup`, CPU drift, nested-action drift or Fuseki drift into `undefined` and accidentally bypass JavaScript threshold comparisons. The historical Phase 9 policy still uses its original mean-based selection metrics; this hardening does not silently redefine the already-closed Phase 9 statistical policy. Any change from means to a different estimator would be an explicit Phase 9 evidence-policy reopening, not a maintenance hardening.
+
+### Cross-phase invariants reviewed
+
+The pre-merge review continues to require all of the following:
+
+- Phase 9 bounded concurrency executes inside the same Phase 8 local-delivery observation lineage;
+- the local-post completion observer does not finish until the bounded worker pool has settled;
+- Phase 7 dataset context reuse and Phase 10 delivery-scope seams remain present and exact;
+- Phase 9 does not batch across Pod datasets or weaken per-recipient authority checks;
+- Phase 11 can still observe concurrent child-action lineage without changing Phase 9 scheduling;
+- Phase 8 route redaction changes only artifact representation, not actual Fuseki requests;
+- measurement instrumentation failures remain unable to alter production delivery semantics;
+- Phase 10 memo production default remains OFF.
+
+The first hardening CI pass intentionally failed two stale tests that still expected raw dataset names and one-sample Phase 8 completion; 104 of 106 suites passed. Those tests were corrected to assert the hardened privacy/sample-floor contract rather than weakening the implementation. A fresh exact-head backend run is required after this record.
+
 ## First-slice objective
 
 Attribute each `triplestore.query` in the real local-delivery lineage to the owning SemApps/ActivityPods call site and a privacy-safe normalized query shape, then measure which repeated reads dominate count and cumulative time.
