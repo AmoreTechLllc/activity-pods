@@ -36,10 +36,7 @@ function finite(value, label) {
 function validateCasePair(current, baseline, concurrency, count) {
   const currentSamples = finite(current.samples, `concurrency ${concurrency} N=${count} samples`);
   const baselineSamples = finite(baseline.samples, `baseline N=${count} samples`);
-  const currentSuccessful = finite(
-    current.successfulSamples,
-    `concurrency ${concurrency} N=${count} successfulSamples`
-  );
+  const currentSuccessful = finite(current.successfulSamples, `concurrency ${concurrency} N=${count} successfulSamples`);
   const baselineSuccessful = finite(baseline.successfulSamples, `baseline N=${count} successfulSamples`);
   const currentFailed = finite(current.failedSamples, `concurrency ${concurrency} N=${count} failedSamples`);
   const baselineFailed = finite(baseline.failedSamples, `baseline N=${count} failedSamples`);
@@ -48,16 +45,9 @@ function validateCasePair(current, baseline, concurrency, count) {
     throw new Error(`N=${count} requires at least ${MIN_MEASURED_SAMPLES} measured samples per concurrency`);
   }
   if (currentSamples !== baselineSamples) {
-    throw new Error(
-      `Concurrency ${concurrency} N=${count} sample count ${currentSamples} does not match baseline ${baselineSamples}`
-    );
+    throw new Error(`Concurrency ${concurrency} N=${count} sample count ${currentSamples} does not match baseline ${baselineSamples}`);
   }
-  if (
-    currentFailed !== 0 ||
-    baselineFailed !== 0 ||
-    currentSuccessful !== currentSamples ||
-    baselineSuccessful !== baselineSamples
-  ) {
+  if (currentFailed !== 0 || baselineFailed !== 0 || currentSuccessful !== currentSamples || baselineSuccessful !== baselineSamples) {
     throw new Error(`Concurrency ${concurrency} N=${count} contains failed or incomplete samples`);
   }
 }
@@ -66,23 +56,27 @@ function candidateGate(cases) {
   const failures = [];
   for (const count of LARGE_CASES) {
     const current = cases[count];
+    for (const [metric, value] of Object.entries({
+      speedupVsC1: current.speedupVsC1,
+      actionDeltaPctVsC1: current.actionDeltaPctVsC1,
+      fusekiRequestDeltaPctVsC1: current.fusekiRequestDeltaPctVsC1,
+      cpuDeltaPctVsC1: current.cpuDeltaPctVsC1
+    })) {
+      if (!Number.isFinite(value)) failures.push(`N=${count} ${metric} is not finite`);
+    }
+    if (!Number.isFinite(current.speedupVsC1) || !Number.isFinite(current.actionDeltaPctVsC1) ||
+        !Number.isFinite(current.fusekiRequestDeltaPctVsC1) || !Number.isFinite(current.cpuDeltaPctVsC1)) continue;
     if (current.speedupVsC1 < MIN_LARGE_CASE_SPEEDUP) {
       failures.push(`N=${count} speedup ${current.speedupVsC1.toFixed(3)}x is below ${MIN_LARGE_CASE_SPEEDUP}x`);
     }
     if (Math.abs(current.actionDeltaPctVsC1) > MAX_WORK_DRIFT_PCT) {
-      failures.push(
-        `N=${count} nested action drift ${current.actionDeltaPctVsC1.toFixed(2)}% exceeds ${MAX_WORK_DRIFT_PCT}%`
-      );
+      failures.push(`N=${count} nested action drift ${current.actionDeltaPctVsC1.toFixed(2)}% exceeds ${MAX_WORK_DRIFT_PCT}%`);
     }
     if (Math.abs(current.fusekiRequestDeltaPctVsC1) > MAX_WORK_DRIFT_PCT) {
-      failures.push(
-        `N=${count} Fuseki request drift ${current.fusekiRequestDeltaPctVsC1.toFixed(2)}% exceeds ${MAX_WORK_DRIFT_PCT}%`
-      );
+      failures.push(`N=${count} Fuseki request drift ${current.fusekiRequestDeltaPctVsC1.toFixed(2)}% exceeds ${MAX_WORK_DRIFT_PCT}%`);
     }
     if (current.cpuDeltaPctVsC1 > MAX_CPU_INCREASE_PCT) {
-      failures.push(
-        `N=${count} CPU increase ${current.cpuDeltaPctVsC1.toFixed(2)}% exceeds ${MAX_CPU_INCREASE_PCT}%`
-      );
+      failures.push(`N=${count} CPU increase ${current.cpuDeltaPctVsC1.toFixed(2)}% exceeds ${MAX_CPU_INCREASE_PCT}%`);
     }
   }
   return { eligible: failures.length === 0, failures };
@@ -153,48 +147,32 @@ function compare(summaries) {
     }
 
     const gate = concurrency === 1 ? { eligible: false, failures: ['baseline candidate'] } : candidateGate(cases);
-    result.concurrencies[concurrency] = {
-      cases,
-      measuredModels: summary.measuredModels,
-      selectionGate: gate
-    };
+    result.concurrencies[concurrency] = { cases, measuredModels: summary.measuredModels, selectionGate: gate };
   }
 
   result.recommendedCandidate = REQUIRED_CONCURRENCIES.filter(concurrency => concurrency > 1).find(
     concurrency => result.concurrencies[concurrency].selectionGate.eligible
   ) || null;
-
   return result;
 }
 
 function renderMarkdown(comparison) {
   const lines = [
-    '# APDM Phase 9 bounded-concurrency comparison',
-    '',
+    '# APDM Phase 9 bounded-concurrency comparison', '',
     '| concurrency | N=100 mean | speedup | N=200 mean | speedup | N=1000 mean | speedup | selection |',
     '|---:|---:|---:|---:|---:|---:|---:|:---|'
   ];
-
   for (const concurrency of REQUIRED_CONCURRENCIES) {
     const entry = comparison.concurrencies[concurrency];
     const cases = entry.cases;
     const cell = count => `${(cases[count].elapsedMs.mean / 1000).toFixed(2)}s`;
-    const speed = count => `${cases[count].speedupVsC1.toFixed(2)}x`;
+    const speed = count => Number.isFinite(cases[count].speedupVsC1) ? `${cases[count].speedupVsC1.toFixed(2)}x` : 'invalid';
     const selection = concurrency === 1 ? 'baseline' : entry.selectionGate.eligible ? 'eligible' : 'rejected';
-    lines.push(
-      `| ${concurrency} | ${cell(100)} | ${speed(100)} | ${cell(200)} | ${speed(200)} | ${cell(1000)} | ${speed(1000)} | ${selection} |`
-    );
+    lines.push(`| ${concurrency} | ${cell(100)} | ${speed(100)} | ${cell(200)} | ${speed(200)} | ${cell(1000)} | ${speed(1000)} | ${selection} |`);
   }
-
-  lines.push(
-    '',
-    `Automated candidate: **${comparison.recommendedCandidate === null ? 'none' : comparison.recommendedCandidate}**.`,
-    '',
-    'This is decision support, not automatic production promotion. CPU, heap, elapsed-time distribution, datastore pressure, and semantic invariants still require explicit human review.',
-    '',
-    'Concurrency is a scheduling optimization; material action/Fuseki work-count drift is treated as an invariant warning rather than an optimization.'
-  );
-
+  lines.push('', `Automated candidate: **${comparison.recommendedCandidate === null ? 'none' : comparison.recommendedCandidate}**.`, '',
+    'This is decision support, not automatic production promotion. CPU, heap, elapsed-time distribution, datastore pressure, and semantic invariants still require explicit human review.', '',
+    'Concurrency is a scheduling optimization; material action/Fuseki work-count drift is treated as an invariant warning rather than an optimization.');
   for (const concurrency of REQUIRED_CONCURRENCIES.filter(value => value > 1)) {
     const failures = comparison.concurrencies[concurrency].selectionGate.failures;
     if (failures.length > 0) {
@@ -202,20 +180,13 @@ function renderMarkdown(comparison) {
       for (const failure of failures) lines.push(`- ${failure}`);
     }
   }
-
   return `${lines.join('\n')}\n`;
 }
 
 function main(argv = process.argv.slice(2)) {
-  if (argv.length < 6) {
-    throw new Error('Usage: node apdm-phase9-compare.js c1.json c2.json c4.json c8.json output.json output.md');
-  }
-
+  if (argv.length < 6) throw new Error('Usage: node apdm-phase9-compare.js c1.json c2.json c4.json c8.json output.json output.md');
   const summaries = {};
-  REQUIRED_CONCURRENCIES.forEach((concurrency, index) => {
-    summaries[String(concurrency)] = readSummary(path.resolve(argv[index]));
-  });
-
+  REQUIRED_CONCURRENCIES.forEach((concurrency, index) => { summaries[String(concurrency)] = readSummary(path.resolve(argv[index])); });
   const comparison = compare(summaries);
   const jsonPath = path.resolve(argv[4]);
   const markdownPath = path.resolve(argv[5]);
