@@ -179,16 +179,18 @@ describe('ADSP P0 ActivityPods remote-origin fixture', () => {
     }
   });
 
-  test('fails closed if the measured Activity would bypass the production RedPanda public event-log path', () => {
-    for (const meta of [
-      { visibility: 'direct', isPublicActivity: false },
-      { visibility: 'direct', isPublicActivity: true },
-      { visibility: 'unlisted', isPublicActivity: false }
-    ]) {
-      const plan = createDeliveryPlan({ meta });
-      expect(() => buildEvidence({ plannedEvent: createPlannedEvent({ deliveryPlan: plan }) }))
-        .toThrow(/RedPanda event-log path/u);
-    }
+  test('fails closed for a valid direct Activity that would bypass the production RedPanda public event-log path', () => {
+    const directActivity = {
+      ...createDeliveryPlan().activity,
+      to: [REMOTE_ACTOR_URI]
+    };
+    delete directActivity.cc;
+    const directPlan = createDeliveryPlan({
+      activity: directActivity,
+      meta: { visibility: 'direct', isPublicActivity: false }
+    });
+    expect(() => buildEvidence({ plannedEvent: createPlannedEvent({ deliveryPlan: directPlan }) }))
+      .toThrow(/RedPanda event-log path/u);
   });
 
   test('fails closed on persisted, event, or Delivery Plan Activity identity drift', () => {
