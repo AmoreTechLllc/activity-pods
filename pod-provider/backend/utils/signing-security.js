@@ -3,13 +3,18 @@
 const crypto = require('crypto');
 
 const MAX_AUTHORIZATION_HEADER_BYTES = 8 * 1024;
+const BEARER_PREFIX_BYTES = Buffer.byteLength('Bearer ', 'ascii');
+const MAX_BEARER_TOKEN_BYTES = MAX_AUTHORIZATION_HEADER_BYTES - BEARER_PREFIX_BYTES;
+const MIN_SIGNING_TOKEN_BYTES = 32;
 const BEARER_TOKEN_RE = /^[A-Za-z0-9\-._~+/]+=*$/;
 const IMF_FIXDATE_RE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
 
 function configuredSigningToken(env = process.env) {
   const token = env.ACTIVITYPODS_TOKEN;
-  if (typeof token !== 'string' || token.length === 0) return null;
-  if (Buffer.byteLength(token, 'utf8') > MAX_AUTHORIZATION_HEADER_BYTES) return null;
+  if (typeof token !== 'string') return null;
+
+  const tokenBytes = Buffer.byteLength(token, 'utf8');
+  if (tokenBytes < MIN_SIGNING_TOKEN_BYTES || tokenBytes > MAX_BEARER_TOKEN_BYTES) return null;
   return BEARER_TOKEN_RE.test(token) ? token : null;
 }
 
@@ -50,6 +55,8 @@ function isDateWithinSkew(dateString, maxClockSkewSeconds, nowMs = Date.now()) {
 
 module.exports = {
   MAX_AUTHORIZATION_HEADER_BYTES,
+  MAX_BEARER_TOKEN_BYTES,
+  MIN_SIGNING_TOKEN_BYTES,
   configuredSigningToken,
   isDateWithinSkew,
   parseBearerToken,
