@@ -18,6 +18,7 @@ const Fep5bf0CollectionViewsMiddleware = require('./middlewares/fep-5bf0-collect
 const SkipOrphanBlankNodesCleanupMiddleware = require('./middlewares/skip-orphan-blank-nodes-cleanup');
 const ApdmLocalDeliveryDatasetExistMemoMiddleware = require('./middlewares/apdm-local-delivery-dataset-exist-memo');
 const { createPhase8Tier1Instrumentation } = require('./lib/apdm-phase8-tier1-instrumentation');
+const { createPhase11QueryAttribution } = require('./lib/apdm-phase11-query-attribution');
 const CONFIG = require('./config/config');
 const errorHandler = require('./config/errorHandler');
 const RdfJSONSerializer = require('./RdfJSONSerializer');
@@ -45,6 +46,17 @@ const phase8Instrumentation = createPhase8Tier1Instrumentation({
   sparqlEndpoint: CONFIG.SPARQL_ENDPOINT
 });
 
+// Phase 11 is measurement-only and fail-closed. It attributes triplestore.query
+// calls within the same real local-delivery lineage observed by Phase 8, but it
+// never changes a query, its result, or authorization context.
+const phase11QueryAttribution = createPhase11QueryAttribution({
+  enabled: CONFIG.APDM_PHASE11_QUERY_ATTRIBUTION_ENABLED,
+  outputPath: CONFIG.APDM_PHASE11_QUERY_ATTRIBUTION_OUTPUT,
+  recipientCount: CONFIG.APDM_PHASE8_RECIPIENT_COUNT,
+  caseLabel: CONFIG.APDM_PHASE8_CASE_LABEL,
+  maxKeys: CONFIG.APDM_PHASE11_QUERY_ATTRIBUTION_MAX_KEYS
+});
+
 const middlewares = [
   CacherMiddleware(cacherConfig), // Set the cacher before the WebAcl middleware
   WebAclMiddleware({ baseUrl: CONFIG.BASE_URL, podProvider: true }),
@@ -68,9 +80,12 @@ const middlewares = [
   AppControlMiddleware({ baseUrl: CONFIG.BASE_URL })
 ];
 
-// Keep Phase 8 measurement entirely opt-in. When disabled, the production
-// middleware stack is exactly the pre-P8 stack and no HTTP functions are patched.
+// Keep APDM measurement entirely opt-in. When disabled, the production
+// middleware stack is exactly the non-measurement stack and no tracing state is
+// allocated. Phase 8 is installed first so Phase 11 can safely chain its local
+// delivery observer while both are enabled in the canonical benchmark.
 if (phase8Instrumentation.middleware) middlewares.push(phase8Instrumentation.middleware);
+if (phase11QueryAttribution.middleware) middlewares.push(phase11QueryAttribution.middleware);
 
 /** @type {import('moleculer').BrokerOptions} */
 module.exports = {
