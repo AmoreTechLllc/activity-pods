@@ -9,6 +9,7 @@ const {
   createPhase11QueryAttribution,
   fingerprintQueryShape,
   iriRefEnd,
+  normalizeQueryObjectShape,
   normalizeQueryShape,
   queryFromContext,
   safeCallerName
@@ -57,20 +58,69 @@ describe('APDM Phase 11 query attribution', () => {
     expect(classifyQueryOperation(undefined)).toBe('unknown');
   });
 
-  test('extracts only supported SPARQL parameter strings', () => {
-    expect(queryFromContext({ params: { query: 'ASK {}' } })).toBe('ASK {}');
-    expect(queryFromContext({ params: { sparql: 'SELECT * {}' } })).toBe('SELECT * {}');
-    expect(queryFromContext({ params: { query: { text: 'ASK {}' } } })).toBeUndefined();
+  test('normalizes the exact SemApps tripleExist ASK AST without retaining RDF values', () => {
+    const buildAsk = ({ subject, object, graphName } = {}) => ({
+      type: 'query',
+      queryType: 'ASK',
+      where: [
+        graphName
+          ? {
+              type: 'graph',
+              name: { termType: 'NamedNode', value: graphName },
+              patterns: [{
+                type: 'bgp',
+                triples: [{
+                  subject: { termType: 'NamedNode', value: subject },
+                  predicate: { termType: 'NamedNode', value: 'https://schema.example/knows' },
+                  object: { termType: 'NamedNode', value: object }
+                }]
+              }]
+            }
+          : {
+              type: 'bgp',
+              triples: [{
+                subject: { termType: 'NamedNode', value: subject },
+                predicate: { termType: 'NamedNode', value: 'https://schema.example/knows' },
+                object: { termType: 'NamedNode', value: object }
+              }]
+            }
+      ]
+    });
+    const first = buildAsk({ subject: 'https://private.example/alice', object: 'https://private.example/bob' });
+    const second = buildAsk({ subject: 'https://private.example/carol', object: 'https://private.example/dave' });
+    const graph = buildAsk({
+      subject: 'https://private.example/alice',
+      object: 'https://private.example/bob',
+      graphName: 'https://private.example/acl'
+    });
+
+    expect(classifyQueryOperation(first)).toBe('ask');
+    expect(fingerprintQueryShape(first)).toBe(fingerprintQueryShape(second));
+    expect(fingerprintQueryShape(first)).not.toBe(fingerprintQueryShape(graph));
+    const shape = normalizeQueryObjectShape(first);
+    expect(shape).toContain('queryType:ASK');
+    expect(shape).toContain('termType:NamedNode');
+    expect(shape).not.toContain('private.example');
+    expect(shape).not.toContain('schema.example');
+    expect(shape).not.toContain('alice');
   });
 
-  test('resolves immediate logical caller from Moleculer parent context first', () => {
-    const active = new Map([
+  test('extracts supported string and object SPARQL query inputs only', () => {
+    const askAst = { type: 'query', queryType: 'ASK', where: [] };
+    expect(queryFromContext({ params: { query: 'ASK {}' } })).toBe('ASK {}');
+    expect(queryFromContext({ params: { query: askAst } })).toBe(askAst);
+    expect(queryFromContext({ params: { sparql: 'SELECT * {}' } })).toBe('SELECT * {}');
+    expect(queryFromContext({ params: { query: ['ASK {}'] } })).toBeUndefined();
+  });
+
+  test('resolves immediate logical caller from retained Moleculer parent context first', () => {
+    const contexts = new Map([
       ['root', 'activitypub.outbox.post'],
       ['parent', 'webacl.resource.hasRights']
     ]);
-    expect(safeCallerName({ parentID: 'parent', caller: 'fallback.service' }, active)).toBe('webacl.resource.hasRights');
-    expect(safeCallerName({ parentID: 'missing', caller: 'safe.service' }, active)).toBe('safe.service');
-    expect(safeCallerName({ parentID: 'missing', caller: 'https://private.example/alice' }, active)).toBe('unknown');
+    expect(safeCallerName({ parentID: 'parent', caller: 'fallback.service' }, contexts)).toBe('webacl.resource.hasRights');
+    expect(safeCallerName({ parentID: 'missing', caller: 'safe.service' }, contexts)).toBe('safe.service');
+    expect(safeCallerName({ parentID: 'missing', caller: 'https://private.example/alice' }, contexts)).toBe('unknown');
   });
 
   test('disabled attribution is inert', () => {
@@ -116,6 +166,8 @@ describe('APDM Phase 11 query attribution', () => {
     expect(record.attributedQueryCalls).toBe(1);
     expect(record.unattributedQueryCalls).toBe(0);
     expect(record.overflowed).toBe(false);
+    expect(record.lineageOverflowed).toBe(false);
+    expect(record.lineageContextCount).toBeGreaterThanOrEqual(3);
     expect(record.queries).toHaveLength(1);
     expect(record.queries[0]).toMatchObject({
       caller: 'webacl.resource.hasRights',
@@ -126,6 +178,67 @@ describe('APDM Phase 11 query attribution', () => {
     expect(record.queries[0].shapeHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(artifactText).not.toContain('private.example');
     expect(artifactText).not.toContain('Secret Alice');
+    expect(artifactText).not.toContain('private-alice');
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  test('retains bounded parent lineage after the parent action settles', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'apdm-p11-lineage-'));
+    const outputPath = path.join(directory, 'attribution.jsonl');
+    const attribution = createPhase11QueryAttribution({ enabled: true, outputPath, maxContexts: 16 });
+    const queryWrapped = attribution.middleware.localAction(async () => true, { name: 'triplestore.query' });
+    const parentWrapped = attribution.middleware.localAction(async () => 'settled', { name: 'ldp.resource.getContainers' });
+    const rootWrapped = attribution.middleware.localAction(async () => {
+      await parentWrapped({ id: 'parent', parentID: 'root', params: {} });
+      return queryWrapped({
+        id: 'query-after-parent',
+        parentID: 'parent',
+        params: { query: 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }' }
+      });
+    }, { name: 'activitypub.outbox.post' });
+
+    await rootWrapped({ id: 'root', params: {} });
+    attribution.dispose();
+    const record = JSON.parse(fs.readFileSync(outputPath, 'utf8').trim());
+    expect(record.unattributedQueryCalls).toBe(0);
+    expect(record.queries[0]).toMatchObject({ caller: 'ldp.resource.getContainers', operation: 'construct', count: 1 });
+    expect(record.lineageOverflowed).toBe(false);
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  test('records SemApps object-AST queries as ASK without leaking values', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'apdm-p11-ast-'));
+    const outputPath = path.join(directory, 'attribution.jsonl');
+    const attribution = createPhase11QueryAttribution({ enabled: true, outputPath });
+    const ast = {
+      type: 'query',
+      queryType: 'ASK',
+      where: [{
+        type: 'bgp',
+        triples: [{
+          subject: { termType: 'NamedNode', value: 'https://private.example/alice' },
+          predicate: { termType: 'NamedNode', value: 'https://schema.example/knows' },
+          object: { termType: 'NamedNode', value: 'https://private.example/bob' }
+        }]
+      }]
+    };
+    const queryWrapped = attribution.middleware.localAction(async () => true, { name: 'triplestore.query' });
+    const tripleExistWrapped = attribution.middleware.localAction(
+      async () => queryWrapped({ id: 'query', parentID: 'triple-exist', params: { query: ast, dataset: 'private-alice' } }),
+      { name: 'triplestore.tripleExist' }
+    );
+    const rootWrapped = attribution.middleware.localAction(
+      async () => tripleExistWrapped({ id: 'triple-exist', parentID: 'root', params: {} }),
+      { name: 'activitypub.outbox.post' }
+    );
+
+    await rootWrapped({ id: 'root', params: {} });
+    attribution.dispose();
+    const artifactText = fs.readFileSync(outputPath, 'utf8');
+    const record = JSON.parse(artifactText.trim());
+    expect(record.queries[0]).toMatchObject({ caller: 'triplestore.tripleExist', operation: 'ask', count: 1 });
+    expect(artifactText).not.toContain('private.example');
+    expect(artifactText).not.toContain('schema.example');
     expect(artifactText).not.toContain('private-alice');
     fs.rmSync(directory, { recursive: true, force: true });
   });
@@ -178,6 +291,29 @@ describe('APDM Phase 11 query attribution', () => {
     expect(record.distinctAttributionKeys).toBe(1);
     expect(record.overflowed).toBe(true);
     expect(record.droppedCalls).toBe(1);
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  test('bounds retained context lineage and marks overflow fail-closed', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'apdm-p11-lineage-cap-'));
+    const outputPath = path.join(directory, 'attribution.jsonl');
+    const attribution = createPhase11QueryAttribution({ enabled: true, outputPath, maxContexts: 2 });
+    const queryWrapped = attribution.middleware.localAction(async () => true, { name: 'triplestore.query' });
+    const callerWrapped = attribution.middleware.localAction(
+      async () => queryWrapped({ id: 'query', parentID: 'caller', params: { query: 'ASK {}' } }),
+      { name: 'activitypub.actor.get' }
+    );
+    const rootWrapped = attribution.middleware.localAction(
+      async () => callerWrapped({ id: 'caller', parentID: 'root', params: {} }),
+      { name: 'activitypub.outbox.post' }
+    );
+
+    await rootWrapped({ id: 'root', params: {} });
+    attribution.dispose();
+    const record = JSON.parse(fs.readFileSync(outputPath, 'utf8').trim());
+    expect(record.lineageContextCount).toBe(2);
+    expect(record.lineageOverflowed).toBe(true);
+    expect(record.droppedLineageContexts).toBe(1);
     fs.rmSync(directory, { recursive: true, force: true });
   });
 });
