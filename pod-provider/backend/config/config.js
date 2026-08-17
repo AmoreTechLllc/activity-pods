@@ -55,6 +55,8 @@ module.exports = {
     process.env.SEMAPPS_APDM_PHASE11_QUERY_ATTRIBUTION_OUTPUT || './apdm-phase11-query-attribution.jsonl',
   APDM_PHASE11_QUERY_ATTRIBUTION_MAX_KEYS:
     Number(process.env.SEMAPPS_APDM_PHASE11_QUERY_ATTRIBUTION_MAX_KEYS) || 4096,
+  APDM_PHASE11_QUERY_ATTRIBUTION_MAX_CONTEXTS:
+    Number(process.env.SEMAPPS_APDM_PHASE11_QUERY_ATTRIBUTION_MAX_CONTEXTS) || 65536,
   // The durable APDM handoff is intentionally isolated from the legacy
   // SIDECAR_WEBHOOK_URL. That older setting may point at the sidecar origin
   // for transitional emitters, while Phase 4/5 requires the exact durable
