@@ -1,5 +1,6 @@
 'use strict';
 
+const fs = require('fs');
 const {
   LOCAL_CONTEXT_SYMBOL_KEY,
   LOCAL_DELIVERY_SCOPE_RUNNER_SYMBOL_KEY,
@@ -39,8 +40,12 @@ async localPost(recipients, activityToPost) {
 `;
 }
 
+function installedOutboxFile() {
+  return locateOutboxSource(findPackageRoot());
+}
+
 function loadInstalledLocalPost() {
-  const outboxFile = locateOutboxSource(findPackageRoot());
+  const outboxFile = installedOutboxFile();
   delete require.cache[require.resolve(outboxFile)];
   return require(outboxFile).methods.localPost;
 }
@@ -83,6 +88,13 @@ describe('APDM Phase 7 and Phase 10 adversarial hardening', () => {
 
     expect(drifted).toContain('APDM-P10_LOCAL_DELIVERY_SCOPE_RUNNER');
     expect(() => patchOutboxSource(drifted)).toThrow(/APDM-P10.*scope dispatch/u);
+  });
+
+  test('Phase 7 integrity checks accept the fully installed Phase 9-overlaid artifact on repeated lifecycle runs', () => {
+    const source = fs.readFileSync(installedOutboxFile(), 'utf8');
+    const result = patchOutboxSource(source);
+    expect(result.changed).toBe(false);
+    expect(result.source).toBe(source);
   });
 
   test('Phase 7 falls back to the authoritative account lookup when cached dataset context is invalid', async () => {
