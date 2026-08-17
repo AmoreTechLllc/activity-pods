@@ -36,9 +36,8 @@ module.exports = {
     process.env.SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW === 'true',
   ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER:
     process.env.SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER === 'true',
-  // Phase 10 remains opt-in until its real OFF/ON measurement gate passes.
-  // A later evidence-backed closure commit may promote the default; merely
-  // merging the implementation must never activate unproven delivery behavior.
+  // Phase 10 remains fail-closed in production. Phase 11 explicitly enables it
+  // only inside its benchmark so attribution measures the post-Phase-10 profile.
   APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED:
     process.env.APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED === 'true',
   // APDM Phase 8 is opt-in measurement only. These settings do not alter
@@ -48,6 +47,14 @@ module.exports = {
     process.env.SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT || './apdm-phase8-tier1.jsonl',
   APDM_PHASE8_RECIPIENT_COUNT: Number(process.env.SEMAPPS_APDM_PHASE8_RECIPIENT_COUNT),
   APDM_PHASE8_CASE_LABEL: process.env.SEMAPPS_APDM_PHASE8_CASE_LABEL,
+  // Phase 11 query attribution is also measurement-only and fail-closed. The
+  // artifact contains hashes and action names, never raw SPARQL, IRIs or literals.
+  APDM_PHASE11_QUERY_ATTRIBUTION_ENABLED:
+    process.env.SEMAPPS_APDM_PHASE11_QUERY_ATTRIBUTION_ENABLED === 'true',
+  APDM_PHASE11_QUERY_ATTRIBUTION_OUTPUT:
+    process.env.SEMAPPS_APDM_PHASE11_QUERY_ATTRIBUTION_OUTPUT || './apdm-phase11-query-attribution.jsonl',
+  APDM_PHASE11_QUERY_ATTRIBUTION_MAX_KEYS:
+    Number(process.env.SEMAPPS_APDM_PHASE11_QUERY_ATTRIBUTION_MAX_KEYS) || 4096,
   // The durable APDM handoff is intentionally isolated from the legacy
   // SIDECAR_WEBHOOK_URL. That older setting may point at the sidecar origin
   // for transitional emitters, while Phase 4/5 requires the exact durable
