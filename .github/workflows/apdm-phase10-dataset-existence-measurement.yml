@@ -122,6 +122,16 @@ jobs:
           NODE
           }
 
+          reset_arm_storage() {
+            # docker-compose-test.yml uses host bind mounts for Fuseki and Redis.
+            # `docker compose down -v` does not remove those directories, so an
+            # explicit host-side reset is required to prevent OFF state from
+            # contaminating the ON arm (or vice versa).
+            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v || true
+            sudo rm -rf data/fuseki_test data/redis_test
+            mkdir -p data/fuseki_test data/redis_test
+          }
+
           run_arm() {
             local arm="$1"
             local memo="$2"
@@ -129,10 +139,11 @@ jobs:
             export APDM_P10_DATASET_EXIST_MEMO_ENABLED="${memo}"
             export APDM_P8_RUN_ID="p10-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arm}"
 
-            # Every arm receives fresh Fuseki/Redis/mailcatcher volumes and a fresh
-            # sender + 1000-recipient fixture. The backend image itself is built
-            # exactly once above and reused byte-for-byte across both arms.
-            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v || true
+            # Every arm receives fresh bind-mounted Fuseki/Redis state, fresh
+            # containers, and a fresh sender + 1000-recipient fixture. The
+            # backend image itself is built exactly once above and reused
+            # byte-for-byte across both arms.
+            reset_arm_storage
             docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d fuseki_test redis mailcatcher
 
             FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=60 ./scripts/fuseki-bootstrap.sh
@@ -192,7 +203,7 @@ jobs:
             cp "measurements/apdm-p10-${arm}-summary.json" "measurements/${arm}/"
             cp "measurements/apdm-p10-environment-${arm}.json" "measurements/${arm}/"
 
-            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v
+            reset_arm_storage
           }
 
           run_arm off false
@@ -235,4 +246,6 @@ jobs:
 
       - name: Stop isolated stack
         if: always()
-        run: docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v || true
+        run: |
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test
