@@ -38,6 +38,9 @@ function record(overrides = {}) {
     distinctAttributionKeys: queries.length,
     overflowed: false,
     droppedCalls: 0,
+    lineageContextCount: 12,
+    lineageOverflowed: false,
+    droppedLineageContexts: 0,
     queries,
     ...overrides
   };
@@ -67,9 +70,11 @@ describe('APDM Phase 11 evidence summarizer', () => {
     expect(() => assertPrivacySafeRawArtifact('{"value":"<urn:test:resource>"}', 'bad.jsonl')).toThrow(/Privacy scan rejected/u);
   });
 
-  test('rejects schema drift, overflow, unsafe metadata and opaque operations', () => {
+  test('rejects schema drift, aggregate/lineage overflow, unsafe metadata and opaque operations', () => {
     expect(() => validateRecord({ ...record(), unexpectedPayload: 'not-allowed' }, 10, 'record')).toThrow(/unexpected key/u);
     expect(() => validateRecord({ ...record(), overflowed: true, droppedCalls: 1 }, 10, 'record')).toThrow(/overflowed/u);
+    expect(() => validateRecord({ ...record(), lineageOverflowed: true, droppedLineageContexts: 1 }, 10, 'record')).toThrow(/context-lineage/u);
+    expect(() => validateRecord({ ...record(), lineageContextCount: 0 }, 10, 'record')).toThrow(/lineageContextCount/u);
     expect(() => validateRecord({ ...record(), caseLabel: 'unexpected-case' }, 10, 'record')).toThrow(/caseLabel/u);
     expect(() => validateRecord(record({ queries: [query({ operation: 'unknown' })] }), 10, 'record')).toThrow(/opaque query shapes/u);
     expect(() => validateRecord(record({ queries: [query({ operation: 'invalid' })] }), 10, 'record')).toThrow(/unsupported/u);
@@ -123,16 +128,23 @@ describe('APDM Phase 11 evidence summarizer', () => {
     expect(() => selectMeasuredRecords([p8Record(id)], [record({ requestId: id })], 10)).toThrow(/at least 3/u);
   });
 
-  test('summarizes per-shape sample medians and error totals', () => {
-    const first = record({ queries: [query({ count: 2, totalDurationMs: 2, maxDurationMs: 1 })], totalQueryCalls: 2, attributedQueryCalls: 2 });
+  test('summarizes per-shape sample medians, lineage cardinality and error totals', () => {
+    const first = record({
+      queries: [query({ count: 2, totalDurationMs: 2, maxDurationMs: 1 })],
+      totalQueryCalls: 2,
+      attributedQueryCalls: 2,
+      lineageContextCount: 10
+    });
     const second = record({
       requestId: 'apdm-p8-run-sample-2-feedface',
       queries: [query({ count: 6, errorCount: 1, totalDurationMs: 8, maxDurationMs: 3 })],
       totalQueryCalls: 6,
-      attributedQueryCalls: 6
+      attributedQueryCalls: 6,
+      lineageContextCount: 20
     });
     const summary = summarizeCount(10, [first, second]);
     expect(summary.totalQueryCallsMedian).toBe(4);
+    expect(summary.lineageContextCountMedian).toBe(15);
     expect(summary.queries[0].medianCountPerSample).toBe(4);
     expect(summary.queries[0].medianDurationMsPerSample).toBe(5);
     expect(summary.queries[0].errorCount).toBe(1);
