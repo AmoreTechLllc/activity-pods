@@ -17,6 +17,7 @@ on:
     paths:
       - '.github/workflows/apdm-phase11-query-attribution.yml'
       - 'pod-provider/backend/config/config.js'
+      - 'pod-provider/backend/docs/apdm-phase11-query-attribution.md'
       - 'pod-provider/backend/lib/apdm-phase8-tier1-instrumentation.js'
       - 'pod-provider/backend/lib/apdm-phase11-query-attribution.js'
       - 'pod-provider/backend/middlewares/apdm-local-delivery-dataset-exist-memo.js'
