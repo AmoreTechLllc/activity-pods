@@ -6,7 +6,9 @@ const path = require('path');
 const {
   LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY,
   LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY,
-  createPhase8Tier1Instrumentation
+  createPhase8Tier1Instrumentation,
+  evidenceFusekiPath,
+  normalizeUrl
 } = require('../lib/apdm-phase8-tier1-instrumentation');
 
 describe('APDM Phase 8 hardening', () => {
@@ -18,12 +20,7 @@ describe('APDM Phase 8 hardening', () => {
     globalThis[completionKey] = previousCompletion;
     globalThis[resultKey] = previousResult;
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'apdm-p8-chain-'));
-    const instrumentation = createPhase8Tier1Instrumentation({
-      enabled: true,
-      outputPath: path.join(directory, 'measurement.jsonl'),
-      recipientCount: 1
-    });
-
+    const instrumentation = createPhase8Tier1Instrumentation({ enabled: true, outputPath: path.join(directory, 'measurement.jsonl'), recipientCount: 1 });
     try {
       const completion = globalThis[completionKey];
       const result = globalThis[resultKey];
@@ -48,8 +45,7 @@ describe('APDM Phase 8 hardening', () => {
 
   test('observer failures never replace delivery results', async () => {
     const completionKey = Symbol.for(LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY);
-    const previousCompletion = () => { throw new Error('observer-private-value'); };
-    globalThis[completionKey] = previousCompletion;
+    globalThis[completionKey] = () => { throw new Error('observer-private-value'); };
     const reported = [];
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'apdm-p8-observer-error-'));
     const instrumentation = createPhase8Tier1Instrumentation({
@@ -78,12 +74,8 @@ describe('APDM Phase 8 hardening', () => {
     const outputPath = path.join(directory, 'measurement.jsonl');
     const instrumentation = createPhase8Tier1Instrumentation({ enabled: true, outputPath });
     try {
-      const child = instrumentation.middleware.localAction(async () => {
-        throw new Error('PRIVATE_RESOURCE_MARKER');
-      }, { name: 'ldp.resource.get' });
-      const root = instrumentation.middleware.localAction(async () => child({ id: 'child' }), {
-        name: 'activitypub.outbox.post'
-      });
+      const child = instrumentation.middleware.localAction(async () => { throw new Error('PRIVATE_RESOURCE_MARKER'); }, { name: 'ldp.resource.get' });
+      const root = instrumentation.middleware.localAction(async () => child({ id: 'child' }), { name: 'activitypub.outbox.post' });
       await expect(root({ id: 'root-private', requestID: 'request-private' })).rejects.toThrow('PRIVATE_RESOURCE_MARKER');
       const artifact = fs.readFileSync(outputPath, 'utf8');
       expect(artifact).not.toContain('PRIVATE_RESOURCE_MARKER');
@@ -95,11 +87,39 @@ describe('APDM Phase 8 hardening', () => {
     }
   });
 
+  test('redacts dynamic Fuseki dataset names while preserving mechanism route shape', () => {
+    const rootTarget = normalizeUrl('http://fuseki:3030/');
+    expect(evidenceFusekiPath(normalizeUrl('http://fuseki:3030/private-user/query'), [rootTarget])).toBe('/:dataset/query');
+    expect(evidenceFusekiPath(normalizeUrl('http://fuseki:3030/$/datasets/private-user'), [rootTarget])).toBe('/$/datasets/:dataset');
+    const configured = normalizeUrl('http://fuseki:3030/settings');
+    expect(evidenceFusekiPath(normalizeUrl('http://fuseki:3030/settings/query'), [rootTarget, configured])).toBe('/settings/query');
+  });
+
+  test('unbalanced or unknown completion observer events invalidate the trace', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'apdm-p8-balance-'));
+    const outputPath = path.join(directory, 'measurement.jsonl');
+    const instrumentation = createPhase8Tier1Instrumentation({ enabled: true, outputPath });
+    try {
+      const observer = globalThis[Symbol.for(LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY)];
+      const root = instrumentation.middleware.localAction(async () => {
+        observer('finish', {});
+        observer('unexpected', {});
+        return true;
+      }, { name: 'activitypub.outbox.post' });
+      await expect(root({ id: 'root-balance', requestID: 'request-balance' })).resolves.toBe(true);
+      const record = JSON.parse(fs.readFileSync(outputPath, 'utf8').trim());
+      expect(record.errors).toContainEqual({ source: 'detached-local-delivery-observer-unbalanced' });
+      expect(record.errors).toContainEqual({ source: 'detached-local-delivery-observer-unknown-phase' });
+    } finally {
+      instrumentation.dispose();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test('rejects ambiguous duplicate Fuseki HTTP probe ownership and restores cleanly', () => {
     const first = createPhase8Tier1Instrumentation({ enabled: true, fusekiBase: 'http://127.0.0.1:3030/' });
     try {
-      expect(() => createPhase8Tier1Instrumentation({ enabled: true, fusekiBase: 'http://127.0.0.1:3030/' }))
-        .toThrow(/already installed/u);
+      expect(() => createPhase8Tier1Instrumentation({ enabled: true, fusekiBase: 'http://127.0.0.1:3030/' })).toThrow(/already installed/u);
     } finally {
       first.dispose();
     }
