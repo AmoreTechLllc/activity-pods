@@ -45,9 +45,19 @@ services:
       SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: native
       SIDECAR_WEBHOOK_URL: ''
 
-      # Phase 9 reuses the Phase 8 real-runtime harness but changes only this
-      # bounded localPost scheduler control. The production default remains 1.
+      # This shared overlay preserves the historical serial Phase 8 default.
+      # Later APDM measurement workflows must set their reviewed concurrency
+      # explicitly; Phase 9/10 use APDM_P9_CONCURRENCY=4 where required.
       APDM_LOCAL_DELIVERY_CONCURRENCY: '${APDM_P9_CONCURRENCY:-1}'
+
+      # Phase 10 is fail-closed in production and in the shared measurement
+      # overlay. The dedicated OFF/ON workflow sets this exact boolean string per
+      # isolated arm while holding every other local-delivery control constant.
+      APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED: '${APDM_P10_DATASET_EXIST_MEMO_ENABLED:-false}'
+      # Empty outside Phase 10. During its real evidence run, the readiness script
+      # uses this arm label to prove the recreated backend received c4 plus the
+      # intended memo boolean before any measured root is accepted.
+      APDM_P10_MEASUREMENT_ARM: '${APDM_P10_ARM:-}'
 
       # These values are supplied by the measurement workflow before each
       # backend recreation. The recipient count is metadata only; the runner

@@ -36,6 +36,11 @@ module.exports = {
     process.env.SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW === 'true',
   ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER:
     process.env.SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER === 'true',
+  // Phase 10 remains opt-in until its real OFF/ON measurement gate passes.
+  // A later evidence-backed closure commit may promote the default; merely
+  // merging the implementation must never activate unproven delivery behavior.
+  APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED:
+    process.env.APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED === 'true',
   // APDM Phase 8 is opt-in measurement only. These settings do not alter
   // delivery behavior; they attach observers to the real local Tier 1 path.
   APDM_PHASE8_INSTRUMENTATION_ENABLED: process.env.SEMAPPS_APDM_PHASE8_INSTRUMENTATION_ENABLED === 'true',

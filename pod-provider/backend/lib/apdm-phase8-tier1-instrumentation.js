@@ -63,6 +63,7 @@ function createTrace({ requestId, recipientCount, caseLabel }) {
       methodCounts: Object.create(null),
       statusCounts: Object.create(null),
       pathCounts: Object.create(null),
+      requestKeyCounts: Object.create(null),
       totalDurationMs: 0
     },
     errors: []
@@ -150,6 +151,23 @@ function getRequestTarget(args, protocol) {
   return undefined;
 }
 
+function getRequestMethod(args) {
+  // Node supports request(url, options), request(URL, options), and
+  // request(options). A legacy URL/options descriptor can itself be an object,
+  // so taking the first object argument can accidentally ignore a later explicit
+  // { method: 'DELETE' } and misclassify it as the default GET. Prefer the first
+  // non-URL object that actually declares a method; otherwise HTTP defaults GET.
+  const explicitMethodOptions = args.find(
+    value =>
+      value &&
+      typeof value === 'object' &&
+      !(value instanceof URL) &&
+      typeof value.method === 'string' &&
+      value.method.length > 0
+  );
+  return String((explicitMethodOptions && explicitMethodOptions.method) || 'GET').toUpperCase();
+}
+
 function targetMatchesFuseki(target, fusekiTargets) {
   if (!target) return false;
   return fusekiTargets.some(candidate => {
@@ -177,12 +195,12 @@ function installFusekiHttpProbe({ storage, fusekiUrls = [] }) {
         return originalRequest.apply(this, args);
       }
 
-      const options = args.find(value => value && typeof value === 'object' && !(value instanceof URL));
-      const method = String((options && options.method) || 'GET').toUpperCase();
+      const method = getRequestMethod(args);
       const started = performance.now();
       trace.fuseki.requestCount += 1;
       increment(trace.fuseki.methodCounts, method);
       increment(trace.fuseki.pathCounts, target.pathname);
+      increment(trace.fuseki.requestKeyCounts, `${method} ${target.pathname}`);
 
       const request = originalRequest.apply(this, args);
       request.once('response', response => {
@@ -395,6 +413,7 @@ module.exports = {
   createTrace,
   finishTrace,
   createPhase8Tier1Instrumentation,
+  getRequestMethod,
   installFusekiHttpProbe,
   normalizeUrl,
   targetMatchesFuseki,

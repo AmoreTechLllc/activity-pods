@@ -28,6 +28,23 @@ function positiveInteger(value, fallback, label) {
   return parsed;
 }
 
+function assertPhase10MeasurementRuntime({
+  arm = process.env.APDM_P10_MEASUREMENT_ARM,
+  concurrency = process.env.APDM_LOCAL_DELIVERY_CONCURRENCY,
+  memoEnabled = process.env.APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED
+} = {}) {
+  if (arm === undefined || arm === null || arm === '') return { checked: false };
+  if (arm !== 'off' && arm !== 'on') throw new Error(`Unsupported APDM Phase 10 measurement arm: ${arm}`);
+  if (String(concurrency) !== '4') {
+    throw new Error(`APDM Phase 10 measurement requires local delivery concurrency 4; received ${concurrency}`);
+  }
+  const expectedMemo = arm === 'on' ? 'true' : 'false';
+  if (String(memoEnabled) !== expectedMemo) {
+    throw new Error(`APDM Phase 10 arm ${arm} requires memo flag ${expectedMemo}; received ${memoEnabled}`);
+  }
+  return { checked: true, arm, concurrency: 4, memoEnabled: arm === 'on' };
+}
+
 function createRemoteBroker(transporterUrl) {
   return new ServiceBroker({
     nodeID: `apdm-p8-restart-ready-${process.pid}-${Date.now()}`,
@@ -70,12 +87,6 @@ async function waitForWarmRestartReady({
   const broker = brokerFactory(transporterUrl);
   await broker.start();
   try {
-    // Marker durability alone is not a restart barrier: on a warm restart the
-    // marker may already exist before activitypub.blocked/activitypub.muted
-    // have completed their current started() hooks. Require both collection
-    // services themselves to be available before checking the durable marker
-    // state, so their O(1) registration/query startup work cannot overlap a
-    // measured root.
     await broker.waitForServices([...REQUIRED_RESTART_SERVICES], timeoutMs);
 
     const deadline = Date.now() + timeoutMs;
@@ -114,11 +125,20 @@ async function waitForWarmRestartReady({
 }
 
 async function main() {
+  const runtime = assertPhase10MeasurementRuntime();
   const transporterUrl = process.env.SEMAPPS_REDIS_TRANSPORTER_URL || DEFAULT_TRANSPORTER_URL;
-  const timeoutMs = positiveInteger(process.env.APDM_P8_RESTART_READY_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, 'restart ready timeout');
-  const pollMs = positiveInteger(process.env.APDM_P8_RESTART_READY_POLL_MS, DEFAULT_POLL_MS, 'restart ready poll interval');
+  const timeoutMs = positiveInteger(
+    process.env.APDM_P8_RESTART_READY_TIMEOUT_MS,
+    DEFAULT_TIMEOUT_MS,
+    'restart ready timeout'
+  );
+  const pollMs = positiveInteger(
+    process.env.APDM_P8_RESTART_READY_POLL_MS,
+    DEFAULT_POLL_MS,
+    'restart ready poll interval'
+  );
   const result = await waitForWarmRestartReady({ transporterUrl, timeoutMs, pollMs });
-  process.stdout.write(`${JSON.stringify({ ok: true, phase: 'APDM-P8-A', ...result })}\n`);
+  process.stdout.write(`${JSON.stringify({ ok: true, phase: 'APDM-P8-A', phase10Runtime: runtime, ...result })}\n`);
 }
 
 if (require.main === module) {
@@ -132,6 +152,7 @@ module.exports = {
   COMPLETED_PREDICATE,
   REQUIRED_MIGRATION_MARKERS,
   REQUIRED_RESTART_SERVICES,
+  assertPhase10MeasurementRuntime,
   markerQuery,
   markerValues,
   missingMarkers,

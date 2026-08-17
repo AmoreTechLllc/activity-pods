@@ -3,6 +3,7 @@
 const {
   REQUIRED_MIGRATION_MARKERS,
   REQUIRED_RESTART_SERVICES,
+  assertPhase10MeasurementRuntime,
   markerQuery,
   markerValues,
   missingMarkers,
@@ -43,6 +44,36 @@ describe('APDM Phase 8 warm restart readiness gate', () => {
       'activitypub.blocked',
       'activitypub.muted'
     ]);
+  });
+
+  test('Phase 10 runtime assertion is inert outside its measurement workflow', () => {
+    expect(assertPhase10MeasurementRuntime({ arm: '', concurrency: undefined, memoEnabled: undefined })).toEqual({
+      checked: false
+    });
+  });
+
+  test('Phase 10 runtime assertion proves c4 and the exact OFF ON memo flag', () => {
+    expect(assertPhase10MeasurementRuntime({ arm: 'off', concurrency: '4', memoEnabled: 'false' })).toEqual({
+      checked: true,
+      arm: 'off',
+      concurrency: 4,
+      memoEnabled: false
+    });
+    expect(assertPhase10MeasurementRuntime({ arm: 'on', concurrency: '4', memoEnabled: 'true' })).toEqual({
+      checked: true,
+      arm: 'on',
+      concurrency: 4,
+      memoEnabled: true
+    });
+    expect(() => assertPhase10MeasurementRuntime({ arm: 'on', concurrency: '1', memoEnabled: 'true' })).toThrow(
+      'requires local delivery concurrency 4'
+    );
+    expect(() => assertPhase10MeasurementRuntime({ arm: 'off', concurrency: '4', memoEnabled: 'true' })).toThrow(
+      'requires memo flag false'
+    );
+    expect(() => assertPhase10MeasurementRuntime({ arm: 'other', concurrency: '4', memoEnabled: 'false' })).toThrow(
+      'Unsupported APDM Phase 10 measurement arm'
+    );
   });
 
   test('queries exactly the durable blocked and muted migration markers', () => {

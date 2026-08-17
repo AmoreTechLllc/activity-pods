@@ -8,9 +8,11 @@ const EXPECTED_VERSION = '1.1.4';
 const PATCH_MARKER = 'APDM-P7_LOCAL_RECIPIENT_CONTEXT_REUSE';
 const PHASE8_COMPLETION_MARKER = 'APDM-P8_LOCAL_DELIVERY_COMPLETION_OBSERVER';
 const PHASE8_RESULT_MARKER = 'APDM-P8_LOCAL_DELIVERY_RESULT_OBSERVER';
+const PHASE10_SCOPE_MARKER = 'APDM-P10_LOCAL_DELIVERY_SCOPE_RUNNER';
 const LOCAL_CONTEXT_SYMBOL_KEY = 'semapps-atproto.apdm.local-recipient-contexts';
 const LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY = 'semapps-atproto.apdm-p8.local-delivery-observer';
 const LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY = 'semapps-atproto.apdm-p8.local-delivery-result-observer';
+const LOCAL_DELIVERY_SCOPE_RUNNER_SYMBOL_KEY = 'semapps-atproto.apdm-p10.local-delivery-scope-runner';
 
 function findPackageRoot() {
   let current = path.dirname(require.resolve(EXPECTED_PACKAGE));
@@ -57,6 +59,7 @@ function locateOutboxSource(packageRoot) {
       source.includes(PATCH_MARKER) ||
       source.includes(PHASE8_COMPLETION_MARKER) ||
       source.includes(PHASE8_RESULT_MARKER) ||
+      source.includes(PHASE10_SCOPE_MARKER) ||
       isOutboxCandidate(source)
     );
   });
@@ -164,6 +167,20 @@ function patchOutboxSource(source) {
     changed = true;
   }
 
+  if (!patched.includes(PHASE10_SCOPE_MARKER)) {
+    if (!patched.includes(PATCH_MARKER)) {
+      throw new Error('[APDM-P10] Local delivery scope seam requires the reviewed Phase 7 local-delivery patch');
+    }
+
+    patched = replaceExactlyOnce(
+      patched,
+      '          this.localPost(localRecipients, activity);',
+      `          const phase10LocalDeliveryScopeRunner = globalThis[Symbol.for('${LOCAL_DELIVERY_SCOPE_RUNNER_SYMBOL_KEY}')]; // ${PHASE10_SCOPE_MARKER}\n          if (typeof phase10LocalDeliveryScopeRunner === 'function') {\n            phase10LocalDeliveryScopeRunner(() => this.localPost(localRecipients, activity));\n          } else {\n            this.localPost(localRecipients, activity);\n          }`,
+      'Phase 10 localPost scope dispatch'
+    );
+    changed = true;
+  }
+
   return { source: patched, changed };
 }
 
@@ -183,7 +200,7 @@ function applyPatch() {
   if (result.changed) {
     fs.writeFileSync(outboxFile, result.source, 'utf8');
     process.stdout.write(
-      `[APDM] Patched ${path.relative(packageRoot, outboxFile)} for Phase 7 context reuse and Phase 8 completion/result observation\n`
+      `[APDM] Patched ${path.relative(packageRoot, outboxFile)} for Phase 7 context reuse, Phase 8 observation, and the optional Phase 10 local-delivery scope seam\n`
     );
   } else {
     process.stdout.write(`[APDM] ${path.relative(packageRoot, outboxFile)} already patched\n`);
@@ -200,9 +217,11 @@ module.exports = {
   PATCH_MARKER,
   PHASE8_COMPLETION_MARKER,
   PHASE8_RESULT_MARKER,
+  PHASE10_SCOPE_MARKER,
   LOCAL_CONTEXT_SYMBOL_KEY,
   LOCAL_DELIVERY_OBSERVER_SYMBOL_KEY,
   LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY,
+  LOCAL_DELIVERY_SCOPE_RUNNER_SYMBOL_KEY,
   findPackageRoot,
   locateOutboxSource,
   patchOutboxSource,

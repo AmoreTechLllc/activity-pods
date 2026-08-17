@@ -42,6 +42,17 @@ function aggregateCounts(records, field) {
   return result;
 }
 
+function aggregateNestedCounts(records, parentField, field) {
+  const result = Object.create(null);
+  for (const record of records) {
+    const values = record[parentField]?.[field] || {};
+    for (const [key, value] of Object.entries(values)) {
+      result[key] = (result[key] || 0) + Number(value || 0);
+    }
+  }
+  return result;
+}
+
 function isSuccessfulRecord(record) {
   return !Array.isArray(record.errors) || record.errors.length === 0;
 }
@@ -90,6 +101,13 @@ function summarizeRecipientCase(records) {
     },
     actionCounts: aggregateCounts(successfulRecords, 'actionCounts'),
     categoryCounts: aggregateCounts(successfulRecords, 'categoryCounts'),
+    // Preserve real HTTP evidence separately from Moleculer action invocation
+    // counts. requestKeyCounts correlates method and path so later phases can
+    // distinguish GET existence probes from lifecycle writes to the same path.
+    fusekiPathCounts: aggregateNestedCounts(successfulRecords, 'fuseki', 'pathCounts'),
+    fusekiMethodCounts: aggregateNestedCounts(successfulRecords, 'fuseki', 'methodCounts'),
+    fusekiStatusCounts: aggregateNestedCounts(successfulRecords, 'fuseki', 'statusCounts'),
+    fusekiRequestKeyCounts: aggregateNestedCounts(successfulRecords, 'fuseki', 'requestKeyCounts'),
     errorSamples: records.length - successfulRecords.length
   };
 }
@@ -195,6 +213,7 @@ if (require.main === module) main();
 module.exports = {
   REQUIRED_RECIPIENT_COUNTS,
   aggregateCounts,
+  aggregateNestedCounts,
   isSuccessfulRecord,
   linearFit,
   mean,
