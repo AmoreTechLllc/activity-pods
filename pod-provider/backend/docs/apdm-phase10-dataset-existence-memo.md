@@ -48,7 +48,17 @@ Phase 11 remains the separate batch-safe persistence investigation after Phase 1
 
 ## Measurement gate
 
-After Phase 9 chooses a bounded local-delivery concurrency, rerun the same canonical real local-fanout matrix with this middleware disabled and enabled at that exact concurrency. Both sides must use the same fixture construction, recipient counts, warmups, sample count, backend recreation policy, instrumentation, exact code commit, and resolved container images.
+After Phase 9 selected bounded local-delivery concurrency 4, rerun the canonical real local-fanout matrix with this middleware disabled and enabled at that exact concurrency. Both arms must use the same fixture construction, recipient counts, warmups, sample count, backend recreation policy, instrumentation, exact code commit, and resolved container images.
+
+The decisive Phase 10 workflow runs the OFF and ON arms **sequentially on the same GitHub-hosted runner**. It builds the backend image exactly once, then gives each arm fresh Fuseki/Redis/mailcatcher volumes and a separately provisioned sender plus 1,000-recipient fixture. This paired design is deliberate:
+
+- both arms have the same CPU model/count and host-memory envelope;
+- both arms use the exact same backend image ID rather than two independently resolved networked Docker builds;
+- Fuseki, Redis, mailcatcher, Node, runner-image, commit, concurrency and measurement configuration are hard-matched;
+- fixture state does not cross arms because the stack and volumes are destroyed between them;
+- provisioning forces the memo off in both arms; only measured backend recreations differ by the memo boolean.
+
+This replaced the first matrix-runner experiment after its immutable evidence showed two invalidating provenance differences: independent backend builds produced different image IDs, and GitHub scheduled OFF/ON on different CPU families. That first run remains useful as mechanism evidence only. Its large cases showed strong reductions in exact dataset-registry GETs and total Fuseki traffic, but its CPU/latency values are not valid production-promotion evidence because the resource environments were not matched.
 
 The Phase 8 instrumentation counts Moleculer action invocations before downstream middleware completes. A memo hit can therefore still appear as an attempted `triplestore.dataset.exist` action even though the underlying SemApps handler and Fuseki request never execute. For Phase 10, action counts are diagnostic only.
 
