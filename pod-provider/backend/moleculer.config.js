@@ -64,7 +64,8 @@ const middlewares = [
   SkipOrphanBlankNodesCleanupMiddleware({ enabled: CONFIG.SKIP_ORPHAN_BLANK_NODE_CLEANUP }),
   // Phase 10 remains default-OFF. When explicitly enabled it owns exactly one
   // process-global local-delivery scope seam and refuses ambiguous duplicate ownership.
-  // Phase 7/10 adversarial hardening is frozen here before new Phase 11 evidence.
+  // Manual Codex-level hardening of the upstream Phase 4-10 authority stack is
+  // frozen before new Phase 11 evidence; any later runtime change supersedes it.
   ApdmLocalDeliveryDatasetExistMemoMiddleware({ enabled: CONFIG.APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED }),
   ObjectsWatcherMiddleware({ baseUrl: CONFIG.BASE_URL, podProvider: true, postWithoutRecipients: true }),
   LongFormTextMiddleware(),
