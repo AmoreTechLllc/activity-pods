@@ -23,11 +23,17 @@ const SAFE_AST_TYPE_VALUES = new Set([
 const SAFE_TERM_TYPES = new Set([
   'NamedNode', 'BlankNode', 'Literal', 'Variable', 'DefaultGraph', 'Quad'
 ]);
+const SAFE_AST_OPERATORS = new Set([
+  '=', '!=', '<', '>', '<=', '>=', '+', '-', '*', '/', '&&', '||', '!',
+  'in', 'notin', 'exists', 'notexists', 'bound', 'regex', 'sameTerm', 'isIRI',
+  'isURI', 'isBlank', 'isLiteral', 'isNumeric', 'lang', 'datatype', 'str'
+]);
 const SAFE_AST_KEYS = new Set([
-  'type', 'queryType', 'where', 'patterns', 'triples', 'name', 'termType', 'value',
-  'variables', 'template', 'expression', 'operator', 'args', 'values', 'group',
-  'having', 'order', 'limit', 'offset', 'distinct', 'reduced', 'silent', 'from',
-  'prefixes', 'updates', 'insert', 'delete', 'using', 'graph', 'source', 'destination'
+  'type', 'queryType', 'where', 'patterns', 'triples', 'subject', 'predicate', 'object',
+  'name', 'termType', 'value', 'datatype', 'language', 'variables', 'template',
+  'expression', 'operator', 'args', 'values', 'group', 'having', 'order', 'limit',
+  'offset', 'distinct', 'reduced', 'silent', 'from', 'prefixes', 'updates',
+  'insert', 'delete', 'using', 'graph', 'source', 'destination'
 ]);
 
 function normalizeWhitespace(value) {
@@ -136,6 +142,7 @@ function normalizeQueryObjectShape(value, key = undefined, depth = 0) {
       return SAFE_AST_TYPE_VALUES.has(type) ? type : 'TYPE';
     }
     if (key === 'termType') return SAFE_TERM_TYPES.has(value) ? value : 'TERM';
+    if (key === 'operator') return SAFE_AST_OPERATORS.has(value) ? value : 'OPERATOR';
     return 'STRING';
   }
   if (valueType === 'number' || valueType === 'bigint') return 'NUMBER';
@@ -241,9 +248,6 @@ function createPhase11QueryAttribution(options = {}) {
       caseLabel,
       recipientCount: Number.isFinite(defaultRecipientCount) ? defaultRecipientCount : undefined,
       startedAt: new Date().toISOString(),
-      // Retain context IDs for the bounded lifetime of this one measured root.
-      // Detached local delivery may outlive the JS promise that created a parent
-      // Moleculer action; deleting parent IDs on action settlement loses lineage.
       contextActions: new Map(),
       lineageOverflowed: false,
       droppedLineageContexts: 0,
