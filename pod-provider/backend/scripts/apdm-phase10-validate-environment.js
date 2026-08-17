@@ -42,9 +42,21 @@ function assertPositiveInteger(value, label) {
   }
 }
 
+function parsePositiveIntegerString(value, label) {
+  if (typeof value !== 'string' || !/^[1-9]\d*$/u.test(value)) {
+    throw new Error(`Invalid Phase 10 provenance field ${label}: expected a positive integer string`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`Invalid Phase 10 provenance field ${label}: exceeds safe integer range`);
+  }
+  return parsed;
+}
+
 function validateEnvironment(control, enabled) {
   const failures = [];
   const resourceDifferences = [];
+  let runAttempt;
 
   for (const [label, manifest] of [['control', control], ['enabled', enabled]]) {
     for (const field of REQUIRED_FIELDS) {
@@ -57,9 +69,16 @@ function validateEnvironment(control, enabled) {
     try {
       assertPositiveInteger(manifest.hostCpuCount, `${label}.hostCpuCount`);
       assertPositiveInteger(manifest.hostTotalMemoryBytes, `${label}.hostTotalMemoryBytes`);
+      parsePositiveIntegerString(manifest.runAttempt, `${label}.runAttempt`);
     } catch (error) {
       failures.push(error.message);
     }
+  }
+
+  try {
+    runAttempt = parsePositiveIntegerString(control.runAttempt, 'control.runAttempt');
+  } catch (_error) {
+    runAttempt = undefined;
   }
 
   if (control.phase !== REQUIRED_PHASE || enabled.phase !== REQUIRED_PHASE) {
@@ -71,14 +90,11 @@ function validateEnvironment(control, enabled) {
   if (enabled.arm !== 'on' || enabled.memoEnabled !== true) {
     failures.push('Enabled manifest must prove arm=on and memoEnabled=true');
   }
-  if (Number(control.concurrency) !== REQUIRED_CONCURRENCY || Number(enabled.concurrency) !== REQUIRED_CONCURRENCY) {
+  if (control.concurrency !== REQUIRED_CONCURRENCY || enabled.concurrency !== REQUIRED_CONCURRENCY) {
     failures.push(`Both manifests must prove APDM local-delivery concurrency ${REQUIRED_CONCURRENCY}`);
   }
 
-  const runAttempt = Number(control.runAttempt);
-  const expectedArmOrder = Number.isSafeInteger(runAttempt) && runAttempt > 0
-    ? (runAttempt % 2 === 1 ? 'off-first' : 'on-first')
-    : undefined;
+  const expectedArmOrder = runAttempt === undefined ? undefined : (runAttempt % 2 === 1 ? 'off-first' : 'on-first');
   if (!VALID_ARM_ORDERS.has(control.armOrder) || !VALID_ARM_ORDERS.has(enabled.armOrder)) {
     failures.push('Both manifests must declare a valid Phase 10 armOrder');
   } else if (expectedArmOrder && control.armOrder !== expectedArmOrder) {
@@ -143,5 +159,6 @@ module.exports = {
   REQUIRED_PHASE,
   VALID_ARM_ORDERS,
   assertPositiveInteger,
+  parsePositiveIntegerString,
   validateEnvironment
 };
