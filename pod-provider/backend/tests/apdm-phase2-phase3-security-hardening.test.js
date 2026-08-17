@@ -66,7 +66,6 @@ describe('APDM Phase 3 remote actor discovery egress', () => {
     'http://remote.example/users/alice',
     'ftp://remote.example/users/alice',
     'https://user:pass@remote.example/users/alice',
-    'https://remote.example/users/alice#key',
     ' https://remote.example/users/alice',
     'https://remote.example/users/alice '
   ])('rejects unsafe remote actor URI %p', async actorUri => {
@@ -115,6 +114,24 @@ describe('APDM Phase 3 remote actor discovery egress', () => {
     expect(options.timeout).toBe(5000);
     expect(options.size).toBe(1024 * 1024);
     expect(options.agent).toBeDefined();
+  });
+
+  test('retains a fragment-bearing actor identity while fetching its fragmentless network document', async () => {
+    const fetchImpl = jest.fn(async () => ({
+      ok: true,
+      async json() {
+        return {
+          id: 'https://remote.example/actors#alice',
+          inbox: 'https://remote.example/inbox/alice'
+        };
+      }
+    }));
+
+    await expect(fetchRemoteActivityPubActor('https://remote.example/actors#alice', {
+      fetchImpl,
+      lookup: publicLookup('1.1.1.1')
+    })).resolves.toEqual(expect.objectContaining({ id: 'https://remote.example/actors#alice' }));
+    expect(fetchImpl.mock.calls[0][0]).toBe('https://remote.example/actors');
   });
 
   test('rejects a successful fetch whose actor identity differs from the requested recipient', async () => {
