@@ -57,7 +57,7 @@ describe('signing internal authentication hardening', () => {
     const service = { settings: { auth: { bearerToken: null } } };
     expectMoleculerError(
       () => signingService.methods._auth.call(service, { meta: { $headers: { authorization: 'Bearer supplied' } } }),
-      { code: 503, type: 'SIGNING_AUTH_NOT_CONFIGURED', message: /not configured/u }
+      { code: 503, type: 'SIGNING_AUTH_NOT_CONFIGURED', message: /not configured/iu }
     );
   });
 
@@ -66,11 +66,11 @@ describe('signing internal authentication hardening', () => {
 
     expectMoleculerError(
       () => signingService.methods._auth.call(service, { meta: { $headers: {} } }),
-      { code: 401, type: 'AUTH_FAILED', message: /missing or malformed/u }
+      { code: 401, type: 'AUTH_FAILED', message: /missing or malformed/iu }
     );
     expectMoleculerError(
       () => signingService.methods._auth.call(service, { meta: { $headers: { authorization: 'Bearer wrong-secret' } } }),
-      { code: 403, type: 'AUTH_FAILED', message: /invalid bearer token/u }
+      { code: 403, type: 'AUTH_FAILED', message: /invalid bearer token/iu }
     );
     expect(() =>
       signingService.methods._auth.call(service, {
