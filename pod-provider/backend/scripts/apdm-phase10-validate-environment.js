@@ -5,8 +5,10 @@ const path = require('path');
 
 const REQUIRED_PHASE = 'APDM-P10-A';
 const REQUIRED_CONCURRENCY = 4;
+const VALID_ARM_ORDERS = new Set(['off-first', 'on-first']);
 const HARD_MATCHED_FIELDS = [
   'phase',
+  'armOrder',
   'commitSha',
   'workflowRunId',
   'runAttempt',
@@ -73,6 +75,16 @@ function validateEnvironment(control, enabled) {
     failures.push(`Both manifests must prove APDM local-delivery concurrency ${REQUIRED_CONCURRENCY}`);
   }
 
+  const runAttempt = Number(control.runAttempt);
+  const expectedArmOrder = Number.isSafeInteger(runAttempt) && runAttempt > 0
+    ? (runAttempt % 2 === 1 ? 'off-first' : 'on-first')
+    : undefined;
+  if (!VALID_ARM_ORDERS.has(control.armOrder) || !VALID_ARM_ORDERS.has(enabled.armOrder)) {
+    failures.push('Both manifests must declare a valid Phase 10 armOrder');
+  } else if (expectedArmOrder && control.armOrder !== expectedArmOrder) {
+    failures.push(`Phase 10 armOrder ${control.armOrder} does not match run attempt ${control.runAttempt}`);
+  }
+
   for (const field of HARD_MATCHED_FIELDS) {
     if (control[field] !== enabled[field]) {
       failures.push(`Evidence arms differ at ${field}: ${JSON.stringify(control[field])} vs ${JSON.stringify(enabled[field])}`);
@@ -100,8 +112,8 @@ function validateEnvironment(control, enabled) {
     resourceComparabilityFields: RESOURCE_COMPARABILITY_FIELDS,
     resourceComparable: passed,
     resourceDifferences,
-    control: { arm: control.arm, memoEnabled: control.memoEnabled },
-    enabled: { arm: enabled.arm, memoEnabled: enabled.memoEnabled },
+    control: { arm: control.arm, armOrder: control.armOrder, memoEnabled: control.memoEnabled },
+    enabled: { arm: enabled.arm, armOrder: enabled.armOrder, memoEnabled: enabled.memoEnabled },
     failures
   };
 }
@@ -129,6 +141,7 @@ module.exports = {
   RESOURCE_COMPARABILITY_FIELDS,
   REQUIRED_CONCURRENCY,
   REQUIRED_PHASE,
+  VALID_ARM_ORDERS,
   assertPositiveInteger,
   validateEnvironment
 };
