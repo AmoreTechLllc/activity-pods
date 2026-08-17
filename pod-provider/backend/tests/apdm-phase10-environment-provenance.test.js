@@ -9,6 +9,7 @@ function manifest(overrides = {}) {
   return {
     phase: 'APDM-P10-A',
     arm: 'off',
+    armOrder: 'off-first',
     memoEnabled: false,
     commitSha: 'abc123',
     workflowRunId: '42',
@@ -37,6 +38,32 @@ describe('APDM Phase 10 environment provenance', () => {
     expect(result.resourceComparable).toBe(true);
     expect(result.failures).toEqual([]);
     expect(result.resourceDifferences).toEqual([]);
+  });
+
+  test('accepts on-first provenance only on an even run attempt', () => {
+    const result = validateEnvironment(
+      manifest({ armOrder: 'on-first', runAttempt: '2' }),
+      manifest({ arm: 'on', armOrder: 'on-first', memoEnabled: true, runAttempt: '2' })
+    );
+    expect(result.passed).toBe(true);
+  });
+
+  test('rejects arm order that does not match run-attempt parity', () => {
+    const result = validateEnvironment(
+      manifest({ armOrder: 'on-first' }),
+      manifest({ arm: 'on', armOrder: 'on-first', memoEnabled: true })
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures.join('\n')).toContain('does not match run attempt');
+  });
+
+  test('rejects mismatched arm-order provenance between arms', () => {
+    const result = validateEnvironment(
+      manifest(),
+      manifest({ arm: 'on', armOrder: 'on-first', memoEnabled: true })
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures.join('\n')).toContain('armOrder');
   });
 
   test('rejects mislabeled control and enabled arms', () => {
