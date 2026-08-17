@@ -8,6 +8,7 @@ const workflowPath = path.resolve(
   '../../../.github/workflows/apdm-phase10-dataset-existence-measurement.yml'
 );
 const composePath = path.resolve(__dirname, '../../docker-compose-phase8.yml');
+const baseComposePath = path.resolve(__dirname, '../../docker-compose-test.yml');
 
 describe('APDM Phase 10 real measurement workflow contract', () => {
   test('runs paired OFF and ON arms on one runner at the selected c4 concurrency', () => {
@@ -25,16 +26,27 @@ describe('APDM Phase 10 real measurement workflow contract', () => {
     expect(source).not.toContain('agent/apdm-phase10-dataset-existence-memo\n');
   });
 
-  test('isolates each arm with fresh volumes and fresh recipient provisioning', () => {
+  test('isolates each arm with fresh bind-mounted state and fresh recipient provisioning', () => {
     const source = fs.readFileSync(workflowPath, 'utf8');
+    const baseCompose = fs.readFileSync(baseComposePath, 'utf8');
 
+    expect(baseCompose).toContain('./data/fuseki_test:/fuseki:z');
+    expect(baseCompose).toContain('./data/redis_test:/data:z');
+
+    const reset = source.indexOf('reset_arm_storage()');
     const runArm = source.indexOf('run_arm()');
     const off = source.indexOf('run_arm off false');
-    expect(runArm).toBeGreaterThan(-1);
+    expect(reset).toBeGreaterThan(-1);
+    expect(runArm).toBeGreaterThan(reset);
     expect(off).toBeGreaterThan(runArm);
 
+    const resetBlock = source.slice(reset, runArm);
+    expect(resetBlock).toContain('down -v || true');
+    expect(resetBlock).toContain('sudo rm -rf data/fuseki_test data/redis_test');
+    expect(resetBlock).toContain('mkdir -p data/fuseki_test data/redis_test');
+
     const armBlock = source.slice(runArm, off);
-    expect(armBlock).toContain('down -v || true');
+    expect(armBlock).toContain('reset_arm_storage');
     expect(armBlock).toContain('up -d fuseki_test redis mailcatcher');
     expect(armBlock).toContain('apdm-phase8-real-measure.js provision');
     expect(armBlock).toContain('1000');
