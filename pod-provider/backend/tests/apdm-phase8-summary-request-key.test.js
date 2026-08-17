@@ -1,9 +1,9 @@
 'use strict';
 
-const { summarize } = require('../scripts/apdm-phase8-summarize');
+const { MIN_MEASURED_SAMPLES, summarize } = require('../scripts/apdm-phase8-summarize');
 
 describe('APDM Phase 8 request-key summary evidence', () => {
-  test('aggregates only successful trace request-key counts', () => {
+  test('aggregates only valid successful trace request-key counts at the canonical sample floor', () => {
     const successful = {
       phase: 'APDM-P8-A',
       recipientCount: 1,
@@ -17,8 +17,8 @@ describe('APDM Phase 8 request-key summary evidence', () => {
       fuseki: {
         requestCount: 3,
         requestKeyCounts: {
-          'GET /$/datasets/alice': 2,
-          'DELETE /$/datasets/alice': 1
+          'GET /$/datasets/:dataset': 2,
+          'DELETE /$/datasets/:dataset': 1
         }
       },
       errors: []
@@ -27,18 +27,22 @@ describe('APDM Phase 8 request-key summary evidence', () => {
       ...successful,
       fuseki: {
         requestCount: 100,
-        requestKeyCounts: { 'GET /$/datasets/broken': 100 }
+        requestKeyCounts: { 'GET /$/datasets/:dataset': 100 }
       },
-      errors: [{ source: 'root-action', message: 'failed' }]
+      errors: [{ source: 'root-action', name: 'Error' }]
     };
 
-    const result = summarize([successful, failed], [1]);
+    const result = summarize([
+      ...Array.from({ length: MIN_MEASURED_SAMPLES }, () => ({ ...successful, fuseki: { ...successful.fuseki, requestKeyCounts: { ...successful.fuseki.requestKeyCounts } } })),
+      failed
+    ], [1]);
 
     expect(result.complete).toBe(true);
+    expect(result.cases[1].successfulSamples).toBe(MIN_MEASURED_SAMPLES);
+    expect(result.cases[1].failedSamples).toBe(1);
     expect(result.cases[1].fusekiRequestKeyCounts).toEqual({
-      'GET /$/datasets/alice': 2,
-      'DELETE /$/datasets/alice': 1
+      'GET /$/datasets/:dataset': 2 * MIN_MEASURED_SAMPLES,
+      'DELETE /$/datasets/:dataset': MIN_MEASURED_SAMPLES
     });
-    expect(result.cases[1].fusekiRequestKeyCounts['GET /$/datasets/broken']).toBeUndefined();
   });
 });
