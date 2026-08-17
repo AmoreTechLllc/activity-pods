@@ -45,6 +45,53 @@ describe('APDM Phase 11 object-query structural fingerprints', () => {
     expect(shape).not.toContain('private-name');
   });
 
+  test('preserves RDF term equality relationships using opaque per-query slots', () => {
+    const sameVariable = {
+      type: 'query',
+      queryType: 'ASK',
+      where: [{
+        type: 'bgp',
+        triples: [{
+          subject: variable('private-a'),
+          predicate: named('https://schema.example/knows'),
+          object: variable('private-a')
+        }]
+      }]
+    };
+    const differentVariables = {
+      type: 'query',
+      queryType: 'ASK',
+      where: [{
+        type: 'bgp',
+        triples: [{
+          subject: variable('private-a'),
+          predicate: named('https://schema.example/knows'),
+          object: variable('private-b')
+        }]
+      }]
+    };
+    const renamedSameVariable = {
+      type: 'query',
+      queryType: 'ASK',
+      where: [{
+        type: 'bgp',
+        triples: [{
+          subject: variable('another-private-name'),
+          predicate: named('https://other.example/relation'),
+          object: variable('another-private-name')
+        }]
+      }]
+    };
+
+    expect(fingerprintQueryShape(sameVariable)).not.toBe(fingerprintQueryShape(differentVariables));
+    expect(fingerprintQueryShape(sameVariable)).toBe(fingerprintQueryShape(renamedSameVariable));
+    const shape = normalizeQueryObjectShape(sameVariable);
+    expect(shape).toContain('value:VAR1');
+    expect(shape).toContain('value:IRI1');
+    expect(shape).not.toContain('private-a');
+    expect(shape).not.toContain('schema.example');
+  });
+
   test('preserves allowlisted filter operators without retaining operands', () => {
     const withOperator = operator => ({
       type: 'query',
