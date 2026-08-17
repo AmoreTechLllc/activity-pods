@@ -173,6 +173,8 @@ function writeJsonLine(outputPath, record) {
 function createPhase11QueryAttribution(options = {}) {
   if (options.enabled !== true) return { middleware: null, dispose() {} };
   const storage = new AsyncLocalStorage();
+  // SemApps adapter-level broker.call() can omit Moleculer parent/caller metadata.
+  // Track only the active action name so attribution can fall back without changing the Context or delivery path.
   const actionStorage = new AsyncLocalStorage();
   const rootAction = options.rootAction || DEFAULT_ROOT_ACTION;
   const queryAction = options.queryAction || DEFAULT_QUERY_ACTION;
