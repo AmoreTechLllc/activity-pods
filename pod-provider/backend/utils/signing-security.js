@@ -3,17 +3,21 @@
 const crypto = require('crypto');
 
 const MAX_AUTHORIZATION_HEADER_BYTES = 8 * 1024;
+const BEARER_TOKEN_RE = /^[A-Za-z0-9\-._~+/]+=*$/;
+const IMF_FIXDATE_RE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
 
 function configuredSigningToken(env = process.env) {
   const token = env.ACTIVITYPODS_TOKEN;
-  return typeof token === 'string' && token.length > 0 ? token : null;
+  if (typeof token !== 'string' || token.length === 0) return null;
+  if (Buffer.byteLength(token, 'utf8') > MAX_AUTHORIZATION_HEADER_BYTES) return null;
+  return BEARER_TOKEN_RE.test(token) ? token : null;
 }
 
 function parseBearerToken(authorization) {
   if (typeof authorization !== 'string' || authorization.length === 0) return null;
   if (Buffer.byteLength(authorization, 'utf8') > MAX_AUTHORIZATION_HEADER_BYTES) return null;
 
-  const match = /^Bearer ([A-Za-z0-9\-._~+/]+=*)$/.exec(authorization);
+  const match = /^Bearer ([A-Za-z0-9\-._~+/]+=*)$/i.exec(authorization);
   return match ? match[1] : null;
 }
 
@@ -28,7 +32,7 @@ function timingSafeSecretEqual(actual, expected) {
 }
 
 function isDateWithinSkew(dateString, maxClockSkewSeconds, nowMs = Date.now()) {
-  if (typeof dateString !== 'string' || dateString.trim().length === 0) return false;
+  if (typeof dateString !== 'string' || !IMF_FIXDATE_RE.test(dateString)) return false;
 
   const maxSkewSeconds = Number(maxClockSkewSeconds);
   if (!Number.isFinite(maxSkewSeconds) || maxSkewSeconds < 0) return false;
@@ -36,6 +40,10 @@ function isDateWithinSkew(dateString, maxClockSkewSeconds, nowMs = Date.now()) {
 
   const parsedMs = Date.parse(dateString);
   if (!Number.isFinite(parsedMs)) return false;
+
+  // Round-trip validation rejects impossible dates and weekday/date mismatches
+  // that permissive Date.parse implementations may otherwise normalize.
+  if (new Date(parsedMs).toUTCString() !== dateString) return false;
 
   return Math.abs(nowMs - parsedMs) <= maxSkewSeconds * 1000;
 }
