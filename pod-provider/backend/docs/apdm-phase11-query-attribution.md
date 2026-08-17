@@ -10,7 +10,7 @@ The Phase 10 production-default decision is closed as NO-GO: the dataset-existen
 
 ## Measured reason for Phase 11
 
-On the post-Phase-10 ON arm at N=1000, the residual nested work is dominated by approximately `15,999` `triplestore.query` invocations, with roughly `7.1 s` cumulative median action duration. `triplestore.dataset.exist` is no longer the dominant mechanism.
+On the post-Phase-10 ON arm at N=1000, the residual nested work is dominated by `triplestore.query`; the Phase 10 summary reported approximately `15,999` invocations across its measured samples and roughly `7.1 s` cumulative median action duration. `triplestore.dataset.exist` is no longer the dominant mechanism.
 
 That aggregate count is not sufficient to justify batching or caching. The first Phase 11 slice is therefore **query attribution before optimization**.
 
@@ -25,7 +25,26 @@ That manual review found evidence defects in the first implementation/harness an
 - the first summarizer reconciled Phase 11 counts only internally and did not prove that every independently observed Phase 8 `triplestore.query` was captured;
 - the first overhead gate used means and rejected only positive slowdown, so an implausible profiler-side speedup could pass as if it were harmless.
 
-The replacement gate fixes those defects and must be rerun at one exact final SHA before any optimization target is chosen.
+### Strict completeness attempt `32020071844`
+
+The first run after those review fixes, GitHub Actions `32020071844` at head `59211322d756f48fcb62cd63fcd567246dc228c8`, **failed the completeness gate and is superseded**. The failure was substantive and the gate was not weakened.
+
+At N=1000, each measured sample contained approximately 6,060 `triplestore.query` calls. Two repeatable attribution gaps remained:
+
+- roughly 2,029 calls per sample were owned by `triplestore.tripleExist` but had operation `unknown` because SemApps passes a SPARQL.js-style object AST rather than a string query;
+- 1,001 `CONSTRUCT` calls per sample had caller `unknown`, showing that parent context IDs were being discarded too early for detached/settled-parent lineage.
+
+The exact SemApps 1.1.4 release commit is `b8e1061c9d94cbaa42ef5c5bca87f38f0da9fb1` (`middleware-v1.1.4`). Its `triplestore/actions/tripleExist.js` confirms that `triplestore.tripleExist` calls `triplestore.query` with an object AST containing `type: 'query'` and `queryType: 'ASK'`. Its `triplestore/actions/query.js` explicitly accepts string or object input and only converts object ASTs to SPARQL inside the query handler. Therefore the unknown operation was an attribution-harness defect, not an ambiguous application query.
+
+The replacement instrumentation now:
+
+- accepts the SemApps object-query contract and derives the operation from the allowlisted `queryType`;
+- fingerprints object ASTs only after recursively replacing RDF/string/scalar values and unapproved field names while retaining approved structural keys, query enums and RDF term types;
+- retains Moleculer context-ID to action-name lineage for the bounded lifetime of one measured root rather than deleting parent IDs when their promises settle;
+- caps retained lineage at exactly 65,536 contexts per measured root and marks any overflow/dropped context as evidence-invalid;
+- continues to cap attribution keys at 4,096 and fail on overflow/dropped query calls.
+
+The failed attempt also showed that `ldp.resource.getContainers` was already the largest known N=1000 cumulative query-duration bucket by a wide margin, but no optimization is authorized from that provisional ranking until the callerless `CONSTRUCT` work is correctly attributed and opposite-order evidence closes.
 
 ## First-slice objective
 
@@ -47,8 +66,11 @@ Instrumentation must be observational and bounded.
 
 - Correlate only queries that belong to the measured local-delivery root/async lineage.
 - Attribute the immediate logical caller through Moleculer context IDs/parent IDs; fail the evidence if a measured query remains unattributed.
+- Retain context lineage only for one measured root; never use a cross-request/global caller map.
+- Cap retained context lineage and make overflow evidence-invalid rather than silently evicting parents.
 - Record a stable call-site/category and a normalized query-shape fingerprint.
-- Do not emit full SPARQL bodies, RDF payloads, arbitrary URIs, user content, credentials, access tokens, or WebACL-controlled resource data into CI artifacts.
+- Accept SemApps string and object-query contracts, but retain only allowlisted AST structure/enums/term types from object queries.
+- Do not emit full SPARQL bodies, RDF payloads, arbitrary URIs, user content, credentials, access tokens, WebIDs, datasets, graph names, RDF term values or WebACL-controlled resource data into CI artifacts.
 - Normalize volatile values before fingerprinting so equivalent query templates aggregate together.
 - Preserve operators and other material query structure while removing IRIs, literals, blank-node labels and scalar values before hashing.
 - Record invocation count and duration per category/fingerprint.
@@ -64,13 +86,15 @@ The attribution run uses the same canonical local-fanout workload and concurrenc
 - at least 3 measured samples per N plus warmup roots;
 - `APDM_LOCAL_DELIVERY_CONCURRENCY=4`;
 - Phase 10 memo explicitly ON to establish the post-Phase-10 baseline;
+- `APDM_P11_MAX_KEYS=4096`;
+- `APDM_P11_MAX_CONTEXTS=65536`;
 - fresh benchmark state with explicit bind-mounted Fuseki/Redis deletion and recreation for every arm;
 - one backend image built once and reused byte-for-byte inside each paired attempt;
-- exact source/runtime/image provenance captured;
+- exact source/runtime/image/profiler-bound provenance captured;
 - zero failed measured samples;
 - delivery success/failure ordering unchanged.
 
-For every measured request, the Phase 11 record must reconcile exactly with the independently observed Phase 8 `actionCounts['triplestore.query']`. `unattributedQueryCalls` must be zero. Warmups are excluded by joining Phase 11 records only to the exact measured Phase 8 request IDs.
+For every measured request, the Phase 11 record must reconcile exactly with the independently observed Phase 8 `actionCounts['triplestore.query']`. `unattributedQueryCalls` must be zero. Fingerprint overflow, lineage overflow, dropped calls and dropped lineage contexts must all be zero. Warmups are excluded by joining Phase 11 records only to the exact measured Phase 8 request IDs.
 
 For each canonical N, emit:
 
@@ -78,6 +102,7 @@ For each canonical N, emit:
 - count by immediate logical caller;
 - count by normalized query-shape fingerprint;
 - cumulative and per-sample median duration by caller/fingerprint;
+- retained lineage-context cardinality;
 - total nested action count and total Fuseki HTTP traffic for context;
 - delivery failures and correctness invariants.
 
@@ -108,7 +133,9 @@ The emitted Phase 11 artifact has an exact allowlisted schema. Query entries con
 - count/error count;
 - cumulative and maximum measured duration.
 
-The artifact does not have fields for dataset, WebID, query text, arbitrary URI or literal values. The raw serialized artifact is additionally rejected if URL/IRI material appears. Request IDs are benchmark-generated opaque IDs and case labels must match the canonical `real-local-N` form.
+Root records additionally expose only numeric lineage-cardinality/overflow metadata. Context IDs themselves are never serialized.
+
+The artifact does not have fields for dataset, WebID, query text, AST contents, arbitrary URI or literal values. The raw serialized artifact is additionally rejected if URL/IRI material appears. Request IDs are benchmark-generated opaque IDs and case labels must match the canonical `real-local-N` form.
 
 ## Authority and correctness gates
 
