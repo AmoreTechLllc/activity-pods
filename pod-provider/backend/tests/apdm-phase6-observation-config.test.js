@@ -50,16 +50,16 @@ describe('APDM Phase 6 native observation configuration', () => {
     expect(() => resolvePhase6ObservationConfig(nativeConfig({ observationWebhookTimeoutMs }))).toThrow(/timeout/u);
   });
 
-  test('external mode does not acquire a dependency on the native-only observation endpoint', () => {
+  test('external mode does not acquire any dependency on native-only observation settings', () => {
     expect(resolvePhase6ObservationConfig({
       remoteDeliveryMode: 'external',
-      sidecarObservationWebhookUrl: '',
+      sidecarObservationWebhookUrl: 'not a URL',
       sidecarToken: '',
-      observationWebhookRetries: '3',
-      observationWebhookTimeoutMs: '5000'
+      observationWebhookRetries: 'not-an-integer',
+      observationWebhookTimeoutMs: '-1'
     })).toEqual({
       remoteDeliveryMode: 'external',
-      sidecarObservationWebhookUrl: '',
+      sidecarObservationWebhookUrl: 'not a URL',
       sidecarToken: '',
       observationWebhookRetries: 3,
       observationWebhookTimeoutMs: 5000
