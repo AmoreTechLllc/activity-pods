@@ -28,6 +28,9 @@ on:
       - 'pod-provider/backend/scripts/apdm-phase8-warm-restart-ready.js'
       - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-delivery.js'
       - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-delivery-phase9.js'
+      - 'pod-provider/backend/tests/apdm-phase11-query-attribution.test.js'
+      - 'pod-provider/backend/tests/apdm-phase11-summarize.test.js'
+      - 'pod-provider/backend/tests/apdm-phase11-overhead-compare.test.js'
       - 'pod-provider/docker-compose-phase8.yml'
       - 'pod-provider/docker/backend.dockerfile'
 
