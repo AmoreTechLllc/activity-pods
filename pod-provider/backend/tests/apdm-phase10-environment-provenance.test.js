@@ -57,6 +57,24 @@ describe('APDM Phase 10 environment provenance', () => {
     expect(result.failures.join('\n')).toContain('does not match run attempt');
   });
 
+  test('rejects malformed run-attempt provenance instead of skipping parity validation', () => {
+    const result = validateEnvironment(
+      manifest({ runAttempt: 'not-an-attempt' }),
+      manifest({ arm: 'on', memoEnabled: true, runAttempt: 'not-an-attempt' })
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures.join('\n')).toContain('runAttempt');
+  });
+
+  test('rejects zero run-attempt provenance', () => {
+    const result = validateEnvironment(
+      manifest({ runAttempt: '0' }),
+      manifest({ arm: 'on', memoEnabled: true, runAttempt: '0' })
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures.join('\n')).toContain('positive integer string');
+  });
+
   test('rejects mismatched arm-order provenance between arms', () => {
     const result = validateEnvironment(
       manifest(),
@@ -75,13 +93,20 @@ describe('APDM Phase 10 environment provenance', () => {
     expect(result.failures.join('\n')).toContain('Control manifest must prove arm=off');
   });
 
-  test('rejects evidence that is not concurrency four', () => {
-    const result = validateEnvironment(
+  test('rejects evidence that is not exact numeric concurrency four', () => {
+    const numericMismatch = validateEnvironment(
       manifest({ concurrency: 2 }),
       manifest({ arm: 'on', memoEnabled: true, concurrency: 2 })
     );
-    expect(result.passed).toBe(false);
-    expect(result.failures.join('\n')).toContain('concurrency 4');
+    expect(numericMismatch.passed).toBe(false);
+    expect(numericMismatch.failures.join('\n')).toContain('concurrency 4');
+
+    const stringFour = validateEnvironment(
+      manifest({ concurrency: '4' }),
+      manifest({ arm: 'on', memoEnabled: true, concurrency: '4' })
+    );
+    expect(stringFour.passed).toBe(false);
+    expect(stringFour.failures.join('\n')).toContain('concurrency 4');
   });
 
   test('rejects cross-commit or cross-image mechanism evidence', () => {
