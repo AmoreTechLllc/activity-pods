@@ -1,0 +1,256 @@
+name: ADSP P0 Tier-1 baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: Measured samples per canonical recipient count
+        required: false
+        default: '5'
+      warmups:
+        description: Warmup roots per canonical recipient count
+        required: false
+        default: '1'
+  push:
+    branches:
+      - agent/adsp-p0-runtime-baseline
+    paths:
+      - '.github/workflows/adsp-p0-tier1-baseline.yml'
+      - 'pod-provider/backend/lib/apdm-phase8-tier1-instrumentation.js'
+      - 'pod-provider/backend/scripts/adsp-p0-tier1-summarize.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-real-measure.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-warm-restart-ready.js'
+      - 'pod-provider/backend/tests/adsp-p0-tier1-summarize.test.js'
+      - 'pod-provider/docker-compose-phase8.yml'
+      - 'pod-provider/docker/backend.dockerfile'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adsp-p0-tier1-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tier1-baseline:
+    name: repeatable single-cell local fanout baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        working-directory: pod-provider
+    env:
+      APDM_P8_SAMPLES: "${{ github.event.inputs.samples || '5' }}"
+      APDM_P8_WARMUPS: "${{ github.event.inputs.warmups || '1' }}"
+      ADSP_P0_MIN_SAMPLES: "${{ github.event.inputs.samples || '5' }}"
+      APDM_P8_PROVISION_CONCURRENCY: '4'
+      APDM_P8_PROVISION_BATCH_SIZE: '24'
+      APDM_P8_BOOTSTRAP_CONCURRENCY: '8'
+      APDM_P9_CONCURRENCY: '4'
+      # Phase 10 closed without default promotion. ADSP-P0 measures the actual
+      # current default, so the dataset-existence memo must remain disabled.
+      APDM_P10_DATASET_EXIST_MEMO_ENABLED: 'false'
+      APDM_P10_ARM: ''
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Prepare isolated evidence directory
+        run: |
+          set -euo pipefail
+          rm -rf measurements/adsp-p0
+          mkdir -p measurements/adsp-p0/runtime
+
+      - name: Build benchmark backend image once
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml build backend; then
+              exit 0
+            fi
+            if [[ "${attempt}" -eq 3 ]]; then
+              echo 'Backend image build failed after 3 attempts' >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+
+      - name: Start fresh supporting services
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test
+          mkdir -p data/fuseki_test data/redis_test
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d fuseki_test redis mailcatcher
+          FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=60 ./scripts/fuseki-bootstrap.sh
+
+      - name: Record immutable environment provenance
+        run: |
+          set -euo pipefail
+          export BACKEND_IMAGE_ID="$(docker image inspect apdm-phase8-backend:local --format '{{.Id}}')"
+          export FUSEKI_IMAGE_ID="$(docker inspect "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q fuseki_test)" --format '{{.Image}}')"
+          export REDIS_IMAGE_ID="$(docker inspect "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q redis)" --format '{{.Image}}')"
+          node - <<'NODE' > measurements/adsp-p0/environment.json
+          const os = require('os');
+          const cpus = os.cpus();
+          const manifest = {
+            version: 1,
+            phase: 'ADSP-P0-A',
+            fixture: 'tier1-local-fanout',
+            commitSha: process.env.GITHUB_SHA,
+            workflowRunId: process.env.GITHUB_RUN_ID,
+            runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            runnerOs: process.env.RUNNER_OS,
+            runnerArch: process.env.RUNNER_ARCH,
+            imageOs: process.env.ImageOS || 'unknown',
+            imageVersion: process.env.ImageVersion || 'unknown',
+            hostNode: process.version,
+            hostCpuModel: cpus[0]?.model || 'unknown',
+            hostCpuCount: cpus.length,
+            hostTotalMemoryBytes: os.totalmem(),
+            backendImageId: process.env.BACKEND_IMAGE_ID,
+            fusekiImageId: process.env.FUSEKI_IMAGE_ID,
+            redisImageId: process.env.REDIS_IMAGE_ID,
+            samplesPerCase: Number(process.env.APDM_P8_SAMPLES),
+            warmupsPerCase: Number(process.env.APDM_P8_WARMUPS),
+            localDeliveryConcurrency: Number(process.env.APDM_P9_CONCURRENCY),
+            datasetExistMemoEnabled: false,
+            activityPubRemoteDeliveryMode: 'native',
+            federationSidecarIncluded: false,
+            recipientCounts: [1, 10, 100, 200, 1000]
+          };
+          process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+          cat measurements/adsp-p0/environment.json
+
+      - name: Provision canonical 1000-recipient fixture
+        run: |
+          set -euo pipefail
+          export APDM_P8_RUN_ID="adsp-p0-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          export APDM_P8_ENABLED=false
+          export APDM_P8_COUNT=0
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d --no-deps backend
+
+          ready=false
+          for attempt in $(seq 1 120); do
+            if curl -sS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then ready=true; break; fi
+            sleep 1
+          done
+          if [[ "${ready}" != true ]]; then
+            echo 'Backend did not become reachable for ADSP-P0 provisioning' >&2
+            exit 1
+          fi
+
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+            node scripts/apdm-phase8-real-measure.js provision \
+              /app/backend/measurements/adsp-p0/actors.json 1000
+
+      - name: Snapshot Redis baseline before measured matrix
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T redis \
+            redis-cli INFO commandstats > measurements/adsp-p0/runtime/redis-commandstats-before.txt
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T redis \
+            redis-cli INFO memory > measurements/adsp-p0/runtime/redis-memory-before.txt
+
+      - name: Measure canonical Tier-1 matrix
+        run: |
+          set -euo pipefail
+          for count in 1 10 100 200 1000; do
+            export APDM_P8_ENABLED=true
+            export APDM_P8_COUNT="${count}"
+            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml \
+              up -d --force-recreate --no-deps backend
+
+            ready=false
+            for attempt in $(seq 1 120); do
+              if curl -sS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then ready=true; break; fi
+              sleep 1
+            done
+            if [[ "${ready}" != true ]]; then
+              echo "Backend did not become reachable for ADSP-P0 N=${count}" >&2
+              exit 1
+            fi
+
+            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+              node scripts/apdm-phase8-warm-restart-ready.js
+            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+              node scripts/apdm-phase8-real-measure.js measure \
+                /app/backend/measurements/adsp-p0/actors.json "${count}" \
+                2>&1 | tee "measurements/adsp-p0/runtime/measure-${count}.log"
+
+            docker stats --no-stream \
+              "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q backend)" \
+              "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q fuseki_test)" \
+              "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q redis)" \
+              --format '{{json .}}' > "measurements/adsp-p0/runtime/docker-stats-${count}.jsonl"
+          done
+
+          cat measurements/apdm-p8-1.jsonl \
+              measurements/apdm-p8-10.jsonl \
+              measurements/apdm-p8-100.jsonl \
+              measurements/apdm-p8-200.jsonl \
+              measurements/apdm-p8-1000.jsonl \
+              > measurements/adsp-p0/tier1-all.jsonl
+
+      - name: Snapshot Redis state after measured matrix
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T redis \
+            redis-cli INFO commandstats > measurements/adsp-p0/runtime/redis-commandstats-after.txt
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T redis \
+            redis-cli INFO memory > measurements/adsp-p0/runtime/redis-memory-after.txt
+
+      - name: Summarize variance and enforce evidence completeness
+        run: |
+          set -euo pipefail
+          node backend/scripts/adsp-p0-tier1-summarize.js \
+            measurements/adsp-p0/tier1-all.jsonl \
+            measurements/adsp-p0/tier1-summary.json \
+            measurements/adsp-p0/environment.json \
+            > measurements/adsp-p0/tier1-summary.stdout.json
+          node - <<'NODE'
+          const fs = require('fs');
+          const summary = JSON.parse(fs.readFileSync('measurements/adsp-p0/tier1-summary.json', 'utf8'));
+          if (!summary.complete) throw new Error(`ADSP-P0 Tier-1 evidence incomplete: ${JSON.stringify(summary.incompleteCases)}`);
+          const rows = Object.values(summary.cases).map(c =>
+            `| ${c.recipientCount} | ${c.successfulSamples} | ${c.variance.elapsedMs.p50.toFixed(2)} | ${(100 * (c.variance.elapsedMs.coefficientOfVariation || 0)).toFixed(2)}% | ${c.variance.cpuMs.p50.toFixed(2)} | ${(100 * (c.variance.cpuMs.coefficientOfVariation || 0)).toFixed(2)}% | ${c.variance.fusekiRequestCount.p50} |`
+          );
+          const markdown = [
+            '## ADSP-P0 Tier-1 baseline',
+            '',
+            '| recipients | successful samples | elapsed p50 ms | elapsed CV | CPU p50 ms | CPU CV | Fuseki requests p50 |',
+            '|---:|---:|---:|---:|---:|---:|---:|',
+            ...rows,
+            '',
+            '> Scope: ActivityPods Tier-1 local fanout only. Federation sidecar cost is intentionally excluded and requires the separate mixed/remote fixture.'
+          ].join('\n');
+          fs.writeFileSync('measurements/adsp-p0/tier1-summary.md', `${markdown}\n`);
+          NODE
+          cat measurements/adsp-p0/tier1-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload ADSP-P0 Tier-1 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adsp-p0-tier1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            pod-provider/measurements/adsp-p0/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml logs --no-color --tail=400 backend fuseki_test redis || true
+
+      - name: Stop isolated stack
+        if: always()
+        run: |
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test
