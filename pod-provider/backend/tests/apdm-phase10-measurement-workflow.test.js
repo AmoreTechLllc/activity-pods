@@ -10,18 +10,35 @@ const workflowPath = path.resolve(
 const composePath = path.resolve(__dirname, '../../docker-compose-phase8.yml');
 
 describe('APDM Phase 10 real measurement workflow contract', () => {
-  test('runs only the isolated OFF and ON arms at the selected c4 concurrency', () => {
+  test('runs paired OFF and ON arms on one runner at the selected c4 concurrency', () => {
     const source = fs.readFileSync(workflowPath, 'utf8');
 
-    expect(source).toContain('- arm: off');
-    expect(source).toContain("memo_enabled: 'false'");
-    expect(source).toContain('- arm: on');
-    expect(source).toContain("memo_enabled: 'true'");
+    expect(source).toContain('measure-paired:');
+    expect(source).toContain('run_arm off false');
+    expect(source).toContain('run_arm on true');
     expect(source).toContain("APDM_P9_CONCURRENCY: '4'");
-    expect(source).toContain("APDM_P10_DATASET_EXIST_MEMO_ENABLED: '${{ matrix.memo_enabled }}'");
-    expect(source).toContain("APDM_P10_DATASET_EXIST_MEMO_ENABLED: 'false'");
+    expect(source).toContain('Build benchmark backend image once');
+    expect(source).toContain('backend image itself is built');
     expect(source).toContain('agent/apdm-phase10-measurement');
+    expect(source).not.toContain('matrix.arm');
+    expect(source).not.toContain('matrix.memo_enabled');
     expect(source).not.toContain('agent/apdm-phase10-dataset-existence-memo\n');
+  });
+
+  test('isolates each arm with fresh volumes and fresh recipient provisioning', () => {
+    const source = fs.readFileSync(workflowPath, 'utf8');
+
+    const runArm = source.indexOf('run_arm()');
+    const off = source.indexOf('run_arm off false');
+    expect(runArm).toBeGreaterThan(-1);
+    expect(off).toBeGreaterThan(runArm);
+
+    const armBlock = source.slice(runArm, off);
+    expect(armBlock).toContain('down -v || true');
+    expect(armBlock).toContain('up -d fuseki_test redis mailcatcher');
+    expect(armBlock).toContain('apdm-phase8-real-measure.js provision');
+    expect(armBlock).toContain('1000');
+    expect(armBlock).toContain('APDM_P10_DATASET_EXIST_MEMO_ENABLED=false');
   });
 
   test('measures the complete canonical matrix with the reviewed sample defaults', () => {
@@ -33,13 +50,15 @@ describe('APDM Phase 10 real measurement workflow contract', () => {
     expect(source).toContain('node scripts/apdm-phase8-real-measure.js measure');
   });
 
-  test('records matched host and image provenance before comparison', () => {
+  test('records matched host and exact image provenance for both arms', () => {
     const source = fs.readFileSync(workflowPath, 'utf8');
     expect(source).toContain('hostCpuModel:');
     expect(source).toContain('hostCpuCount:');
     expect(source).toContain('hostTotalMemoryBytes:');
     expect(source).toContain('backendImageId:');
     expect(source).toContain('fusekiImageId:');
+    expect(source).toContain("docker image inspect apdm-phase8-backend:local");
+    expect(source).toContain('record_provenance "${arm}" "${memo}"');
   });
 
   test('requires provenance validation before the mechanism comparator', () => {
