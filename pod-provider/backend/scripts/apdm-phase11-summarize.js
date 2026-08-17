@@ -13,7 +13,8 @@ const ALLOWED_OPERATIONS = new Set([
 const RECORD_KEYS = Object.freeze([
   'version', 'phase', 'requestId', 'caseLabel', 'recipientCount', 'startedAt', 'finishedAt',
   'totalQueryCalls', 'attributedQueryCalls', 'unattributedQueryCalls', 'distinctAttributionKeys',
-  'overflowed', 'droppedCalls', 'queries'
+  'overflowed', 'droppedCalls', 'lineageContextCount', 'lineageOverflowed',
+  'droppedLineageContexts', 'queries'
 ]);
 const QUERY_KEYS = Object.freeze([
   'caller', 'operation', 'shapeHash', 'count', 'errorCount', 'totalDurationMs', 'maxDurationMs'
@@ -40,10 +41,6 @@ function assertExactKeys(value, allowed, label) {
 }
 
 function assertPrivacySafeRawArtifact(raw, filePath) {
-  // The parsed schema below is the primary privacy boundary: no field exists for
-  // raw query text, dataset, webId, IRI or literal. These raw checks catch the
-  // two unambiguous serialization signatures that must never occur in a safe
-  // attribution artifact without rejecting safe values such as operation=select.
   if (/https?:\/\//iu.test(raw) || /<[^>]+>/u.test(raw)) {
     throw new Error(`Privacy scan rejected ${filePath}: raw URL/IRI material found`);
   }
@@ -78,6 +75,12 @@ function validateRecord(record, recipientCount, label) {
     if (typeof record[key] !== 'string' || Number.isNaN(Date.parse(record[key]))) throw new Error(`${label}.${key} is invalid`);
   }
   if (record.overflowed !== false || record.droppedCalls !== 0) throw new Error(`${label} attribution overflowed`);
+  if (record.lineageOverflowed !== false || record.droppedLineageContexts !== 0) {
+    throw new Error(`${label} context-lineage attribution overflowed`);
+  }
+  if (!Number.isInteger(record.lineageContextCount) || record.lineageContextCount < 1) {
+    throw new Error(`${label}.lineageContextCount is invalid`);
+  }
   for (const key of ['totalQueryCalls', 'attributedQueryCalls', 'unattributedQueryCalls', 'distinctAttributionKeys']) {
     if (!Number.isInteger(record[key]) || record[key] < 0) throw new Error(`${label}.${key} is invalid`);
   }
@@ -168,6 +171,7 @@ function summarizeCount(recipientCount, records) {
     attributedQueryCallsMedian: median(records.map(record => record.attributedQueryCalls)),
     unattributedQueryCallsMedian: median(records.map(record => record.unattributedQueryCalls)),
     distinctAttributionKeysMedian: median(records.map(record => record.distinctAttributionKeys)),
+    lineageContextCountMedian: median(records.map(record => record.lineageContextCount)),
     queryErrorCount: queries.reduce((sum, query) => sum + query.errorCount, 0),
     queries
   };
@@ -191,7 +195,8 @@ function buildSummary(pairs) {
       minimumMeasuredSamples: MIN_MEASURED_SAMPLES,
       independentActionCount: QUERY_ACTION,
       requiresZeroUnattributedCalls: true,
-      requiresKnownOperation: true
+      requiresKnownOperation: true,
+      requiresBoundedLineageWithoutOverflow: true
     },
     counts,
     n1000TopByDuration: n1000?.queries.slice(0, 25) || []
