@@ -33,23 +33,23 @@ function createPlan() {
   };
 }
 
-function createSettings() {
+function createSettings(overrides = {}) {
   return {
+    remoteDeliveryMode: 'external',
     queueServiceUrl: 'redis://queue.example:6379',
     deliveryHandoffUrl: 'http://fedify-sidecar:8080/webhook/outbox',
     deliveryHandoffToken: 'secret',
-    deliveryHandoffTimeoutMs: 1000
+    deliveryHandoffTimeoutMs: 1000,
+    ...overrides
   };
 }
 
 describe('APDM durable ActivityPub handoff', () => {
   test('external durability fails closed on unsafe or incomplete worker configuration', () => {
-    expect(() => assertDurableHandoffConfigured({ deliveryHandoffUrl: 'http://sidecar', deliveryHandoffToken: 'x', deliveryHandoffTimeoutMs: 1000 })).toThrow(
+    expect(() => assertDurableHandoffConfigured(createSettings({ queueServiceUrl: '' }))).toThrow(
       /SEMAPPS_QUEUE_SERVICE_URL/u
     );
-    expect(() => assertDurableHandoffConfigured({ queueServiceUrl: 'redis://queue', deliveryHandoffToken: 'x', deliveryHandoffTimeoutMs: 1000 })).toThrow(
-      /handoff URL/u
-    );
+    expect(() => assertDurableHandoffConfigured(createSettings({ deliveryHandoffUrl: '' }))).toThrow(/handoff URL/u);
     for (const deliveryHandoffUrl of [
       'ftp://sidecar/outbox',
       ' http://sidecar/outbox',
@@ -57,29 +57,44 @@ describe('APDM durable ActivityPub handoff', () => {
       'http://user:pass@sidecar/outbox',
       'http://sidecar/outbox#fragment'
     ]) {
-      expect(() => assertDurableHandoffConfigured({
-        queueServiceUrl: 'redis://queue',
-        deliveryHandoffUrl,
-        deliveryHandoffToken: 'x',
-        deliveryHandoffTimeoutMs: 1000
-      })).toThrow(/credential-free HTTP\(S\)/u);
+      expect(() => assertDurableHandoffConfigured(createSettings({ deliveryHandoffUrl }))).toThrow(
+        /credential-free HTTP\(S\)/u
+      );
     }
     for (const deliveryHandoffToken of ['', ' ', ' secret', 'secret ']) {
-      expect(() => assertDurableHandoffConfigured({
-        queueServiceUrl: 'redis://queue',
-        deliveryHandoffUrl: 'http://sidecar/outbox',
-        deliveryHandoffToken,
-        deliveryHandoffTimeoutMs: 1000
-      })).toThrow(/SIDECAR_TOKEN/u);
+      expect(() => assertDurableHandoffConfigured(createSettings({ deliveryHandoffToken }))).toThrow(/SIDECAR_TOKEN/u);
     }
     for (const deliveryHandoffTimeoutMs of [undefined, 0, 99, 60001, 1000.5, '1000']) {
-      expect(() => assertDurableHandoffConfigured({
-        queueServiceUrl: 'redis://queue',
-        deliveryHandoffUrl: 'http://sidecar/outbox',
-        deliveryHandoffToken: 'secret',
-        deliveryHandoffTimeoutMs
-      })).toThrow(/timeout must be an integer/u);
+      expect(() => assertDurableHandoffConfigured(createSettings({ deliveryHandoffTimeoutMs }))).toThrow(
+        /timeout must be an integer/u
+      );
     }
+  });
+
+  test.each(['native', '', undefined, 'externl'])('refuses durable sidecar authority in mode %p', remoteDeliveryMode => {
+    expect(() => assertDurableHandoffConfigured(createSettings({ remoteDeliveryMode }))).toThrow(
+      /requires external remote delivery authority/u
+    );
+  });
+
+  test('native rollback cannot enqueue a new sidecar handoff through the internal action seam', async () => {
+    const createJob = jest.fn();
+    await expect(
+      enqueueDeliveryHandoff({ settings: createSettings({ remoteDeliveryMode: 'native' }), createJob }, createPlan())
+    ).rejects.toThrow(/requires external remote delivery authority/u);
+    expect(createJob).not.toHaveBeenCalled();
+  });
+
+  test('native rollback refuses to execute stale external Bull jobs before any network request', async () => {
+    const fetchImpl = jest.fn();
+    await expect(
+      processDeliveryHandoffJob(
+        { settings: createSettings({ remoteDeliveryMode: 'native' }) },
+        { data: { deliveryPlan: createPlan() }, progress: jest.fn() },
+        fetchImpl
+      )
+    ).rejects.toThrow(/requires external remote delivery authority/u);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   test('maps authoritative Delivery Plan targets onto the Phase 6 sidecar webhook contract', () => {
