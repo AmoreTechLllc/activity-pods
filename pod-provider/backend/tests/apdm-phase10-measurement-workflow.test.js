@@ -26,6 +26,26 @@ describe('APDM Phase 10 real measurement workflow contract', () => {
     expect(source).not.toContain('agent/apdm-phase10-dataset-existence-memo\n');
   });
 
+  test('alternates arm order by exact run-attempt parity and records that provenance', () => {
+    const source = fs.readFileSync(workflowPath, 'utf8');
+    expect(source).toContain('GITHUB_RUN_ATTEMPT % 2 == 1');
+    expect(source).toContain("APDM_P10_ARM_ORDER='off-first'");
+    expect(source).toContain("APDM_P10_ARM_ORDER='on-first'");
+    expect(source).toContain('armOrder: process.env.APDM_P10_ARM_ORDER');
+
+    const odd = source.indexOf("APDM_P10_ARM_ORDER='off-first'");
+    const oddOff = source.indexOf('run_arm off false', odd);
+    const oddOn = source.indexOf('run_arm on true', odd);
+    expect(oddOff).toBeGreaterThan(odd);
+    expect(oddOn).toBeGreaterThan(oddOff);
+
+    const even = source.indexOf("APDM_P10_ARM_ORDER='on-first'");
+    const evenOn = source.indexOf('run_arm on true', even);
+    const evenOff = source.indexOf('run_arm off false', even);
+    expect(evenOn).toBeGreaterThan(even);
+    expect(evenOff).toBeGreaterThan(evenOn);
+  });
+
   test('isolates each arm with fresh bind-mounted state and fresh recipient provisioning', () => {
     const source = fs.readFileSync(workflowPath, 'utf8');
     const baseCompose = fs.readFileSync(baseComposePath, 'utf8');
@@ -87,6 +107,7 @@ describe('APDM Phase 10 real measurement workflow contract', () => {
 
     const comparisonBlock = source.slice(compareStep);
     expect(comparisonBlock).toContain('apdm-phase10-compare.js');
+    expect(comparisonBlock).toContain('both arm orders');
     expect(source).toContain('if-no-files-found: error');
   });
 
