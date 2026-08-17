@@ -4,6 +4,12 @@ const fs = require('fs');
 const path = require('path');
 
 const REQUIRED_COUNTS = Object.freeze([1, 10, 100, 200, 1000]);
+const MIN_MEASURED_SAMPLES = 3;
+const QUERY_ACTION = 'triplestore.query';
+const ALLOWED_OPERATIONS = new Set([
+  'unknown', 'select', 'ask', 'construct', 'describe', 'insert', 'delete',
+  'load', 'clear', 'create', 'drop', 'copy', 'move', 'add', 'with'
+]);
 const RECORD_KEYS = Object.freeze([
   'version', 'phase', 'requestId', 'caseLabel', 'recipientCount', 'startedAt', 'finishedAt',
   'totalQueryCalls', 'attributedQueryCalls', 'unattributedQueryCalls', 'distinctAttributionKeys',
@@ -46,7 +52,7 @@ function assertPrivacySafeRawArtifact(raw, filePath) {
 function validateQueryEntry(query, label) {
   assertExactKeys(query, QUERY_KEYS, label);
   if (!/^[A-Za-z0-9_.-]+$/u.test(query.caller || '')) throw new Error(`${label}.caller is unsafe`);
-  if (!/^[a-z]+$/u.test(query.operation || '')) throw new Error(`${label}.operation is invalid`);
+  if (!ALLOWED_OPERATIONS.has(query.operation)) throw new Error(`${label}.operation is invalid`);
   if (!/^[a-f0-9]{64}$/u.test(query.shapeHash || '')) throw new Error(`${label}.shapeHash is invalid`);
   if (!Number.isInteger(query.count) || query.count < 1) throw new Error(`${label}.count must be positive`);
   if (!Number.isInteger(query.errorCount) || query.errorCount < 0 || query.errorCount > query.count) {
@@ -62,8 +68,12 @@ function validateRecord(record, recipientCount, label) {
   assertExactKeys(record, RECORD_KEYS, label);
   if (record.version !== 1 || record.phase !== 'APDM-P11-A') throw new Error(`${label} has unsupported version/phase`);
   if (Number(record.recipientCount) !== recipientCount) throw new Error(`${label} recipient count mismatch`);
+  if (record.caseLabel !== `real-local-${recipientCount}`) throw new Error(`${label} caseLabel is invalid`);
   if (typeof record.requestId !== 'string' || !/^apdm-p8-[a-z0-9-]+$/u.test(record.requestId)) {
     throw new Error(`${label} requestId is malformed`);
+  }
+  for (const key of ['startedAt', 'finishedAt']) {
+    if (typeof record[key] !== 'string' || Number.isNaN(Date.parse(record[key]))) throw new Error(`${label}.${key} is invalid`);
   }
   if (record.overflowed !== false || record.droppedCalls !== 0) throw new Error(`${label} attribution overflowed`);
   for (const key of ['totalQueryCalls', 'attributedQueryCalls', 'unattributedQueryCalls', 'distinctAttributionKeys']) {
@@ -80,19 +90,40 @@ function validateRecord(record, recipientCount, label) {
   }
 }
 
+function expectedPhase8QueryCount(p8, label) {
+  const value = p8?.actionCounts?.[QUERY_ACTION];
+  if (!Number.isInteger(value) || value < 0) throw new Error(`${label} has no valid independent ${QUERY_ACTION} count`);
+  return value;
+}
+
 function selectMeasuredRecords(p8Records, p11Records, recipientCount) {
+  if (p8Records.length < MIN_MEASURED_SAMPLES) {
+    throw new Error(`N=${recipientCount} requires at least ${MIN_MEASURED_SAMPLES} measured samples`);
+  }
   const byRequest = new Map();
   for (const record of p11Records) {
     if (byRequest.has(record.requestId)) throw new Error(`Duplicate Phase 11 requestId ${record.requestId}`);
     byRequest.set(record.requestId, record);
   }
   return p8Records.map((p8, index) => {
+    const label = `N=${recipientCount} measured sample ${index + 1}`;
     if (p8?.phase !== 'APDM-P8-A' || Number(p8.recipientCount) !== recipientCount || typeof p8.requestId !== 'string') {
-      throw new Error(`Invalid Phase 8 measured sample ${index + 1} at N=${recipientCount}`);
+      throw new Error(`Invalid Phase 8 ${label}`);
     }
+    if (Array.isArray(p8.errors) && p8.errors.length > 0) throw new Error(`${label} contains Phase 8 delivery/instrumentation errors`);
     const record = byRequest.get(p8.requestId);
     if (!record) throw new Error(`Missing Phase 11 record for measured requestId=${p8.requestId}`);
     validateRecord(record, recipientCount, `N=${recipientCount} requestId=${p8.requestId}`);
+
+    const independentCount = expectedPhase8QueryCount(p8, label);
+    if (record.totalQueryCalls !== independentCount) {
+      throw new Error(
+        `N=${recipientCount} requestId=${p8.requestId} attribution total ${record.totalQueryCalls} does not match independent Phase 8 ${QUERY_ACTION} count ${independentCount}`
+      );
+    }
+    if (record.unattributedQueryCalls !== 0) {
+      throw new Error(`N=${recipientCount} requestId=${p8.requestId} has ${record.unattributedQueryCalls} unattributed ${QUERY_ACTION} calls`);
+    }
     return record;
   });
 }
@@ -149,7 +180,19 @@ function buildSummary(pairs) {
     return summarizeCount(recipientCount, selectMeasuredRecords(p8, readJsonLines(p11Path), recipientCount));
   });
   const n1000 = counts.find(entry => entry.recipientCount === 1000);
-  return { version: 1, phase: 'APDM-P11-A', generatedAt: new Date().toISOString(), counts, n1000TopByDuration: n1000?.queries.slice(0, 25) || [] };
+  return {
+    version: 1,
+    phase: 'APDM-P11-A',
+    generatedAt: new Date().toISOString(),
+    completenessGate: {
+      passed: true,
+      minimumMeasuredSamples: MIN_MEASURED_SAMPLES,
+      independentActionCount: QUERY_ACTION,
+      requiresZeroUnattributedCalls: true
+    },
+    counts,
+    n1000TopByDuration: n1000?.queries.slice(0, 25) || []
+  };
 }
 
 function parseArgs(argv) {
@@ -176,4 +219,17 @@ if (require.main === module) {
   try { main(); } catch (error) { console.error(`[APDM-P11] ${error.stack || error.message || String(error)}`); process.exit(1); }
 }
 
-module.exports = { REQUIRED_COUNTS, assertPrivacySafeRawArtifact, buildSummary, median, selectMeasuredRecords, summarizeCount, validateQueryEntry, validateRecord };
+module.exports = {
+  ALLOWED_OPERATIONS,
+  MIN_MEASURED_SAMPLES,
+  QUERY_ACTION,
+  REQUIRED_COUNTS,
+  assertPrivacySafeRawArtifact,
+  buildSummary,
+  expectedPhase8QueryCount,
+  median,
+  selectMeasuredRecords,
+  summarizeCount,
+  validateQueryEntry,
+  validateRecord
+};
