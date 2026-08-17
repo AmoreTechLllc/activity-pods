@@ -1,5 +1,8 @@
-.env.local
-.env.*.local
+.env
+.env.*
+!.env.example
+!.env.test
+
 /actors/*.key
 /actors/*.key.pub
 /actors/old
@@ -10,3 +13,4 @@
 /exports
 /logs
 /.tmp
+/*.rdb
