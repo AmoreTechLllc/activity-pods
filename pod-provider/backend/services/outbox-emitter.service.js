@@ -8,17 +8,21 @@ const { retryWithBackoff } = require('../utils/backoff');
 const { validateDeliveryPlanV1 } = require('../utils/activitypub-delivery-plan');
 const { resolvePublicSearchConsent } = require('../utils/search-consent');
 const { extractHashtagsFromText } = require('../utils/hashtags');
+const { resolvePhase6ObservationConfig } = require('../lib/activitypub-phase6-observation-config');
+
+const observationConfig = resolvePhase6ObservationConfig({
+  remoteDeliveryMode: process.env.SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native',
+  sidecarObservationWebhookUrl:
+    process.env.SIDECAR_OBSERVATION_WEBHOOK_URL || 'http://fedify-sidecar:8080/webhook/outbox-observation',
+  sidecarToken: process.env.SIDECAR_TOKEN || '',
+  observationWebhookRetries: process.env.OBSERVATION_WEBHOOK_RETRIES,
+  observationWebhookTimeoutMs: process.env.OBSERVATION_WEBHOOK_TIMEOUT_MS
+});
 
 module.exports = {
   name: 'outbox-emitter',
   dependencies: ['activitypub.outbox'],
-  settings: {
-    remoteDeliveryMode: String(process.env.SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native').trim().toLowerCase(),
-    sidecarObservationWebhookUrl: process.env.SIDECAR_OBSERVATION_WEBHOOK_URL || 'http://fedify-sidecar:8080/webhook/outbox-observation',
-    sidecarToken: process.env.SIDECAR_TOKEN || '',
-    observationWebhookRetries: Number(process.env.OBSERVATION_WEBHOOK_RETRIES) || 3,
-    observationWebhookTimeoutMs: Number(process.env.OBSERVATION_WEBHOOK_TIMEOUT_MS) || 5000
-  },
+  settings: observationConfig,
   events: {
     'activitypub.outbox.posted': {
       async handler(ctx) {
@@ -109,9 +113,9 @@ module.exports = {
           const headers = {
             'Content-Type': 'application/json',
             'X-Event-Id': event.eventId,
-            'X-Event-Schema': event.schema
+            'X-Event-Schema': event.schema,
+            Authorization: `Bearer ${this.settings.sidecarToken}`
           };
-          if (this.settings.sidecarToken) headers.Authorization = `Bearer ${this.settings.sidecarToken}`;
           const response = await fetch(this.settings.sidecarObservationWebhookUrl, {
             method: 'POST',
             headers,
