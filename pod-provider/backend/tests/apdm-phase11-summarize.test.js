@@ -43,6 +43,18 @@ function record(overrides = {}) {
   };
 }
 
+function p8Record(requestId, queryCount = 3, overrides = {}) {
+  return {
+    version: 1,
+    phase: 'APDM-P8-A',
+    requestId,
+    recipientCount: 10,
+    actionCounts: { 'triplestore.query': queryCount },
+    errors: [],
+    ...overrides
+  };
+}
+
 describe('APDM Phase 11 evidence summarizer', () => {
   test('median is deterministic for odd and even samples', () => {
     expect(median([9, 1, 5])).toBe(5);
@@ -55,18 +67,59 @@ describe('APDM Phase 11 evidence summarizer', () => {
     expect(() => assertPrivacySafeRawArtifact('{"value":"<urn:test:resource>"}', 'bad.jsonl')).toThrow(/Privacy scan rejected/u);
   });
 
-  test('rejects schema drift and overflow', () => {
+  test('rejects schema drift, overflow and unsafe metadata drift', () => {
     expect(() => validateRecord({ ...record(), unexpectedPayload: 'not-allowed' }, 10, 'record')).toThrow(/unexpected key/u);
     expect(() => validateRecord({ ...record(), overflowed: true, droppedCalls: 1 }, 10, 'record')).toThrow(/overflowed/u);
+    expect(() => validateRecord({ ...record(), caseLabel: 'unexpected-case' }, 10, 'record')).toThrow(/caseLabel/u);
+    expect(() => validateRecord({ ...record(), operation: 'invalid' }, 10, 'record')).toThrow();
   });
 
   test('joins only measured Phase 8 request IDs, excluding warmups', () => {
-    const measuredId = 'apdm-p8-run-sample-1-deadbeef';
+    const ids = [
+      'apdm-p8-run-sample-1-deadbeef',
+      'apdm-p8-run-sample-2-feedface',
+      'apdm-p8-run-sample-3-c001d00d'
+    ];
     const warmupId = 'apdm-p8-run-warmup-1-cafebabe';
-    const p8 = [{ phase: 'APDM-P8-A', requestId: measuredId, recipientCount: 10 }];
-    const selected = selectMeasuredRecords(p8, [record({ requestId: warmupId }), record({ requestId: measuredId })], 10);
-    expect(selected).toHaveLength(1);
-    expect(selected[0].requestId).toBe(measuredId);
+    const p8 = ids.map(id => p8Record(id));
+    const p11 = [
+      record({ requestId: warmupId }),
+      ...ids.map(id => record({ requestId: id }))
+    ];
+    const selected = selectMeasuredRecords(p8, p11, 10);
+    expect(selected).toHaveLength(3);
+    expect(selected.map(item => item.requestId)).toEqual(ids);
+  });
+
+  test('rejects incomplete or unattributed query lineage even when Phase 11 is internally consistent', () => {
+    const ids = [
+      'apdm-p8-run-sample-1-deadbeef',
+      'apdm-p8-run-sample-2-feedface',
+      'apdm-p8-run-sample-3-c001d00d'
+    ];
+    const p8 = ids.map(id => p8Record(id, 3));
+
+    const incomplete = ids.map(id => record({
+      requestId: id,
+      queries: [query({ count: 2 })],
+      totalQueryCalls: 2,
+      attributedQueryCalls: 2
+    }));
+    expect(() => selectMeasuredRecords(p8, incomplete, 10)).toThrow(/does not match independent Phase 8/u);
+
+    const unattributed = ids.map(id => record({
+      requestId: id,
+      queries: [query({ caller: 'unknown', count: 3 })],
+      totalQueryCalls: 3,
+      attributedQueryCalls: 0,
+      unattributedQueryCalls: 3
+    }));
+    expect(() => selectMeasuredRecords(p8, unattributed, 10)).toThrow(/unattributed/u);
+  });
+
+  test('requires at least three measured samples', () => {
+    const id = 'apdm-p8-run-sample-1-deadbeef';
+    expect(() => selectMeasuredRecords([p8Record(id)], [record({ requestId: id })], 10)).toThrow(/at least 3/u);
   });
 
   test('summarizes per-shape sample medians and error totals', () => {
