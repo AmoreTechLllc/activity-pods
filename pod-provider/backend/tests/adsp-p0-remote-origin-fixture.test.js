@@ -1,6 +1,7 @@
 'use strict';
 
 const {
+  AS_PUBLIC,
   buildFixtureEvidence,
   createEvidenceLatch,
   REMOTE_DELIVERY_PLANNED_EVENT,
@@ -22,6 +23,7 @@ function createDeliveryPlan(overrides = {}) {
       type: 'Create',
       actor: SENDER_WEB_ID,
       to: [REMOTE_ACTOR_URI],
+      cc: [AS_PUBLIC],
       object: { type: 'Note', content: 'fixture' }
     },
     localRecipients: [],
@@ -32,7 +34,7 @@ function createDeliveryPlan(overrides = {}) {
         targetDomain: '127.0.0.1'
       }
     ],
-    meta: { visibility: 'direct', isPublicActivity: false },
+    meta: { visibility: 'unlisted', isPublicActivity: true },
     ...overrides
   };
   plan.intentId = Object.prototype.hasOwnProperty.call(overrides, 'intentId')
@@ -147,7 +149,7 @@ describe('ADSP P0 ActivityPods remote-origin fixture', () => {
     }
   });
 
-  test('projects only authority emitted after the real external outbox path durably queues the plan', () => {
+  test('projects only public authority emitted after the real external outbox path durably queues the plan', () => {
     const plan = createDeliveryPlan();
     const result = buildEvidence();
 
@@ -161,6 +163,8 @@ describe('ADSP P0 ActivityPods remote-origin fixture', () => {
       remoteActorUri: REMOTE_ACTOR_URI,
       inboxUrl: 'http://127.0.0.1:8787/inbox/success',
       targetDomain: '127.0.0.1',
+      visibility: 'unlisted',
+      isPublicActivity: true,
       suppressedNativeRemotePostCount: 1,
       durableHandoffQueued: true
     });
@@ -172,6 +176,18 @@ describe('ADSP P0 ActivityPods remote-origin fixture', () => {
       createPlannedEvent({ durableHandoffQueued: false })
     ]) {
       expect(() => buildEvidence({ plannedEvent })).toThrow(/external durable-handoff authority/u);
+    }
+  });
+
+  test('fails closed if the measured Activity would bypass the production RedPanda public event-log path', () => {
+    for (const meta of [
+      { visibility: 'direct', isPublicActivity: false },
+      { visibility: 'direct', isPublicActivity: true },
+      { visibility: 'unlisted', isPublicActivity: false }
+    ]) {
+      const plan = createDeliveryPlan({ meta });
+      expect(() => buildEvidence({ plannedEvent: createPlannedEvent({ deliveryPlan: plan }) }))
+        .toThrow(/RedPanda event-log path/u);
     }
   });
 
