@@ -19,16 +19,18 @@
  *   - Commit key and rotation key are distinct
  *   - Both signing responses are 200 with base64url signatures
  *   - Signatures are non-empty and base64url-encoded
- *   - Negative: PLC sign with wrong DID returns 400 or 422
+ *   - Negative: PLC signing rejects a non-matching DID
  *
- * Environment variables (all optional, defaults match local dev):
- *   ATPROTO_SMOKE_BASE_URL              default: http://localhost:3004
- *   ACTIVITYPODS_TOKEN                  default: test-atproto-signing-token-local
- *   ATPROTO_SMOKE_CANONICAL_ACCOUNT_ID  default: http://localhost:3000/atproto365133
+ * Environment variables:
+ *   ATPROTO_SMOKE_BASE_URL              optional; default: http://localhost:3000
+ *   ACTIVITYPODS_TOKEN                  required; no source-level fallback
+ *   ATPROTO_SMOKE_CANONICAL_ACCOUNT_ID  optional; default: http://localhost:3000/atproto365133
  */
 
+const { configuredSigningToken } = require('../utils/signing-security');
+
 const BASE_URL = process.env.ATPROTO_SMOKE_BASE_URL || "http://localhost:3000";
-const TOKEN = process.env.ACTIVITYPODS_TOKEN || "test-atproto-signing-token-local";
+const TOKEN = configuredSigningToken();
 const CANONICAL_ACCOUNT_ID =
   process.env.ATPROTO_SMOKE_CANONICAL_ACCOUNT_ID || "http://localhost:3000/atproto365133";
 
@@ -76,6 +78,12 @@ async function getJson(path) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
+  if (!TOKEN) {
+    throw new Error(
+      "ACTIVITYPODS_TOKEN must be a valid high-entropy bearer token for the ATProto signing smoke test"
+    );
+  }
+
   const slug = slugFromUrl(CANONICAL_ACCOUNT_ID);
   const results = {};
 

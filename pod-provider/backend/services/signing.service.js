@@ -8,6 +8,12 @@ require('dotenv-flow').config();
 const crypto = require('crypto');
 const { URL } = require('url');
 const { MoleculerError } = require('moleculer').Errors;
+const {
+  configuredSigningToken,
+  isDateWithinSkew,
+  parseBearerToken,
+  timingSafeSecretEqual
+} = require('../utils/signing-security');
 
 // ============================================================================
 // Utility Functions
@@ -232,14 +238,17 @@ module.exports = {
       toBottom: false
     });
 
+    if (!this.settings.auth.bearerToken) {
+      this.logger.warn('[Signing] ACTIVITYPODS_TOKEN is not configured; internal signing endpoints will fail closed');
+    }
     this.logger.info('[Signing] Internal signing routes registered under /api/internal');
   },
 
   settings: {
     auth: {
-      // Must match ACTIVITYPODS_TOKEN in the sidecar's environment.
-      // Both sides MUST reference the same shared secret value.
-      bearerToken: process.env.ACTIVITYPODS_TOKEN || process.env.SIDECAR_TOKEN || 'test-atproto-signing-token-local'
+      // Dedicated sidecar -> ActivityPods signing credential. Do not reuse SIDECAR_TOKEN,
+      // which authenticates the opposite ActivityPods -> sidecar handoff direction.
+      bearerToken: configuredSigningToken()
       // Strong recommendation: also enforce mTLS at the reverse proxy / mesh
     },
     limits: {
@@ -399,7 +408,25 @@ module.exports = {
 
         const canonicalAccountId = ctx.params.canonicalAccountId;
         const webId = ctx.params.webId || canonicalAccountId;
-        const slug = new URL(webId).pathname.split('/').filter(Boolean).pop() || 'account';
+        if (webId !== canonicalAccountId) {
+          throw new MoleculerError(
+            'webId must match canonicalAccountId for internal ATProto provisioning',
+            403,
+            'ACCOUNT_BINDING_MISMATCH'
+          );
+        }
+
+        let accountUrl;
+        try {
+          accountUrl = new URL(webId);
+        } catch {
+          throw new MoleculerError('canonicalAccountId must be an absolute URL', 400, 'INVALID_INPUT');
+        }
+        if (!['http:', 'https:'].includes(accountUrl.protocol) || accountUrl.username || accountUrl.password) {
+          throw new MoleculerError('canonicalAccountId must be an HTTP(S) WebID without URL credentials', 400, 'INVALID_INPUT');
+        }
+
+        const slug = accountUrl.pathname.split('/').filter(Boolean).pop() || 'account';
         const did = ctx.params.did || `did:plc:${slug}`;
         const handle = ctx.params.handle || `${slug}.test`;
 
@@ -726,16 +753,25 @@ module.exports = {
 
   methods: {
     /**
-     * Authenticate the request using bearer token.
-     * This endpoint is internal-only and MUST be protected.
+     * Authenticate the request using the dedicated bearer token.
+     * This endpoint is internal-only and MUST fail closed when unconfigured.
      */
     _auth(ctx) {
-      const auth = ctx.meta?.$headers?.authorization || ctx.meta?.$headers?.Authorization;
-      if (!auth || !String(auth).startsWith('Bearer ')) {
-        throw new MoleculerError('Missing bearer token', 401, 'AUTH_FAILED');
+      const expectedToken = this.settings.auth.bearerToken;
+      if (!expectedToken) {
+        throw new MoleculerError(
+          'Internal signing authentication is not configured',
+          503,
+          'SIGNING_AUTH_NOT_CONFIGURED'
+        );
       }
-      const token = String(auth).slice(7);
-      if (!this.settings.auth.bearerToken || token !== this.settings.auth.bearerToken) {
+
+      const authorization = ctx.meta?.$headers?.authorization || ctx.meta?.$headers?.Authorization;
+      const token = parseBearerToken(authorization);
+      if (!token) {
+        throw new MoleculerError('Missing or malformed bearer token', 401, 'AUTH_FAILED');
+      }
+      if (!timingSafeSecretEqual(token, expectedToken)) {
         throw new MoleculerError('Invalid bearer token', 403, 'AUTH_FAILED');
       }
     },
@@ -803,14 +839,10 @@ module.exports = {
     },
 
     /**
-     * Validate date skew to prevent replay attacks.
+     * Validate canonical IMF-fixdate and skew to prevent replay attacks.
      */
     _validateDateSkew(dateStr) {
-      const t = Date.parse(dateStr);
-      if (Number.isNaN(t)) return true; // Let unparseable dates through
-      const now = Date.now();
-      const skewMs = Math.abs(now - t);
-      return skewMs <= this.settings.limits.maxClockSkewSeconds * 1000;
+      return isDateWithinSkew(dateStr, this.settings.limits.maxClockSkewSeconds);
     },
 
     /**
@@ -849,7 +881,7 @@ module.exports = {
           date = toHttpDate();
         }
         if (!this._validateDateSkew(date)) {
-          return this._err(r, 'INVALID_INPUT', 'date skew too large', false);
+          return this._err(r, 'INVALID_INPUT', 'date invalid or skew too large', false);
         }
 
         // Handle digest for POST/PUT requests
