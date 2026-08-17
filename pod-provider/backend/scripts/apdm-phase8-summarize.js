@@ -7,17 +7,9 @@ const REQUIRED_RECIPIENT_COUNTS = [1, 10, 100, 200, 1000];
 const MIN_MEASURED_SAMPLES = 3;
 
 function parseJsonLines(source) {
-  return source
-    .split(/\r?\n/u)
-    .map(line => line.trim())
-    .filter(Boolean)
-    .map((line, index) => {
-      try {
-        return JSON.parse(line);
-      } catch (error) {
-        throw new Error(`Invalid JSONL record at line ${index + 1}: ${error.message}`);
-      }
-    });
+  return source.split(/\r?\n/u).map(line => line.trim()).filter(Boolean).map((line, index) => {
+    try { return JSON.parse(line); } catch (error) { throw new Error(`Invalid JSONL record at line ${index + 1}: ${error.message}`); }
+  });
 }
 
 function percentile(values, fraction) {
@@ -50,17 +42,27 @@ function aggregateNestedCounts(records, parentField, field) {
   return result;
 }
 
+function isNonnegativeFinite(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0;
+}
+
 function isSuccessfulRecord(record) {
-  return !Array.isArray(record.errors) || record.errors.length === 0;
+  if (!record || !Array.isArray(record.errors) || record.errors.length !== 0) return false;
+  if (!isNonnegativeFinite(record.elapsedMs) || !isNonnegativeFinite(record.cpuUserMs) || !isNonnegativeFinite(record.cpuSystemMs)) return false;
+  if (!Number.isFinite(Number(record.heapUsedDelta))) return false;
+  if (!Number.isInteger(Number(record.actionCount)) || Number(record.actionCount) < 0) return false;
+  if (!Number.isInteger(Number(record.fuseki?.requestCount)) || Number(record.fuseki?.requestCount) < 0) return false;
+  return true;
 }
 
 function summarizeRecipientCase(records) {
   const successfulRecords = records.filter(isSuccessfulRecord);
-  const elapsed = successfulRecords.map(record => Number(record.elapsedMs)).filter(Number.isFinite);
-  const cpu = successfulRecords.map(record => Number(record.cpuUserMs || 0) + Number(record.cpuSystemMs || 0)).filter(Number.isFinite);
-  const heapDelta = successfulRecords.map(record => Number(record.heapUsedDelta)).filter(Number.isFinite);
-  const actionCounts = successfulRecords.map(record => Number(record.actionCount)).filter(Number.isFinite);
-  const fusekiCounts = successfulRecords.map(record => Number(record.fuseki && record.fuseki.requestCount)).filter(Number.isFinite);
+  const elapsed = successfulRecords.map(record => Number(record.elapsedMs));
+  const cpu = successfulRecords.map(record => Number(record.cpuUserMs) + Number(record.cpuSystemMs));
+  const heapDelta = successfulRecords.map(record => Number(record.heapUsedDelta));
+  const actionCounts = successfulRecords.map(record => Number(record.actionCount));
+  const fusekiCounts = successfulRecords.map(record => Number(record.fuseki.requestCount));
 
   return {
     samples: records.length,
@@ -117,13 +119,15 @@ function summarize(records, requiredRecipientCounts = REQUIRED_RECIPIENT_COUNTS)
     .map(([count, caseRecords]) => [count, caseRecords.filter(isSuccessfulRecord)])
     .filter(([count, caseRecords]) => requiredRecipientCounts.includes(count) && caseRecords.length >= MIN_MEASURED_SAMPLES);
 
-  const actionFitPoints = usableEntries
-    .map(([count, caseRecords]) => ({ x: count, y: mean(caseRecords.map(record => Number(record.actionCount)).filter(Number.isFinite)) }))
-    .filter(point => Number.isFinite(point.y));
+  const actionFitPoints = usableEntries.map(([count, caseRecords]) => ({
+    x: count,
+    y: mean(caseRecords.map(record => Number(record.actionCount)))
+  })).filter(point => Number.isFinite(point.y));
 
-  const fusekiFitPoints = usableEntries
-    .map(([count, caseRecords]) => ({ x: count, y: mean(caseRecords.map(record => Number(record.fuseki && record.fuseki.requestCount)).filter(Number.isFinite)) }))
-    .filter(point => Number.isFinite(point.y));
+  const fusekiFitPoints = usableEntries.map(([count, caseRecords]) => ({
+    x: count,
+    y: mean(caseRecords.map(record => Number(record.fuseki.requestCount)))
+  })).filter(point => Number.isFinite(point.y));
 
   return {
     phase: 'APDM-P8-A',
@@ -133,10 +137,7 @@ function summarize(records, requiredRecipientCounts = REQUIRED_RECIPIENT_COUNTS)
     missingRecipientCounts,
     complete: missingRecipientCounts.length === 0,
     cases,
-    measuredModels: {
-      nestedMoleculerActions: linearFit(actionFitPoints),
-      fusekiHttpRequests: linearFit(fusekiFitPoints)
-    },
+    measuredModels: { nestedMoleculerActions: linearFit(actionFitPoints), fusekiHttpRequests: linearFit(fusekiFitPoints) },
     historicalTopLevelModel: {
       expression: '6N + O(1)',
       status: missingRecipientCounts.length === 0 ? 'ready-for-reconciliation' : 'insufficient-measurements'
@@ -156,7 +157,7 @@ function main(argv = process.argv.slice(2)) {
   } else process.stdout.write(rendered);
 
   if (!summary.complete) {
-    process.stderr.write(`[APDM-P8] Recipient cases below ${MIN_MEASURED_SAMPLES} successful samples: ${summary.missingRecipientCounts.join(', ')}\n`);
+    process.stderr.write(`[APDM-P8] Recipient cases below ${MIN_MEASURED_SAMPLES} valid successful samples: ${summary.missingRecipientCounts.join(', ')}\n`);
     process.exitCode = 2;
   }
 }
