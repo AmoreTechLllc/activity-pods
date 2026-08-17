@@ -68,7 +68,7 @@ describe('APDM Phase 10 environment provenance', () => {
     expect(result.failures.join('\n')).toContain('fusekiImageId');
   });
 
-  test('preserves mechanism evidence but marks timing and CPU incomparable across host hardware', () => {
+  test('rejects timing and CPU evidence across different host hardware', () => {
     const result = validateEnvironment(
       manifest(),
       manifest({
@@ -79,9 +79,8 @@ describe('APDM Phase 10 environment provenance', () => {
         hostTotalMemoryBytes: 34359738368
       })
     );
-    expect(result.passed).toBe(true);
+    expect(result.passed).toBe(false);
     expect(result.resourceComparable).toBe(false);
-    expect(result.failures).toEqual([]);
     expect(result.resourceDifferences.join('\n')).toContain('hostCpuModel');
     expect(result.resourceDifferences.join('\n')).toContain('hostCpuCount');
     expect(result.resourceDifferences.join('\n')).toContain('hostTotalMemoryBytes');
@@ -94,5 +93,16 @@ describe('APDM Phase 10 environment provenance', () => {
     );
     expect(result.passed).toBe(false);
     expect(result.failures.join('\n')).toContain('backendImageId');
+  });
+
+  test('rejects equal but impossible host resource values', () => {
+    const result = validateEnvironment(
+      manifest({ hostCpuCount: 0, hostTotalMemoryBytes: -1 }),
+      manifest({ arm: 'on', memoEnabled: true, hostCpuCount: 0, hostTotalMemoryBytes: -1 })
+    );
+    expect(result.passed).toBe(false);
+    expect(result.resourceComparable).toBe(false);
+    expect(result.failures.join('\n')).toContain('hostCpuCount');
+    expect(result.failures.join('\n')).toContain('hostTotalMemoryBytes');
   });
 });
