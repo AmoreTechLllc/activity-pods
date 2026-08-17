@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const signingService = require('../services/signing.service');
 const {
   MAX_AUTHORIZATION_HEADER_BYTES,
@@ -9,15 +10,20 @@ const {
   timingSafeSecretEqual
 } = require('../utils/signing-security');
 
-function expectMoleculerError(fn, { code, type, message }) {
+function captureError(fn) {
   try {
     fn();
-    throw new Error('expected function to throw');
   } catch (error) {
-    expect(error.code).toBe(code);
-    expect(error.type).toBe(type);
-    expect(error.message).toMatch(message);
+    return error;
   }
+  throw new Error('expected function to throw');
+}
+
+function expectMoleculerError(fn, { code, type, message }) {
+  const error = captureError(fn);
+  expect(error.code).toBe(code);
+  expect(error.type).toBe(type);
+  expect(error.message).toMatch(message);
 }
 
 describe('signing internal authentication hardening', () => {
@@ -93,6 +99,49 @@ describe('signing HTTP date replay protection', () => {
     expect(isDateWithinSkew('Mon, 17 Aug 2026 20:00:00 UTC', 300, now)).toBe(false);
     expect(isDateWithinSkew('Mon, 17 Aug 2026 20:00:00 GMT', -1, now)).toBe(false);
   });
+
+  test('service boundary rejects a malformed caller-supplied Date before signing', async () => {
+    const { privateKey } = crypto.generateKeyPairSync('rsa', {
+      modulusLength: 1024,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+    });
+    const service = {
+      settings: {
+        limits: { maxBodyBytes: 1024, maxClockSkewSeconds: 300 },
+        profiles: signingService.settings.profiles
+      },
+      _err: signingService.methods._err,
+      _parseBodyBytes: signingService.methods._parseBodyBytes,
+      _validateDateSkew: signingService.methods._validateDateSkew
+    };
+    const request = {
+      requestId: 'date-negative',
+      method: 'GET',
+      profile: 'ap_get_v1',
+      target: { host: 'remote.example', path: '/inbox' },
+      headers: { date: 'definitely-not-an-http-date' }
+    };
+
+    await expect(
+      signingService.methods._signOne.call(
+        service,
+        {},
+        'https://pods.example/alice',
+        'https://pods.example/alice#main-key',
+        privateKey,
+        request
+      )
+    ).resolves.toEqual({
+      requestId: 'date-negative',
+      ok: false,
+      error: {
+        code: 'INVALID_INPUT',
+        message: 'date invalid or skew too large',
+        retryable: false
+      }
+    });
+  });
 });
 
 describe('ATProto provisioning authority binding', () => {
@@ -112,6 +161,21 @@ describe('ATProto provisioning authority binding', () => {
       type: 'ACCOUNT_BINDING_MISMATCH'
     });
     expect(service._auth).toHaveBeenCalledWith(ctx);
+    expect(ctx.call).not.toHaveBeenCalled();
+  });
+
+  test('rejects a non-HTTP canonical account ID before generating keys', async () => {
+    const ctx = {
+      params: { canonicalAccountId: 'did:example:alice' },
+      meta: {},
+      call: jest.fn()
+    };
+    const service = { _auth: jest.fn() };
+
+    await expect(signingService.actions.provisionAtprotoIdentity.handler.call(service, ctx)).rejects.toMatchObject({
+      code: 400,
+      type: 'INVALID_INPUT'
+    });
     expect(ctx.call).not.toHaveBeenCalled();
   });
 
