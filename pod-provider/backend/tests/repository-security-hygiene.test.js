@@ -78,7 +78,8 @@ describe('repository security hygiene', () => {
     expect(ignoreLines.has('.env')).toBe(true);
     expect(ignoreLines.has('!.env.example')).toBe(true);
     expect(ignoreLines.has('!.env.test')).toBe(true);
-    expect(ignoreLines.has('dump.rdb')).toBe(true);
+    // A single wildcard protects every Redis snapshot name, including dump.rdb.
+    // The tracked-file assertion above is the stronger defense against forced adds.
     expect(ignoreLines.has('*.rdb')).toBe(true);
   });
 });
