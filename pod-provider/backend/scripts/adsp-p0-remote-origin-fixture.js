@@ -14,6 +14,7 @@ const DEFAULT_TRANSPORTER_URL = 'redis://127.0.0.1:6379/12';
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_EVIDENCE_TIMEOUT_MS = 120_000;
 const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.handoff-queued';
+const AS_PUBLIC = 'https://www.w3.org/ns/activitystreams#Public';
 
 function positiveInteger(value, fallback, label) {
   const parsed = Number(value === undefined ? fallback : value);
@@ -166,6 +167,13 @@ function buildFixtureEvidence({ postResult, plannedEvent, remoteActorUri, sender
   }
   assertExactStringArray(plannedEvent.remoteRecipients, [remoteActorUri], 'Emitted remote recipient evidence');
 
+  if (
+    deliveryPlan.meta?.isPublicActivity !== true ||
+    !['public', 'unlisted'].includes(deliveryPlan.meta?.visibility)
+  ) {
+    throw new Error('ADSP remote-origin fixture must be public/unlisted so the production RedPanda event-log path is exercised');
+  }
+
   return {
     schema: 'adsp.p0.activitypods-remote-origin.v1',
     activityId: postResult.id,
@@ -180,6 +188,8 @@ function buildFixtureEvidence({ postResult, plannedEvent, remoteActorUri, sender
     inboxUrl: target.inboxUrl,
     ...(target.sharedInboxUrl ? { sharedInboxUrl: target.sharedInboxUrl } : {}),
     targetDomain: target.targetDomain,
+    visibility: deliveryPlan.meta.visibility,
+    isPublicActivity: true,
     suppressedNativeRemotePostCount: 1,
     durableHandoffQueued: true
   };
@@ -228,6 +238,7 @@ async function runRemoteOriginFixture({
           type: 'Create',
           actor: sender.webId,
           to: [normalizedRemoteActorUri],
+          cc: [AS_PUBLIC],
           object: { type: 'Note', content: marker }
         },
         {
@@ -273,6 +284,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  AS_PUBLIC,
   REMOTE_DELIVERY_PLANNED_EVENT,
   assertExactStringArray,
   buildFixtureEvidence,
