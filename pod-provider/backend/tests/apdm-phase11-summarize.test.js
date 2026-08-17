@@ -67,11 +67,12 @@ describe('APDM Phase 11 evidence summarizer', () => {
     expect(() => assertPrivacySafeRawArtifact('{"value":"<urn:test:resource>"}', 'bad.jsonl')).toThrow(/Privacy scan rejected/u);
   });
 
-  test('rejects schema drift, overflow and unsafe metadata drift', () => {
+  test('rejects schema drift, overflow, unsafe metadata and opaque operations', () => {
     expect(() => validateRecord({ ...record(), unexpectedPayload: 'not-allowed' }, 10, 'record')).toThrow(/unexpected key/u);
     expect(() => validateRecord({ ...record(), overflowed: true, droppedCalls: 1 }, 10, 'record')).toThrow(/overflowed/u);
     expect(() => validateRecord({ ...record(), caseLabel: 'unexpected-case' }, 10, 'record')).toThrow(/caseLabel/u);
-    expect(() => validateRecord({ ...record(), operation: 'invalid' }, 10, 'record')).toThrow();
+    expect(() => validateRecord(record({ queries: [query({ operation: 'unknown' })] }), 10, 'record')).toThrow(/opaque query shapes/u);
+    expect(() => validateRecord(record({ queries: [query({ operation: 'invalid' })] }), 10, 'record')).toThrow(/unsupported/u);
   });
 
   test('joins only measured Phase 8 request IDs, excluding warmups', () => {
