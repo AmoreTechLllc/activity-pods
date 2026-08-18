@@ -51,7 +51,15 @@ jobs:
 
       - name: Run W3 companion semantic tests
         working-directory: pod-provider/backend
-        run: yarn test --runInBand tests/adsp-p2-w3-companion.test.js
+        run: |
+          npm exec --yes \
+            --package=jest@29.7.0 \
+            --package=esbuild@0.25.4 \
+            --package=esbuild-jest@0.5.0 \
+            -- \
+            jest --testEnvironment=node \
+              --runInBand \
+              tests/adsp-p2-w3-companion.test.js
 
       - name: Prepare ephemeral external-authority token
         run: |
