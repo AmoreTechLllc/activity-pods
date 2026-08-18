@@ -11,6 +11,9 @@ const namespace = process.env.ADSP_P1_NAMESPACE || `adsp-p1-launcher-${process.p
 const probeNodeID = 'p1-launcher-probe';
 
 function waitForExit(child, timeoutMs = 10000) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Timed out waiting for launcher to exit')), timeoutMs);
     child.once('exit', (code, signal) => {
@@ -22,6 +25,17 @@ function waitForExit(child, timeoutMs = 10000) {
       reject(error);
     });
   });
+}
+
+async function stopLauncher(launcher, stderr) {
+  if (launcher.exitCode !== null || launcher.signalCode !== null) return;
+  const exitPromise = waitForExit(launcher);
+  launcher.kill('SIGTERM');
+  const exit = await exitPromise.catch(error => ({ error: error.message }));
+  if (exit.error) {
+    launcher.kill('SIGKILL');
+    throw new Error(`${exit.error}; stderr=${stderr}`);
+  }
 }
 
 async function main() {
@@ -126,12 +140,7 @@ async function main() {
     );
   } finally {
     await caller.stop().catch(() => undefined);
-    if (launcher.exitCode === null && launcher.signalCode === null) launcher.kill('SIGTERM');
-    const exit = await waitForExit(launcher).catch(error => ({ error: error.message }));
-    if (exit.error) {
-      launcher.kill('SIGKILL');
-      throw new Error(`${exit.error}; stderr=${stderr}`);
-    }
+    await stopLauncher(launcher, stderr);
   }
 }
 
