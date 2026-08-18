@@ -142,6 +142,10 @@ describe('ADSP P2 W3 ActivityPods companion', () => {
     expect(source).toMatch(/SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER: 'false'/u);
     expect(source).toMatch(/SIDECAR_DELIVERY_HANDOFF_URL:.*host\.docker\.internal:8080\/webhook\/outbox/u);
     expect(source).toMatch(/host\.docker\.internal:host-gateway/u);
+    expect(source).toMatch(/SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_ENABLED: 'true'/u);
+    for (const replica of [1, 2, 3, 4]) {
+      expect(source).toMatch(new RegExp(`locality-r${replica}\\.json`, 'u'));
+    }
 
     const w1Path = path.resolve(__dirname, '../../docker-compose-adsp-p2-horizontal.yml');
     const w1 = fs.readFileSync(w1Path, 'utf8');
