@@ -10,6 +10,8 @@ x-adsp-p2-w3-external-environment: &adsp-p2-w3-external-environment
   ACTIVITYPODS_TOKEN: '${ACTIVITYPODS_TOKEN:-}'
   SIDECAR_TOKEN: '${SIDECAR_TOKEN:-}'
   SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_ENABLED: 'true'
+  ADSP_P2_W3_BRIDGE_UPSTREAM_HOST: 'host.docker.internal'
+  ADSP_P2_W3_BRIDGE_UPSTREAM_PORT: '${ADSP_P2_W3_BRIDGE_UPSTREAM_PORT:-18080}'
 
 x-adsp-p2-w3-external-hosts: &adsp-p2-w3-external-hosts
   - 'host.docker.internal:host-gateway'
