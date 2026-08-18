@@ -14,6 +14,13 @@ function sourceIndex(fragment) {
   return index;
 }
 
+function expectExported(variable) {
+  const exportLines = source
+    .split(/\r?\n/u)
+    .filter(line => /^\s*export\s+/u.test(line));
+  expect(exportLines.some(line => line.split(/\s+/u).includes(variable))).toBe(true);
+}
+
 describe('integrated ActivityPods federation authority launcher', () => {
   test('selects explicit sidecar external preview authority for integrated development', () => {
     expect(source).toContain('NODE_ENV=development');
@@ -32,7 +39,7 @@ describe('integrated ActivityPods federation authority launcher', () => {
       'SIDECAR_DELIVERY_HANDOFF_URL',
       'SIDECAR_TOKEN'
     ]) {
-      expect(source).toContain(`export ${variable}`);
+      expectExported(variable);
     }
   });
 
