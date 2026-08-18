@@ -53,7 +53,7 @@ Per-request trace evidence records:
 
 The existing trace CPU fields are deliberately **not summed** for horizontal CPU-per-outcome evidence because overlapping traces use process-wide `process.cpuUsage()` and would double-count shared CPU time.
 
-Instead, the workflow records raw cgroup CPU/memory snapshots for every active backend, Fuseki and Redis before and after each measured window, plus Redis `INFO commandstats` and `INFO memory`. Whole-system resource normalization is derived from those non-overlapping window boundaries.
+Instead, the workflow records raw cgroup CPU/memory snapshots for every active backend, Fuseki and Redis before and after each measured window, plus Redis `INFO commandstats` and `INFO memory`. Whole-system resource normalization is derived from those non-overlapping window boundaries. Commandstats parsing requires the counters used by the comparator while accepting additive Redis metrics such as newer trailing slowlog fields; malformed, duplicate or missing required counters still fail closed.
 
 ## Identical starting state per arm
 
@@ -75,7 +75,8 @@ Pull-request runs are **smoke only**:
 
 - N=10;
 - one measured window per 1/2/4 topology;
-- two completed outcomes at concurrency two;
+- eight completed outcomes at concurrency eight;
+- every configured replica must execute measured work;
 - never interpreted as promotion evidence.
 
 Manual `workflow_dispatch` is the decision-evidence profile and defaults to:
@@ -100,6 +101,8 @@ The locked scale rule is preserved exactly:
 
 The summarizer does not infer saturation from a favorable latency number.
 
+`adsp-p2-horizontal-resources.js` separately derives per-window and per-case backend/Fuseki/Redis CPU, whole-system CPU per successful outcome, backend/whole-system memory, Redis command deltas and Redis memory deltas. Those resource results are retained alongside the scale summary and must be interpreted against the frozen Phase-2 resource guardrails; favorable smoke values are never promotion evidence.
+
 ## Frozen settings
 
 Across replica-count arms:
@@ -121,7 +124,7 @@ The later W3 mixed ActivityPods+federation comparator must include the sidecar a
 
 Even a successful W1 scale result does not complete P2. Remaining required work includes:
 
-- whole-system resource normalization from the captured cgroup/Redis evidence;
+- interpret the captured whole-system resource normalization against the frozen resource guardrails alongside the five-sample W1 scale result;
 - W3 mixed ActivityPods + accepted remote delivery intents + Fedify sidecar measurement;
 - node loss under real accepted load;
 - bounded recovery and stale-registry convergence;
