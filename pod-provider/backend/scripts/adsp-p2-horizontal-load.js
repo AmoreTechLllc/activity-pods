@@ -132,6 +132,30 @@ function createRequestId(runLabel, index) {
   return `adsp-p2-${runLabel}-${index}-${crypto.randomBytes(6).toString('hex')}`;
 }
 
+function barrierPath(barrierDir, name) {
+  return path.join(barrierDir, name);
+}
+
+function signalBarrier(barrierDir, name) {
+  if (!barrierDir) return;
+  fs.mkdirSync(barrierDir, { recursive: true });
+  const target = barrierPath(barrierDir, name);
+  const temporary = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${Date.now()}\n`, 'utf8');
+  fs.renameSync(temporary, target);
+}
+
+async function waitForBarrier(barrierDir, name, timeoutMs) {
+  if (!barrierDir) return;
+  const target = barrierPath(barrierDir, name);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(target)) return;
+    await sleep(25);
+  }
+  throw new Error(`Timed out waiting for ADSP P2 barrier ${name}`);
+}
+
 async function runWindow({
   manifest,
   recipientCount,
@@ -143,7 +167,8 @@ async function runWindow({
   namespace,
   readyTimeoutMs,
   traceTimeoutMs,
-  runLabel
+  runLabel,
+  barrierDir
 }) {
   if (!namespace) throw new Error('ADSP P2 load driver requires SEMAPPS_MOLECULER_NAMESPACE or ADSP_P2_NAMESPACE');
   if (traceFiles.length !== replicaCount) {
@@ -161,6 +186,10 @@ async function runWindow({
   if (concurrency > requestCount) concurrency = requestCount;
 
   for (const traceFile of traceFiles) fs.rmSync(traceFile, { force: true });
+  if (barrierDir) {
+    fs.mkdirSync(barrierDir, { recursive: true });
+    for (const name of ['ready', 'go', 'done', 'release']) fs.rmSync(barrierPath(barrierDir, name), { force: true });
+  }
 
   const recipients = manifest.recipients.slice(0, recipientCount).map(recipient => recipient.webId);
   if (recipients.some(value => typeof value !== 'string' || !value)) throw new Error('Recipient manifest contains invalid WebIDs');
@@ -179,6 +208,10 @@ async function runWindow({
   await broker.start();
   try {
     await waitForReplicaEndpoints(broker, replicaCount, readyTimeoutMs);
+    if (barrierDir) {
+      signalBarrier(barrierDir, 'ready');
+      await waitForBarrier(barrierDir, 'go', readyTimeoutMs);
+    }
 
     const results = new Array(requestCount);
     let cursor = 0;
@@ -223,6 +256,8 @@ async function runWindow({
           completedMs,
           traceElapsedMs: Number(traced.record.elapsedMs),
           traceCpuMs: Number(traced.record.cpuUserMs || 0) + Number(traced.record.cpuSystemMs || 0),
+          traceHeapUsedEnd: Number(traced.record.heapUsedEnd),
+          traceHeapTotalEnd: Number(traced.record.heapTotalEnd),
           traceRssEnd: Number(traced.record.rssEnd),
           actionCount: Number(traced.record.actionCount),
           fusekiRequestCount: Number(traced.record.fuseki?.requestCount || 0)
@@ -242,7 +277,7 @@ async function runWindow({
     for (const result of results) executorCounts[result.executor] = (executorCounts[result.executor] || 0) + 1;
     assertExecutorCoverage(executorCounts, replicaCount, requestCount);
 
-    return {
+    const windowResult = {
       version: 1,
       phase: 'ADSP-P2-A',
       fixture: 'tier1-horizontal-local-fanout',
@@ -265,6 +300,12 @@ async function runWindow({
       executorCounts,
       results
     };
+
+    if (barrierDir) {
+      signalBarrier(barrierDir, 'done');
+      await waitForBarrier(barrierDir, 'release', readyTimeoutMs);
+    }
+    return windowResult;
   } finally {
     await broker.stop().catch(() => undefined);
   }
@@ -284,6 +325,7 @@ async function main(argv = process.argv.slice(2)) {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   const traceFiles = traceFilesFromEnv();
   const namespace = process.env.SEMAPPS_MOLECULER_NAMESPACE || process.env.ADSP_P2_NAMESPACE;
+  const barrierDir = process.env.ADSP_P2_BARRIER_DIR ? path.resolve(process.env.ADSP_P2_BARRIER_DIR) : undefined;
   const result = await runWindow({
     manifest,
     recipientCount,
@@ -295,7 +337,8 @@ async function main(argv = process.argv.slice(2)) {
     namespace,
     readyTimeoutMs: positiveInteger(process.env.ADSP_P2_READY_TIMEOUT_MS || DEFAULT_READY_TIMEOUT_MS, 'ready timeout'),
     traceTimeoutMs: positiveInteger(process.env.ADSP_P2_TRACE_TIMEOUT_MS || DEFAULT_TRACE_TIMEOUT_MS, 'trace timeout'),
-    runLabel: process.env.ADSP_P2_RUN_LABEL || `${replicaCount}r-${recipientCount}n`
+    runLabel: process.env.ADSP_P2_RUN_LABEL || `${replicaCount}r-${recipientCount}n`,
+    barrierDir
   });
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -312,12 +355,15 @@ if (require.main === module) {
 
 module.exports = {
   assertExecutorCoverage,
+  barrierPath,
   executorName,
   expectedExecutors,
   findTraceMatches,
   percentile,
   readJsonLines,
   runWindow,
+  signalBarrier,
   summarize,
+  waitForBarrier,
   waitForUniqueTrace
 };
