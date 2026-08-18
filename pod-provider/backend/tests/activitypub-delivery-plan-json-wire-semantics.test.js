@@ -86,6 +86,6 @@ describe('ActivityPub Delivery Plan JSON wire semantics', () => {
     expect(() => sanitizeDeliveryActivity({ unsupported: Symbol('x') })).toThrow(/unsupported symbol/u);
     expect(() => sanitizeDeliveryActivity(new Array(1))).toThrow(/sparse array/u);
     expect(() => sanitizeDeliveryActivity({ value: Number.NaN })).toThrow(/non-finite/u);
-    expect(() => sanitizeDeliveryActivity({ value: new Date() })).toThrow(/non-JSON object/u);
+    expect(() => sanitizeDeliveryActivity({ value: new Date() })).toThrow(/non-JSON ActivityPub delivery object/u);
   });
 });
