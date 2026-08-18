@@ -5,13 +5,14 @@ const path = require('path');
 const {
   EXPECTED_VERSION,
   PATCH_MARKER,
+  LOCAL_READY_ACTIONS,
   findPackageRoot,
   locateControlledContainerSource,
   patchControlledContainerSource
 } = require('../scripts/patch-semapps-ldp-local-registry-bootstrap');
 
 describe('ADSP P2 SemApps LDP local bootstrap patch', () => {
-  test('targets only the bootstrap ldp.registry.register call to the local broker and is idempotent', () => {
+  test('waits for the complete local bootstrap chain, targets registration locally, guards the result, and is idempotent', () => {
     const source = [
       "module.exports = {",
       "  dependencies: ['ldp'],",
@@ -32,14 +33,26 @@ describe('ADSP P2 SemApps LDP local bootstrap patch', () => {
 
     const first = patchControlledContainerSource(source);
     expect(first.changed).toBe(true);
+    expect(first.source).toContain(PATCH_MARKER);
+    expect(first.source).toContain(JSON.stringify(LOCAL_READY_ACTIONS));
     expect(first.source).toContain(
-      `}, { nodeID: this.broker.nodeID } /* ${PATCH_MARKER} */);`
+      "this.broker.registry.getActionEndpointByNodeId(actionName, this.broker.nodeID)"
     );
-    expect(first.source.match(/ldp\.registry\.register/gu)).toHaveLength(1);
+    expect(first.source).toContain("}, { nodeID: this.broker.nodeID });");
+    expect(first.source).toContain("Local ldp.registry.register returned no registration object");
+    expect(first.source.match(/this\.broker\.call\('ldp\.registry\.register'/gu)).toHaveLength(1);
 
     const second = patchControlledContainerSource(first.source);
     expect(second.changed).toBe(false);
     expect(second.source).toBe(first.source);
+  });
+
+  test('requires all nested local state needed to expand short accepted types', () => {
+    expect(LOCAL_READY_ACTIONS).toEqual([
+      'ldp.registry.register',
+      'jsonld.parser.expandTypes',
+      'jsonld.context.get'
+    ]);
   });
 
   test('fails closed if the pinned ControlledContainer semantic shape drifts', () => {
@@ -57,7 +70,7 @@ describe('ADSP P2 SemApps LDP local bootstrap patch', () => {
     expect(() => patchControlledContainerSource(duplicate)).toThrow(/exactly one ldp\.registry\.register occurrence/u);
   });
 
-  test('the installed pinned SemApps artifact is actually patched after postinstall', () => {
+  test('the installed pinned SemApps artifact has the readiness barrier and local target after postinstall', () => {
     const packageRoot = findPackageRoot();
     const packageJson = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
     expect(packageJson.version).toBe(EXPECTED_VERSION);
@@ -66,5 +79,8 @@ describe('ADSP P2 SemApps LDP local bootstrap patch', () => {
     const source = fs.readFileSync(controlledContainerFile, 'utf8');
     expect(source).toContain(PATCH_MARKER);
     expect(source).toMatch(/nodeID\s*:\s*this\.broker\.nodeID/u);
+    for (const actionName of LOCAL_READY_ACTIONS) expect(source).toContain(actionName);
+    expect(source).toContain('getActionEndpointByNodeId');
+    expect(source).toContain('Local ldp.registry.register returned no registration object');
   });
 });
