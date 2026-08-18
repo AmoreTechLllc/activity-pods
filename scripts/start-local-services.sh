@@ -82,7 +82,24 @@ main() {
 
   LOG_DIR="$AP_ROOT/.logs"
   PID_DIR="$AP_ROOT/.pids"
+  AUTHORITY_PROFILE_FILE="$PID_DIR/activitypub-remote-authority-profile"
+  DESIRED_AUTHORITY_PROFILE="external-preview"
   mkdir -p "$LOG_DIR" "$PID_DIR"
+
+  # Authority is fixed at backend process startup. If this launcher previously
+  # started the backend under another profile, restart that managed process so
+  # a bootstrap upgrade cannot silently leave SemApps native authority alive.
+  cleanup_stale_pidfile "$PID_DIR/backend.pid"
+  if [ -f "$PID_DIR/backend.pid" ]; then
+    current_profile=$(cat "$AUTHORITY_PROFILE_FILE" 2>/dev/null || printf '%s' 'unknown')
+    if [ "$current_profile" != "$DESIRED_AUTHORITY_PROFILE" ]; then
+      log "ActivityPub authority profile changed (${current_profile} -> ${DESIRED_AUTHORITY_PROFILE}); restarting managed backend"
+      kill_pidfile "$PID_DIR/backend.pid" "ActivityPods backend"
+      rm -f "$AUTHORITY_PROFILE_FILE"
+    fi
+  elif is_port_listening 3000; then
+    fail "ActivityPods backend already listens on :3000 outside this launcher's managed pidfile; cannot verify or change its federation authority profile"
+  fi
 
   # Start the canonical sidecar before ActivityPods so normal startup does not
   # manufacture avoidable durable-handoff retry/backoff load.
@@ -91,6 +108,7 @@ main() {
 
   start_bg_if_needed "ActivityPods backend" 3000 "$LOG_DIR/backend-dev.log" "$PID_DIR/backend.pid" \
     npm --prefix "$AP_ROOT/pod-provider/backend" start
+  printf '%s\n' "$DESIRED_AUTHORITY_PROFILE" >"$AUTHORITY_PROFILE_FILE"
 
   start_bg_if_needed "ActivityPods frontend" "$FRONTEND_PORT" "$LOG_DIR/frontend-dev.log" "$PID_DIR/frontend.pid" \
     env BROWSER=none npm --prefix "$AP_ROOT/pod-provider/frontend" run dev
