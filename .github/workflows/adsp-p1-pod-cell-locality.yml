@@ -1,0 +1,210 @@
+name: ADSP P1 Pod Cell Locality
+
+on:
+  pull_request:
+    paths:
+      - 'pod-provider/backend/config/moleculer-fabric.js'
+      - 'pod-provider/backend/moleculer.config.js'
+      - 'pod-provider/backend/middlewares/adsp-action-locality.js'
+      - 'pod-provider/backend/p1-fixtures/services/locality-probe.service.js'
+      - 'pod-provider/backend/scripts/proof-adsp-p1-prefer-local.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-real-measure.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-warm-restart-ready.js'
+      - 'pod-provider/backend/tests/moleculer-fabric.test.js'
+      - 'pod-provider/docker-compose-test.yml'
+      - 'pod-provider/docker-compose-phase8.yml'
+      - 'pod-provider/docker-compose-adsp-p1-locality.yml'
+      - 'pod-provider/docker/backend.dockerfile'
+      - '.github/workflows/adsp-p1-pod-cell-locality.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adsp-p1-locality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  duplicate-cell-prefer-local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          cache: yarn
+          cache-dependency-path: pod-provider/backend/yarn.lock
+
+      - name: Prepare backend dependencies
+        working-directory: pod-provider/backend
+        run: |
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          sed -i 's#ssh://git@github.com/#https://github.com/#g' yarn.lock
+          sed -i 's#git+ssh://git@github.com/#git+https://github.com/#g' yarn.lock
+          sed -i 's#git@github.com:#https://github.com/#g' yarn.lock
+          yarn install
+
+      - name: Run duplicate-cell local-first proof
+        working-directory: pod-provider/backend
+        env:
+          SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379
+        run: node scripts/proof-adsp-p1-prefer-local.js
+
+  production-pod-cell-locality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: pod-provider
+    env:
+      APDM_P8_RUN_ID: 'adsp-p1-${{ github.run_id }}-${{ github.run_attempt }}'
+      APDM_P8_SAMPLES: '1'
+      APDM_P8_WARMUPS: '0'
+      APDM_P8_PROVISION_CONCURRENCY: '2'
+      APDM_P8_PROVISION_BATCH_SIZE: '10'
+      APDM_P8_BOOTSTRAP_CONCURRENCY: '4'
+      APDM_P9_CONCURRENCY: '4'
+      APDM_P10_DATASET_EXIST_MEMO_ENABLED: 'false'
+      APDM_P10_ARM: ''
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+
+      - name: Prepare isolated evidence directory
+        run: |
+          rm -rf measurements/adsp-p1
+          mkdir -p measurements/adsp-p1
+
+      - name: Build ActivityPods backend image
+        run: |
+          for attempt in 1 2 3; do
+            if docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml build backend; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo 'Backend image build failed after 3 attempts' >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+
+      - name: Start fresh supporting services
+        run: |
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test
+          mkdir -p data/fuseki_test data/redis_test
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml up -d fuseki_test redis mailcatcher
+          FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=60 ./scripts/fuseki-bootstrap.sh
+
+      - name: Provision ten fully bootstrapped local actors
+        env:
+          APDM_P8_ENABLED: 'false'
+          APDM_P8_COUNT: '0'
+        run: |
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml up -d --no-deps backend
+          ready=false
+          for attempt in $(seq 1 120); do
+            if curl -sS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then ready=true; break; fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            echo 'Backend did not become reachable for P1 fixture provisioning' >&2
+            exit 1
+          fi
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml exec -T backend \
+            node scripts/apdm-phase8-real-measure.js provision \
+              /app/backend/measurements/adsp-p1/actors.json 10
+
+      - name: Recreate clean measured Pod cell
+        env:
+          APDM_P8_ENABLED: 'true'
+          APDM_P8_COUNT: '10'
+        run: |
+          rm -f measurements/adsp-p1/pod-cell-locality.json
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml \
+            up -d --force-recreate --no-deps backend
+          ready=false
+          for attempt in $(seq 1 120); do
+            if curl -sS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then ready=true; break; fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            echo 'Measured P1 backend did not become reachable' >&2
+            exit 1
+          fi
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml exec -T backend \
+            node scripts/apdm-phase8-warm-restart-ready.js
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml exec -T backend \
+            node scripts/apdm-phase8-real-measure.js measure \
+              /app/backend/measurements/adsp-p1/actors.json 10 \
+              2>&1 | tee measurements/adsp-p1/tier1-locality-measure.log
+
+      - name: Gracefully stop backend and flush locality telemetry
+        run: |
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml stop -t 30 backend
+          for attempt in $(seq 1 30); do
+            if [ -s measurements/adsp-p1/pod-cell-locality.json ]; then break; fi
+            sleep 1
+          done
+          test -s measurements/adsp-p1/pod-cell-locality.json
+
+      - name: Validate production Pod cell stayed local
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const file = 'measurements/adsp-p1/pod-cell-locality.json';
+          const evidence = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (!(evidence.localExecutions > 0)) {
+            throw new Error(`Expected real local Moleculer executions, got ${evidence.localExecutions}`);
+          }
+          if (evidence.remoteCalls !== 0) {
+            throw new Error(`Production Pod/SemApps cell made ${evidence.remoteCalls} remote Moleculer calls: ${JSON.stringify(evidence.remoteByAction)}`);
+          }
+          if (Object.keys(evidence.remoteByAction || {}).length !== 0) {
+            throw new Error(`Remote action map must be empty: ${JSON.stringify(evidence.remoteByAction)}`);
+          }
+          if (Object.keys(evidence.localByAction || {}).length < 3) {
+            throw new Error('Representative Tier-1 run exercised too few local action names to establish locality');
+          }
+          console.log(JSON.stringify(evidence, null, 2));
+          NODE
+          cat measurements/adsp-p1/pod-cell-locality.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload P1 locality evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adsp-p1-pod-cell-locality-${{ github.run_id }}-${{ github.run_attempt }}
+          path: pod-provider/measurements/adsp-p1/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml logs --no-color --tail=500 backend fuseki_test redis || true
+
+      - name: Stop isolated stack
+        if: always()
+        run: |
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test
