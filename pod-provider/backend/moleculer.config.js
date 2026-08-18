@@ -20,7 +20,7 @@ const ApdmLocalDeliveryDatasetExistMemoMiddleware = require('./middlewares/apdm-
 const { createPhase8Tier1Instrumentation } = require('./lib/apdm-phase8-tier1-instrumentation');
 const CONFIG = require('./config/config');
 const errorHandler = require('./config/errorHandler');
-const RdfJSONSerializer = require('./RdfJSONSerializer');
+const { createMoleculerFabricConfig } = require('./config/moleculer-fabric');
 
 Error.stackTraceLimit = Infinity;
 
@@ -72,9 +72,12 @@ const middlewares = [
 // middleware stack is exactly the pre-P8 stack and no HTTP functions are patched.
 if (phase8Instrumentation.middleware) middlewares.push(phase8Instrumentation.middleware);
 
+const fabric = createMoleculerFabricConfig();
+
 /** @type {import('moleculer').BrokerOptions} */
 module.exports = {
-  nodeID: 'pod-provider',
+  nodeID: fabric.nodeID,
+  namespace: fabric.namespace,
   // You can set all ServiceBroker configurations here
   // See https://moleculer.services/docs/0.14/configuration.html
   middlewares,
@@ -97,6 +100,6 @@ module.exports = {
       }
     }
   ],
-  transporter: CONFIG.REDIS_TRANSPORTER_URL || undefined,
-  serializer: CONFIG.REDIS_TRANSPORTER_URL ? new RdfJSONSerializer() : undefined
+  transporter: fabric.transporter,
+  serializer: fabric.serializer
 };
