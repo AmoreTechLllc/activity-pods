@@ -23,6 +23,10 @@ function finitePositive(value, label) {
   return parsed;
 }
 
+function expectedExecutors(replicaCount) {
+  return Array.from({ length: replicaCount }, (_, index) => `r${index + 1}`);
+}
+
 function validateWindow(window, expected) {
   if (!window || window.phase !== 'ADSP-P2-A') throw new Error(`Invalid P2 window for ${expected.label}`);
   if (Number(window.replicaCount) !== expected.replicaCount) throw new Error(`Replica mismatch for ${expected.label}`);
@@ -36,10 +40,19 @@ function validateWindow(window, expected) {
   finitePositive(window.throughputPerSecond, `${expected.label} throughput`);
   finitePositive(window.completedMs?.p95, `${expected.label} completed p95`);
   finitePositive(window.completedMs?.p99, `${expected.label} completed p99`);
-  const executorTotal = Object.values(window.executorCounts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+
+  const counts = window.executorCounts || {};
+  const executorTotal = Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0);
   if (executorTotal !== Number(window.requestCount)) throw new Error(`Executor accounting mismatch in ${expected.label}`);
-  if (Object.keys(window.executorCounts || {}).some(name => !/^r[1-4]$/u.test(name))) {
-    throw new Error(`Unexpected executor identity in ${expected.label}`);
+  const expectedNames = expectedExecutors(expected.replicaCount);
+  const actualNames = Object.keys(counts).sort();
+  if (actualNames.some(name => !expectedNames.includes(name))) {
+    throw new Error(`Unexpected executor identity in ${expected.label}: ${actualNames.join(', ')}`);
+  }
+  for (const executor of expectedNames) {
+    if (!Number.isInteger(Number(counts[executor])) || Number(counts[executor]) <= 0) {
+      throw new Error(`Replica ${executor} executed no measured work in ${expected.label}`);
+    }
   }
   return window;
 }
@@ -175,6 +188,7 @@ module.exports = {
   buildSummary,
   collectResults,
   compareScale,
+  expectedExecutors,
   summarizeCase,
   validateWindow
 };
