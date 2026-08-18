@@ -40,21 +40,36 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.12.0'
-          cache: npm
-          cache-dependency-path: pod-provider/backend/package-lock.json
+          cache: yarn
+          cache-dependency-path: pod-provider/backend/yarn.lock
 
       - name: Enforce HTTPS for public Git dependencies
-        run: git config --global url."https://github.com/".insteadOf ssh://git@github.com/
+        working-directory: pod-provider/backend
+        run: |
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      - name: Normalize legacy SSH Git URLs in backend lockfile
+        working-directory: pod-provider/backend
+        run: |
+          if [ -f yarn.lock ]; then
+            sed -i 's#ssh://git@github.com/#https://github.com/#g' yarn.lock
+            sed -i 's#git+ssh://git@github.com/#git+https://github.com/#g' yarn.lock
+            sed -i 's#git@github.com:#https://github.com/#g' yarn.lock
+          fi
 
       - name: Install backend dependencies
-        run: npm ci --prefix pod-provider/backend
+        working-directory: pod-provider/backend
+        run: yarn install
 
       - name: Run fabric configuration tests
-        run: >-
-          node tests/node_modules/.bin/jest
-          --testEnvironment=node
-          --runInBand
-          pod-provider/backend/tests/moleculer-fabric.test.js
+        run: |
+          npm exec --yes \
+            --package=jest@29.7.0 \
+            --package=esbuild@0.25.4 \
+            --package=esbuild-jest@0.5.0 \
+            -- \
+            jest --testEnvironment=node --runInBand pod-provider/backend/tests/moleculer-fabric.test.js
 
       - name: Run genuine remote-call fabric proof
         working-directory: pod-provider/backend
