@@ -29,6 +29,15 @@ module.exports = createActivityPubServiceWithDeliveryStrategy({
     queueServiceUrl: CONFIG.QUEUE_SERVICE_URL,
     deliveryHandoffUrl: CONFIG.ACTIVITYPUB_DELIVERY_HANDOFF_URL,
     deliveryHandoffToken: CONFIG.ACTIVITYPUB_DELIVERY_HANDOFF_TOKEN,
-    deliveryHandoffTimeoutMs: CONFIG.ACTIVITYPUB_DELIVERY_HANDOFF_TIMEOUT_MS
+    deliveryHandoffTimeoutMs: CONFIG.ACTIVITYPUB_DELIVERY_HANDOFF_TIMEOUT_MS,
+    // Safe, non-secret operational state. Operators must be able to distinguish
+    // "sidecar is installed" from "sidecar is the active remote-delivery
+    // authority" without inferring it from queue traffic after deployment.
+    remoteDeliveryExecutor: authorityState.deliveryExecutor,
+    remoteDeliveryAuthorityProfile: authorityState.authorityProfile,
+    remoteDeliveryProductionCanonical: authorityState.productionCanonical,
+    sidecarDeliveryAuthority: authorityState.sidecarDeliveryAuthority,
+    externalAuthorityCutover: authorityState.authority,
+    externalDeliveryPreview: authorityState.preview
   }
 });
