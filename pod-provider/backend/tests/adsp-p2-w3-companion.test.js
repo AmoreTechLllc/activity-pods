@@ -2,10 +2,13 @@
 
 const fs = require('fs');
 const http = require('http');
+const os = require('os');
 const path = require('path');
 const {
+  CORRELATION_SCHEMA,
   createW3RunnerBroker,
-  validateNamespace
+  validateNamespace,
+  writeCorrelationEvidence
 } = require('../scripts/adsp-p2-w3-remote-origin-fixture');
 const {
   createLoopbackBridge,
@@ -51,6 +54,29 @@ describe('ADSP P2 W3 ActivityPods companion', () => {
     expect(broker.options.namespace).toBe('adsp-p2-w3-run-123');
     expect(broker.options.retryPolicy.enabled).toBe(false);
     expect(broker.options.nodeID).toMatch(/^adsp-p2-w3-remote-origin-test-run-/u);
+  });
+
+  test('writes request correlation separately from strict P0-compatible origin evidence', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-p2-w3-correlation-'));
+    try {
+      const output = path.join(root, 'correlation.json');
+      writeCorrelationEvidence(output, {
+        requestId: 'request-1',
+        activityId: 'https://pods.example/alice/as/activity/1',
+        moleculerNamespace: 'adsp-p2-w3-run-123'
+      });
+      const parsed = JSON.parse(fs.readFileSync(output, 'utf8'));
+      expect(parsed).toEqual({
+        schema: CORRELATION_SCHEMA,
+        requestId: 'request-1',
+        activityId: 'https://pods.example/alice/as/activity/1',
+        moleculerNamespace: 'adsp-p2-w3-run-123'
+      });
+      expect(fs.statSync(output).mode & 0o777).toBe(0o600);
+      expect(() => writeCorrelationEvidence(' bad', parsed)).toThrow(/output path/u);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test('keeps the bridge loopback-only and preserves the literal loopback Host authority upstream', async () => {
