@@ -50,6 +50,25 @@ describe('ADSP P2 horizontal resource evidence', () => {
     expect(() => deltaRedisCommandstats(after, before)).toThrow(/counter moved backwards/u);
   });
 
+  test('accepts Redis command names and trailing metrics added by newer Redis versions', () => {
+    const parsed = parseRedisCommandstats([
+      '# Commandstats',
+      'cmdstat_client|setname:calls=72,usec=104,usec_per_call=1.44,rejected_calls=0,failed_calls=0',
+      'cmdstat_scan:calls=8780,usec=252321,usec_per_call=28.74,rejected_calls=0,failed_calls=0,slowlog_count=1,slowlog_time_ms_sum=10.20,slowlog_time_ms_max=10.20',
+      ''
+    ].join('\n'));
+    expect(parsed['client|setname']).toEqual({ calls: 72, usec: 104, rejectedCalls: 0, failedCalls: 0 });
+    expect(parsed.scan).toEqual({ calls: 8780, usec: 252321, rejectedCalls: 0, failedCalls: 0 });
+  });
+
+  test('fails closed on malformed or incomplete Redis commandstats evidence', () => {
+    expect(() => parseRedisCommandstats('cmdstat_get:calls=1,usec=2,rejected_calls=0,failed_calls=0\n')).toThrow(/missing # Commandstats header/u);
+    expect(() => parseRedisCommandstats('# Commandstats\n')).toThrow(/contains no command counters/u);
+    expect(() => parseRedisCommandstats('# Commandstats\ncmdstat_get:calls=1,usec=2,rejected_calls=0\n')).toThrow(/missing failed_calls/u);
+    expect(() => parseRedisCommandstats('# Commandstats\ncmdstat_get:calls=x,usec=2,rejected_calls=0,failed_calls=0\n')).toThrow(/calls must be a non-negative integer/u);
+    expect(() => parseRedisCommandstats('# Commandstats\ncmdstat_get:calls=1,usec=2,rejected_calls=0,failed_calls=0,calls=2\n')).toThrow(/Duplicate Redis commandstats field calls/u);
+  });
+
   test('derives non-overlapping whole-system CPU and memory for a measured window', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-p2-resource-'));
     try {
