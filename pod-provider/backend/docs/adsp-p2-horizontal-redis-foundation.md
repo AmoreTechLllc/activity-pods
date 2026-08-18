@@ -8,25 +8,32 @@ The backend Docker image previously started PM2 with a direct hard-coded `molecu
 
 That Docker path bypassed validated service-group selection and the launcher's fail-closed fabric contract. The PM2 configuration now starts the same validated launcher used by `yarn start`, `yarn dev`, and `yarn test`. A regression test rejects a future return to hard-coded production service globs or direct runner startup.
 
-## SemApps local bootstrap locality
+## SemApps local bootstrap locality and semantic readiness
 
 The first real two-cell run exposed a startup race in the pinned `@semapps/ldp@1.1.4` `ControlledContainerMixin`.
 
-Its `started()` lifecycle hook calls `this.broker.call('ldp.registry.register', ...)` after declaring a generic `dependencies: ['ldp']`. Moleculer dependencies may be satisfied by either local or remote services. When replica 1 is already healthy, replica 2 can therefore enter a controlled-container `started()` hook before its own local LDP/JSON-LD ontology stack is ready and route that bootstrap registration to replica 1. The observed failure was a remote `ldp.registry.register` execution on `adsp-p2-pod-cell-1` that could not expand `vcard:Individual` / `Profile`, leaving replica 2 HTTP-reachable but without a complete production action registry.
+Its `started()` lifecycle hook calls `this.broker.call('ldp.registry.register', ...)` after declaring a generic `dependencies: ['ldp']`. Moleculer dependencies may be satisfied by either local or remote services. When replica 1 is already healthy, replica 2 can therefore enter a controlled-container `started()` hook before its own local LDP/JSON-LD ontology stack is semantically ready and route bootstrap work to replica 1.
 
-This is a bootstrap-state locality bug, not an intended distributed call. Every Pod/SemApps cell needs its own in-memory LDP registry populated from its own controlled-container startup hooks. ActivityPods therefore applies a narrow, version-pinned postinstall patch to `@semapps/ldp@1.1.4` that adds `{ nodeID: this.broker.nodeID }` only to the `ControlledContainerMixin.started()` call to `ldp.registry.register`.
+The first observed failure was a remote `ldp.registry.register` execution on `adsp-p2-pod-cell-1` that could not expand local compact types. Forcing that call to the local node removed the cross-node escape but revealed the deeper lifecycle issue: local action registration can exist before service-specific ontologies have been registered. SemApps' parent ActivityPub service, for example, registers the `as` and `sec` ontologies in its own `started()` hook while controlled-container child services created earlier may start concurrently.
 
-The patch:
+This is bootstrap-state locality/readiness work, not intended distributed traffic. Every Pod/SemApps cell needs its own in-memory LDP registry populated from its own semantic context. ActivityPods therefore applies a narrow, version-pinned postinstall patch to `@semapps/ldp@1.1.4` that replaces only the `ControlledContainerMixin.started()` bootstrap registration path.
+
+The patched path:
 
 - refuses any SemApps LDP version other than exactly 1.1.4;
-- locates exactly one semantic ControlledContainer artifact;
-- requires exactly one `ldp.registry.register` occurrence;
-- parses to the matching `broker.call(...)` close rather than depending on formatting;
+- locates exactly one semantic ControlledContainer artifact and exactly one `ldp.registry.register` call;
+- invokes the local `ldp.registry` service directly so bootstrap cannot escape to another replica;
+- treats the registration itself as the readiness probe;
+- retries only SemApps' explicit missing-ontology expansion condition (`Could not expand all types` / `Could not expand predicate`);
+- bounds that retry window to 30 seconds with 25 ms polling;
+- fails immediately for every other error;
+- requires a real registration object before continuing;
 - is idempotent and marker-protected;
-- fails closed on source drift;
-- leaves all normal runtime LDP calls on the standard local-first/distributed routing path.
+- leaves normal runtime LDP calls on the standard local-first/distributed routing path.
 
-This patch is intentionally upstreamable: SemApps controlled-container bootstrap registration is node-local state initialization and should not be satisfied by a remote replica merely because that replica is already discoverable.
+The retry is side-effect safe for the observed readiness condition because `ldp.registry.register` performs accepted-type expansion before mutating `registeredContainers` or performing container creation. A failed ontology expansion therefore does not partially register the controlled container.
+
+This patch is intentionally upstreamable: SemApps controlled-container bootstrap registration is node-local initialization and should wait for the semantic context required by its accepted types rather than being satisfied by a remote replica merely because that replica is already discoverable.
 
 ## Horizontal topology smoke
 
