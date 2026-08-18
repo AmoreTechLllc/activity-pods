@@ -53,6 +53,7 @@ jobs:
       - name: Prepare backend dependencies
         working-directory: pod-provider/backend
         run: |
+          set -euo pipefail
           git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           sed -i 's#ssh://git@github.com/#https://github.com/#g' yarn.lock
@@ -75,7 +76,7 @@ jobs:
     env:
       APDM_P8_RUN_ID: 'adsp-p1-${{ github.run_id }}-${{ github.run_attempt }}'
       APDM_P8_SAMPLES: '1'
-      APDM_P8_WARMUPS: '0'
+      APDM_P8_WARMUPS: '1'
       APDM_P8_PROVISION_CONCURRENCY: '2'
       APDM_P8_PROVISION_BATCH_SIZE: '10'
       APDM_P8_BOOTSTRAP_CONCURRENCY: '4'
@@ -92,11 +93,14 @@ jobs:
 
       - name: Prepare isolated evidence directory
         run: |
+          set -euo pipefail
           rm -rf measurements/adsp-p1
           mkdir -p measurements/adsp-p1
+          rm -f measurements/apdm-p8-10.jsonl
 
       - name: Build ActivityPods backend image
         run: |
+          set -euo pipefail
           for attempt in 1 2 3; do
             if docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml build backend; then
               exit 0
@@ -110,6 +114,7 @@ jobs:
 
       - name: Start fresh supporting services
         run: |
+          set -euo pipefail
           docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml down -v || true
           sudo rm -rf data/fuseki_test data/redis_test
           mkdir -p data/fuseki_test data/redis_test
@@ -121,6 +126,7 @@ jobs:
           APDM_P8_ENABLED: 'false'
           APDM_P8_COUNT: '0'
         run: |
+          set -euo pipefail
           docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml up -d --no-deps backend
           ready=false
           for attempt in $(seq 1 120); do
@@ -140,7 +146,8 @@ jobs:
           APDM_P8_ENABLED: 'true'
           APDM_P8_COUNT: '10'
         run: |
-          rm -f measurements/adsp-p1/pod-cell-locality.json
+          set -euo pipefail
+          rm -f measurements/adsp-p1/pod-cell-locality.json measurements/apdm-p8-10.jsonl
           docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml \
             up -d --force-recreate --no-deps backend
           ready=false
@@ -158,9 +165,12 @@ jobs:
             node scripts/apdm-phase8-real-measure.js measure \
               /app/backend/measurements/adsp-p1/actors.json 10 \
               2>&1 | tee measurements/adsp-p1/tier1-locality-measure.log
+          test -s measurements/apdm-p8-10.jsonl
+          cp measurements/apdm-p8-10.jsonl measurements/adsp-p1/tier1-locality-events.jsonl
 
       - name: Gracefully stop backend and flush locality telemetry
         run: |
+          set -euo pipefail
           docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml stop -t 30 backend
           for attempt in $(seq 1 30); do
             if [ -s measurements/adsp-p1/pod-cell-locality.json ]; then break; fi
@@ -170,6 +180,7 @@ jobs:
 
       - name: Validate production Pod cell stayed local
         run: |
+          set -euo pipefail
           node - <<'NODE'
           const fs = require('fs');
           const file = 'measurements/adsp-p1/pod-cell-locality.json';
@@ -185,6 +196,9 @@ jobs:
           }
           if (Object.keys(evidence.localByAction || {}).length < 3) {
             throw new Error('Representative Tier-1 run exercised too few local action names to establish locality');
+          }
+          if (!(evidence.localByAction?.['activitypub.outbox.post'] > 0)) {
+            throw new Error('Tier-1 locality evidence did not observe activitypub.outbox.post');
           }
           console.log(JSON.stringify(evidence, null, 2));
           NODE
