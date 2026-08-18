@@ -60,42 +60,63 @@ main() {
   : "${FRONTEND_PORT:=5000}"
   : "${OPENSEARCH_URL:=http://localhost:9200}"
 
-  export ACTIVITYPODS_URL
-  export ACTIVITYPODS_TOKEN
-  export SIDECAR_TOKEN
-  export REDPANDA_BROKERS
-  export MEDIA_PIPELINE_TOKEN
-  export MEDIA_PIPELINE_ALLOWED_SOURCE_ORIGINS
-  export MEDIA_PIPELINE_INGRESS_URL
-  export ACTIVITYPODS_MEDIA_SOURCE_BASE_URL
-  export ACTIVITYPODS_MEDIA_SOURCE_TOKEN
-  export ACTIVITYPODS_MEDIA_SOURCE_PATH
-  export ACTIVITYPODS_SIGNING_API_URL
-  export MEDIA_OBJECT_STORE_BACKEND
-  export MEDIA_OBJECT_ROOT
-  export MEDIA_OBJECT_PUBLIC_BASE_URL
-  export MEDIA_ASSET_TOPIC
-  export ENABLE_EVENT_PUBLISH
-  export ENABLE_MEDIA_ASSET_SYNC
-  export ENABLE_PROVIDER_CAPABILITIES_ENDPOINT
-  export OPENSEARCH_URL
+  # This launcher is the integrated ActivityPods + federation-sidecar workspace,
+  # not standalone core ActivityPods. In this development profile the sidecar
+  # is the single remote-delivery executor. Production still requires the
+  # explicit Phase 5 authority-cutover flag.
+  NODE_ENV=development
+  SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE=external
+  SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW=true
+  SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER=false
+  SIDECAR_DELIVERY_HANDOFF_URL=http://127.0.0.1:8080/webhook/outbox
+  SIDECAR_WEBHOOK_URL=http://127.0.0.1:8080
+
+  export ACTIVITYPODS_URL ACTIVITYPODS_TOKEN SIDECAR_TOKEN REDPANDA_BROKERS
+  export MEDIA_PIPELINE_TOKEN MEDIA_PIPELINE_ALLOWED_SOURCE_ORIGINS MEDIA_PIPELINE_INGRESS_URL
+  export ACTIVITYPODS_MEDIA_SOURCE_BASE_URL ACTIVITYPODS_MEDIA_SOURCE_TOKEN ACTIVITYPODS_MEDIA_SOURCE_PATH
+  export ACTIVITYPODS_SIGNING_API_URL MEDIA_OBJECT_STORE_BACKEND MEDIA_OBJECT_ROOT MEDIA_OBJECT_PUBLIC_BASE_URL
+  export MEDIA_ASSET_TOPIC ENABLE_EVENT_PUBLISH ENABLE_MEDIA_ASSET_SYNC ENABLE_PROVIDER_CAPABILITIES_ENDPOINT
+  export OPENSEARCH_URL NODE_ENV SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE
+  export SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER
+  export SIDECAR_DELIVERY_HANDOFF_URL SIDECAR_WEBHOOK_URL
 
   LOG_DIR="$AP_ROOT/.logs"
   PID_DIR="$AP_ROOT/.pids"
+  AUTHORITY_PROFILE_FILE="$PID_DIR/activitypub-remote-authority-profile"
+  DESIRED_AUTHORITY_PROFILE="external-preview"
   mkdir -p "$LOG_DIR" "$PID_DIR"
+
+  # Authority is fixed at backend process startup. If this launcher previously
+  # started the backend under another profile, restart that managed process so
+  # a bootstrap upgrade cannot silently leave SemApps native authority alive.
+  cleanup_stale_pidfile "$PID_DIR/backend.pid"
+  if [ -f "$PID_DIR/backend.pid" ]; then
+    current_profile=$(cat "$AUTHORITY_PROFILE_FILE" 2>/dev/null || printf '%s' 'unknown')
+    if [ "$current_profile" != "$DESIRED_AUTHORITY_PROFILE" ]; then
+      log "ActivityPub authority profile changed (${current_profile} -> ${DESIRED_AUTHORITY_PROFILE}); restarting managed backend"
+      kill_pidfile "$PID_DIR/backend.pid" "ActivityPods backend"
+      rm -f "$AUTHORITY_PROFILE_FILE"
+    fi
+  elif is_port_listening 3000; then
+    fail "ActivityPods backend already listens on :3000 outside this launcher's managed pidfile; cannot verify or change its federation authority profile"
+  fi
+
+  # Start the canonical sidecar before ActivityPods so normal startup does not
+  # manufacture avoidable durable-handoff retry/backoff load.
+  start_bg_if_needed "Fedify sidecar" 8080 "$LOG_DIR/sidecar-dev.log" "$PID_DIR/fedify-sidecar.pid" \
+    env PORT=8080 HOST=0.0.0.0 npm --prefix "$FEDIFY_ROOT" run server:dev
 
   start_bg_if_needed "ActivityPods backend" 3000 "$LOG_DIR/backend-dev.log" "$PID_DIR/backend.pid" \
     npm --prefix "$AP_ROOT/pod-provider/backend" start
+  printf '%s\n' "$DESIRED_AUTHORITY_PROFILE" >"$AUTHORITY_PROFILE_FILE"
 
   start_bg_if_needed "ActivityPods frontend" "$FRONTEND_PORT" "$LOG_DIR/frontend-dev.log" "$PID_DIR/frontend.pid" \
     env BROWSER=none npm --prefix "$AP_ROOT/pod-provider/frontend" run dev
 
-  start_bg_if_needed "Fedify sidecar" 8080 "$LOG_DIR/sidecar-dev.log" "$PID_DIR/fedify-sidecar.pid" \
-    env PORT=8080 HOST=0.0.0.0 npm --prefix "$FEDIFY_ROOT" run server:dev
-
   start_bg_if_needed "Media pipeline sidecar" "$MEDIA_PIPELINE_PORT" "$LOG_DIR/media-pipeline-dev.log" "$PID_DIR/media-pipeline-sidecar.pid" \
     env PORT="$MEDIA_PIPELINE_PORT" HOST="$MEDIA_PIPELINE_HOST" INTERNAL_BEARER_TOKEN="$MEDIA_PIPELINE_TOKEN" npm --prefix "$MEDIA_ROOT" run server:dev
 
+  log "ActivityPub remote delivery profile: sidecar external preview authority"
   log "local source services are healthy"
 }
 
