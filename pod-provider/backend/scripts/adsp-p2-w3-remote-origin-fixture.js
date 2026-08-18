@@ -1,6 +1,8 @@
 'use strict';
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { ServiceBroker } = require('moleculer');
 const {
   awaitActorBootstrap,
@@ -18,6 +20,7 @@ const DEFAULT_BASE_URL = 'http://localhost:3000';
 const DEFAULT_TRANSPORTER_URL = 'redis://127.0.0.1:6379/12';
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_EVIDENCE_TIMEOUT_MS = 120_000;
+const CORRELATION_SCHEMA = 'adsp.p2.w3.origin-correlation.v1';
 
 function positiveInteger(value, fallback, label) {
   const parsed = Number(value === undefined ? fallback : value);
@@ -44,9 +47,31 @@ function createW3RunnerBroker(transporterUrl, runId, namespace) {
   });
 }
 
+function writeCorrelationEvidence(filePath, evidence) {
+  if (!filePath) return;
+  if (typeof filePath !== 'string' || filePath.trim() !== filePath || filePath.length === 0 || /[\r\n\0]/u.test(filePath)) {
+    throw new Error('ADSP P2 W3 correlation output path must be an exact non-empty path');
+  }
+  const record = {
+    schema: CORRELATION_SCHEMA,
+    requestId: evidence.requestId,
+    activityId: evidence.activityId,
+    moleculerNamespace: validateNamespace(evidence.moleculerNamespace)
+  };
+  for (const [name, value] of Object.entries(record)) {
+    if (typeof value !== 'string' || value.length === 0) throw new Error(`ADSP P2 W3 correlation ${name} is required`);
+  }
+  const outputPath = path.resolve(filePath);
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  const temporary = `${outputPath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  fs.renameSync(temporary, outputPath);
+}
+
 async function runW3RemoteOriginFixture({
   remoteActorUri,
   namespace = process.env.ADSP_P2_NAMESPACE,
+  correlationOutput = process.env.ADSP_P2_W3_CORRELATION_OUTPUT,
   baseUrl = process.env.ADSP_P2_W3_BACKEND_BASE_URL || DEFAULT_BASE_URL,
   transporterUrl = process.env.SEMAPPS_REDIS_TRANSPORTER_URL || DEFAULT_TRANSPORTER_URL,
   readyTimeoutMs = positiveInteger(process.env.ADSP_P2_W3_READY_TIMEOUT_MS, DEFAULT_READY_TIMEOUT_MS, 'ready timeout'),
@@ -77,6 +102,7 @@ async function runW3RemoteOriginFixture({
     await awaitActorBootstrap(broker, sender, 'outbox', readyTimeoutMs);
     senderWebIdRef.value = sender.webId;
 
+    const requestId = `adsp-p2-w3-origin-${crypto.randomBytes(12).toString('hex')}`;
     latch.arm();
     const [postResult, plannedEvent] = await Promise.all([
       broker.call(
@@ -91,7 +117,7 @@ async function runW3RemoteOriginFixture({
         },
         {
           meta: { webId: sender.webId, dataset: sender.username },
-          requestID: `adsp-p2-w3-origin-${crypto.randomBytes(12).toString('hex')}`
+          requestID: requestId
         }
       ),
       latch.promise
@@ -103,11 +129,16 @@ async function runW3RemoteOriginFixture({
       remoteActorUri: normalizedRemoteActorUri,
       senderWebId: sender.webId
     });
+    writeCorrelationEvidence(correlationOutput, {
+      requestId,
+      activityId: evidence.activityId,
+      moleculerNamespace: normalizedNamespace
+    });
 
+    // Keep stdout/parser compatibility with the strict P0 origin schema. W3
+    // correlation metadata is intentionally written to a separate artifact.
     return {
       ...evidence,
-      adspPhase: 'ADSP-P2-W3',
-      moleculerNamespace: normalizedNamespace,
       senderUsername: sender.username
     };
   } finally {
@@ -132,7 +163,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+  CORRELATION_SCHEMA,
   createW3RunnerBroker,
   runW3RemoteOriginFixture,
-  validateNamespace
+  validateNamespace,
+  writeCorrelationEvidence
 };
