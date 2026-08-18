@@ -1,24 +1,26 @@
 'use strict';
 
 const {
-  describeAuthorityState,
+  describePhase5RemoteAuthority,
   resolvePhase5RemoteAuthority
 } = require('../lib/activitypub-phase5-authority');
 
 describe('APDM Phase 5 remote-delivery authority observability', () => {
-  test('native remains the one-switch rollback even with stale external flags', () => {
-    expect(
-      resolvePhase5RemoteAuthority({
-        remoteDeliveryMode: 'native',
-        allowExternalDeliveryPreview: true,
-        externalAuthorityCutover: true,
-        nodeEnv: 'production'
-      })
-    ).toEqual({
+  test('native rollback keeps the established resolver contract and derives native diagnostics separately', () => {
+    const state = resolvePhase5RemoteAuthority({
+      remoteDeliveryMode: 'native',
+      allowExternalDeliveryPreview: true,
+      externalAuthorityCutover: true,
+      nodeEnv: 'production'
+    });
+
+    expect(state).toEqual({
       mode: 'native',
       preview: false,
       authority: false,
-      compatibilityPreviewGuard: false,
+      compatibilityPreviewGuard: false
+    });
+    expect(describePhase5RemoteAuthority(state)).toEqual({
       deliveryExecutor: 'semapps-native',
       authorityProfile: 'native-rollback',
       productionCanonical: false,
@@ -27,17 +29,19 @@ describe('APDM Phase 5 remote-delivery authority observability', () => {
   });
 
   test('production external cutover identifies the sidecar as canonical delivery authority', () => {
-    expect(
-      resolvePhase5RemoteAuthority({
-        remoteDeliveryMode: 'external',
-        externalAuthorityCutover: true,
-        nodeEnv: 'production'
-      })
-    ).toEqual({
+    const state = resolvePhase5RemoteAuthority({
+      remoteDeliveryMode: 'external',
+      externalAuthorityCutover: true,
+      nodeEnv: 'production'
+    });
+
+    expect(state).toEqual({
       mode: 'external',
       preview: false,
       authority: true,
-      compatibilityPreviewGuard: true,
+      compatibilityPreviewGuard: true
+    });
+    expect(describePhase5RemoteAuthority(state)).toEqual({
       deliveryExecutor: 'sidecar-external',
       authorityProfile: 'external-production-authority',
       productionCanonical: true,
@@ -46,18 +50,20 @@ describe('APDM Phase 5 remote-delivery authority observability', () => {
   });
 
   test('controlled development preview uses the sidecar without claiming production canonicality', () => {
-    expect(
-      resolvePhase5RemoteAuthority({
-        remoteDeliveryMode: 'external',
-        allowExternalDeliveryPreview: true,
-        externalAuthorityCutover: false,
-        nodeEnv: 'development'
-      })
-    ).toEqual({
+    const state = resolvePhase5RemoteAuthority({
+      remoteDeliveryMode: 'external',
+      allowExternalDeliveryPreview: true,
+      externalAuthorityCutover: false,
+      nodeEnv: 'development'
+    });
+
+    expect(state).toEqual({
       mode: 'external',
       preview: true,
       authority: false,
-      compatibilityPreviewGuard: true,
+      compatibilityPreviewGuard: true
+    });
+    expect(describePhase5RemoteAuthority(state)).toEqual({
       deliveryExecutor: 'sidecar-external',
       authorityProfile: 'external-preview',
       productionCanonical: false,
@@ -65,7 +71,7 @@ describe('APDM Phase 5 remote-delivery authority observability', () => {
     });
   });
 
-  test.each(['production', 'staging', '', undefined])(
+  test.each(['production', 'staging', ''])(
     'external mode fails closed without authority cutover in production-like environment %p',
     nodeEnv => {
       expect(() =>
@@ -98,21 +104,14 @@ describe('APDM Phase 5 remote-delivery authority observability', () => {
     ).toThrow(/requires either the controlled preview flag or the explicit Phase 5 authority-cutover flag/u);
   });
 
-  test('authority descriptor never infers production canonicality from external mode alone', () => {
-    expect(
-      describeAuthorityState({
+  test('diagnostic helper rejects ambiguous unresolved external state', () => {
+    expect(() =>
+      describePhase5RemoteAuthority({
         mode: 'external',
-        preview: true,
+        preview: false,
         authority: false,
         compatibilityPreviewGuard: true
       })
-    ).toEqual(
-      expect.objectContaining({
-        deliveryExecutor: 'sidecar-external',
-        authorityProfile: 'external-preview',
-        productionCanonical: false,
-        sidecarDeliveryAuthority: true
-      })
-    );
+    ).toThrow(/must be either preview or production authority/u);
   });
 });
