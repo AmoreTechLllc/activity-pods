@@ -2,7 +2,10 @@ const CONFIG = require('../../config/config');
 const {
   createActivityPubServiceWithDeliveryStrategy
 } = require('../../lib/activitypub-service-with-delivery-strategy');
-const { resolvePhase5RemoteAuthority } = require('../../lib/activitypub-phase5-authority');
+const {
+  describePhase5RemoteAuthority,
+  resolvePhase5RemoteAuthority
+} = require('../../lib/activitypub-phase5-authority');
 const {
   enqueueDeliveryHandoffWithObservation
 } = require('../../lib/activitypub-phase5-observation-handoff');
@@ -12,6 +15,7 @@ const authorityState = resolvePhase5RemoteAuthority({
   allowExternalDeliveryPreview: CONFIG.ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW,
   externalAuthorityCutover: CONFIG.ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER
 });
+const authorityDiagnostic = describePhase5RemoteAuthority(authorityState);
 
 const activityPubService = createActivityPubServiceWithDeliveryStrategy({
   remoteDeliveryMode: authorityState.mode,
@@ -33,10 +37,10 @@ const activityPubService = createActivityPubServiceWithDeliveryStrategy({
     // Safe, non-secret operational state. Operators must be able to distinguish
     // "sidecar is installed" from "sidecar is the active remote-delivery
     // authority" without inferring it from queue traffic after deployment.
-    remoteDeliveryExecutor: authorityState.deliveryExecutor,
-    remoteDeliveryAuthorityProfile: authorityState.authorityProfile,
-    remoteDeliveryProductionCanonical: authorityState.productionCanonical,
-    sidecarDeliveryAuthority: authorityState.sidecarDeliveryAuthority,
+    remoteDeliveryExecutor: authorityDiagnostic.deliveryExecutor,
+    remoteDeliveryAuthorityProfile: authorityDiagnostic.authorityProfile,
+    remoteDeliveryProductionCanonical: authorityDiagnostic.productionCanonical,
+    sidecarDeliveryAuthority: authorityDiagnostic.sidecarDeliveryAuthority,
     externalAuthorityCutover: authorityState.authority,
     externalDeliveryPreview: authorityState.preview
   }
@@ -45,15 +49,15 @@ const activityPubService = createActivityPubServiceWithDeliveryStrategy({
 const createActivityPubSubservices = activityPubService.created;
 activityPubService.created = function createdWithAuthorityDiagnostic() {
   this.logger.info('ActivityPub remote delivery authority resolved', {
-    executor: authorityState.deliveryExecutor,
-    profile: authorityState.authorityProfile,
-    productionCanonical: authorityState.productionCanonical,
-    sidecarDeliveryAuthority: authorityState.sidecarDeliveryAuthority,
+    executor: authorityDiagnostic.deliveryExecutor,
+    profile: authorityDiagnostic.authorityProfile,
+    productionCanonical: authorityDiagnostic.productionCanonical,
+    sidecarDeliveryAuthority: authorityDiagnostic.sidecarDeliveryAuthority,
     externalAuthorityCutover: authorityState.authority,
     externalDeliveryPreview: authorityState.preview
   });
 
-  if (!authorityState.sidecarDeliveryAuthority) {
+  if (!authorityDiagnostic.sidecarDeliveryAuthority) {
     this.logger.warn(
       'ActivityPub remote delivery remains under SemApps native authority; the federation sidecar is observation-only until explicit external authority cutover.'
     );
