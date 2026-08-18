@@ -1,0 +1,93 @@
+name: APDM Pre-createJob Benchmark
+
+on:
+  pull_request:
+    paths:
+      - 'pod-provider/backend/scripts/apdm-pre-createjob-benchmark.js'
+      - 'pod-provider/backend/tests/apdm-pre-createjob-benchmark.test.js'
+      - '.github/workflows/apdm-pre-createjob-benchmark.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pod-provider/backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+          cache-dependency-path: pod-provider/backend/yarn.lock
+
+      - name: Enforce HTTPS for public Git dependencies
+        run: |
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      - name: Normalize legacy SSH Git URLs in backend lockfile
+        run: |
+          if [ -f yarn.lock ]; then
+            sed -i 's#ssh://git@github.com/#https://github.com/#g' yarn.lock
+            sed -i 's#git+ssh://git@github.com/#git+https://github.com/#g' yarn.lock
+            sed -i 's#git@github.com:#https://github.com/#g' yarn.lock
+          fi
+
+      - name: Install backend dependencies
+        run: yarn install
+
+      - name: Freeze benchmark contract tests
+        working-directory: .
+        run: |
+          npm exec --yes \
+            --package=jest@29.7.0 \
+            -- \
+            jest --testEnvironment=node \
+              pod-provider/backend/tests/apdm-pre-createjob-benchmark.test.js \
+              --runInBand
+
+      - name: Run planning-tail benchmark
+        env:
+          APDM_PRE_CREATEJOB_BENCHMARK_OUTPUT: ../../../measurements/apdm-pre-createjob/benchmark.json
+        run: |
+          mkdir -p ../../../measurements/apdm-pre-createjob
+          node --expose-gc scripts/apdm-pre-createjob-benchmark.js | tee ../../../measurements/apdm-pre-createjob/benchmark.stdout.json
+
+      - name: Validate benchmark evidence
+        working-directory: .
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = 'measurements/apdm-pre-createjob/benchmark.json';
+          const result = JSON.parse(fs.readFileSync(path, 'utf8'));
+          if (result.schema !== 'apdm-pre-createjob-benchmark.v1') throw new Error('Unexpected benchmark schema');
+          if (!Array.isArray(result.cases) || result.cases.length !== 5) throw new Error('Expected five fanout cases');
+          const expected = [10, 100, 1000, 5000, 10000];
+          if (JSON.stringify(result.cases.map(c => c.fanout)) !== JSON.stringify(expected)) {
+            throw new Error('Unexpected fanout matrix');
+          }
+          for (const sample of result.cases) {
+            if (!Number.isFinite(sample.current.wallMs.p95) || !Number.isFinite(sample.preCreateJob.wallMs.p95)) {
+              throw new Error(`Missing p95 evidence for N=${sample.fanout}`);
+            }
+            if (sample.constructionBytes.currentCapturedJobJsonBytes <= sample.constructionBytes.directRecipientVectorJsonBytes) {
+              throw new Error(`Expected current representation overhead for N=${sample.fanout}`);
+            }
+          }
+          NODE
+
+      - name: Upload benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: apdm-pre-createjob-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: measurements/apdm-pre-createjob/
+          if-no-files-found: error
+          retention-days: 30
