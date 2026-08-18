@@ -11,10 +11,12 @@ This proof closes the Phase-1 requirement that broker node loss/rejoin must not 
 3. a second worker advertising the same action joins the same namespace;
 4. the original serving process is terminated with `SIGKILL` before it can answer;
 5. the caller must observe failure/uncertainty rather than a false success;
-6. after registry convergence, the original token must still appear exactly once and must not have been replayed onto the surviving endpoint;
+6. after registry convergence, the original token must still appear exactly once for a replay-observation horizon longer than the full original request timeout;
 7. the killed node ID then rejoins and successfully serves a new, distinct mutation exactly once.
 
 The mutation journal is a test authority boundary. It is intentionally external to the killed worker and each record is synchronously written and `fsync`'d before the worker blocks, so process loss after that point cannot erase whether the mutation occurred.
+
+The replay horizon is intentionally tied to the request contract rather than a short fixed sleep. The proof currently uses a 7-second request timeout and then requires the authoritative mutation count to remain exactly one for an additional 8 seconds after the caller has observed failure. Any duplicate that appears during that bounded horizon fails the proof immediately.
 
 ## Acceptance criteria
 
@@ -23,7 +25,7 @@ The proof fails unless all of the following are true:
 - the first mutation is committed exactly once on the original serving node before failure injection;
 - a second eligible service endpoint is present before the original node is killed;
 - the original caller does not receive a successful response after the serving process is killed;
-- the original mutation token remains exactly once after registry convergence and an additional replay-observation window;
+- the original mutation token remains exactly once after registry convergence and throughout the full replay-observation horizon;
 - the surviving endpoint never receives a silent replay of that token;
 - the killed node ID can rejoin after stale-registry convergence;
 - a fresh post-rejoin mutation succeeds exactly once on the rejoined node.
