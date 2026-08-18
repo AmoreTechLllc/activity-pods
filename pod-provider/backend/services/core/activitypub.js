@@ -13,7 +13,7 @@ const authorityState = resolvePhase5RemoteAuthority({
   externalAuthorityCutover: CONFIG.ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER
 });
 
-module.exports = createActivityPubServiceWithDeliveryStrategy({
+const activityPubService = createActivityPubServiceWithDeliveryStrategy({
   remoteDeliveryMode: authorityState.mode,
   // Phase 2-4 adapter compatibility latch. In production authority mode this is
   // enabled only after resolvePhase5RemoteAuthority has validated the explicit
@@ -41,3 +41,25 @@ module.exports = createActivityPubServiceWithDeliveryStrategy({
     externalDeliveryPreview: authorityState.preview
   }
 });
+
+const createActivityPubSubservices = activityPubService.created;
+activityPubService.created = function createdWithAuthorityDiagnostic() {
+  this.logger.info('ActivityPub remote delivery authority resolved', {
+    executor: authorityState.deliveryExecutor,
+    profile: authorityState.authorityProfile,
+    productionCanonical: authorityState.productionCanonical,
+    sidecarDeliveryAuthority: authorityState.sidecarDeliveryAuthority,
+    externalAuthorityCutover: authorityState.authority,
+    externalDeliveryPreview: authorityState.preview
+  });
+
+  if (!authorityState.sidecarDeliveryAuthority) {
+    this.logger.warn(
+      'ActivityPub remote delivery remains under SemApps native authority; the federation sidecar is observation-only until explicit external authority cutover.'
+    );
+  }
+
+  return createActivityPubSubservices.call(this);
+};
+
+module.exports = activityPubService;
