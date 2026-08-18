@@ -8,6 +8,7 @@ const {
   CORRELATION_SCHEMA,
   createW3RunnerBroker,
   validateNamespace,
+  validateReplicaCount,
   writeCorrelationEvidence
 } = require('../scripts/adsp-p2-w3-remote-origin-fixture');
 const {
@@ -44,11 +45,13 @@ function request(url, options = {}) {
 }
 
 describe('ADSP P2 W3 ActivityPods companion', () => {
-  test('requires an explicit safe namespace and applies it to the independent runner broker', () => {
+  test('requires an explicit safe namespace and exact 1/2/4 topology contract', () => {
     expect(validateNamespace('adsp-p2-w3-run-123')).toBe('adsp-p2-w3-run-123');
     for (const value of [undefined, '', ' bad', 'bad ', 'bad\nname', 'bad\0name']) {
       expect(() => validateNamespace(value)).toThrow(/namespace/u);
     }
+    for (const value of [1, 2, 4, '4']) expect(validateReplicaCount(value)).toBe(Number(value));
+    for (const value of [undefined, 0, 3, 5, '2.0']) expect(() => validateReplicaCount(value)).toThrow(/replicas/u);
 
     const broker = createW3RunnerBroker('redis://127.0.0.1:6379/12', 'test-run', 'adsp-p2-w3-run-123');
     expect(broker.options.namespace).toBe('adsp-p2-w3-run-123');
@@ -63,17 +66,20 @@ describe('ADSP P2 W3 ActivityPods companion', () => {
       writeCorrelationEvidence(output, {
         requestId: 'request-1',
         activityId: 'https://pods.example/alice/as/activity/1',
-        moleculerNamespace: 'adsp-p2-w3-run-123'
+        moleculerNamespace: 'adsp-p2-w3-run-123',
+        expectedReplicas: 4
       });
       const parsed = JSON.parse(fs.readFileSync(output, 'utf8'));
       expect(parsed).toEqual({
         schema: CORRELATION_SCHEMA,
         requestId: 'request-1',
         activityId: 'https://pods.example/alice/as/activity/1',
-        moleculerNamespace: 'adsp-p2-w3-run-123'
+        moleculerNamespace: 'adsp-p2-w3-run-123',
+        expectedReplicas: 4
       });
       expect(fs.statSync(output).mode & 0o777).toBe(0o600);
       expect(() => writeCorrelationEvidence(' bad', parsed)).toThrow(/output path/u);
+      expect(() => writeCorrelationEvidence(output, { ...parsed, expectedReplicas: 3 })).toThrow(/replicas/u);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
