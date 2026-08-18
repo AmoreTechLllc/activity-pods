@@ -90,6 +90,12 @@ function createMoleculerFabricConfig(env = process.env) {
     nodeID,
     namespace,
     transporter: transporterUrl || undefined,
+    // Pin Moleculer's local-first routing contract explicitly. Tightly coupled
+    // services that exist inside the same Pod/SemApps cell must never take a
+    // remote hop merely because another cell advertises the same action.
+    registry: {
+      preferLocal: true
+    },
     // Keep RDF/JSON-LD serialization semantics identical regardless of whether
     // this broker currently has a transporter. Phase 1 must not couple semantic
     // behavior to the selected transporter technology.
