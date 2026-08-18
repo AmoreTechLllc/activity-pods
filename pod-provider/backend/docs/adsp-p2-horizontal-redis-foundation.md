@@ -8,6 +8,26 @@ The backend Docker image previously started PM2 with a direct hard-coded `molecu
 
 That Docker path bypassed validated service-group selection and the launcher's fail-closed fabric contract. The PM2 configuration now starts the same validated launcher used by `yarn start`, `yarn dev`, and `yarn test`. A regression test rejects a future return to hard-coded production service globs or direct runner startup.
 
+## SemApps local bootstrap locality
+
+The first real two-cell run exposed a startup race in the pinned `@semapps/ldp@1.1.4` `ControlledContainerMixin`.
+
+Its `started()` lifecycle hook calls `this.broker.call('ldp.registry.register', ...)` after declaring a generic `dependencies: ['ldp']`. Moleculer dependencies may be satisfied by either local or remote services. When replica 1 is already healthy, replica 2 can therefore enter a controlled-container `started()` hook before its own local LDP/JSON-LD ontology stack is ready and route that bootstrap registration to replica 1. The observed failure was a remote `ldp.registry.register` execution on `adsp-p2-pod-cell-1` that could not expand `vcard:Individual` / `Profile`, leaving replica 2 HTTP-reachable but without a complete production action registry.
+
+This is a bootstrap-state locality bug, not an intended distributed call. Every Pod/SemApps cell needs its own in-memory LDP registry populated from its own controlled-container startup hooks. ActivityPods therefore applies a narrow, version-pinned postinstall patch to `@semapps/ldp@1.1.4` that adds `{ nodeID: this.broker.nodeID }` only to the `ControlledContainerMixin.started()` call to `ldp.registry.register`.
+
+The patch:
+
+- refuses any SemApps LDP version other than exactly 1.1.4;
+- locates exactly one semantic ControlledContainer artifact;
+- requires exactly one `ldp.registry.register` occurrence;
+- parses to the matching `broker.call(...)` close rather than depending on formatting;
+- is idempotent and marker-protected;
+- fails closed on source drift;
+- leaves all normal runtime LDP calls on the standard local-first/distributed routing path.
+
+This patch is intentionally upstreamable: SemApps controlled-container bootstrap registration is node-local state initialization and should not be satisfied by a remote replica merely because that replica is already discoverable.
+
 ## Horizontal topology smoke
 
 `docker-compose-adsp-p2-horizontal.yml` defines four explicit production `pod-cell` identities:
