@@ -1,0 +1,362 @@
+name: ADSP P2 Horizontal Redis Comparator
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/adsp-p2-horizontal-redis-comparator.yml'
+      - 'pod-provider/backend/scripts/adsp-p2-horizontal-load.js'
+      - 'pod-provider/backend/scripts/adsp-p2-horizontal-summarize.js'
+      - 'pod-provider/backend/scripts/adsp-p2-provision.js'
+      - 'pod-provider/backend/tests/adsp-p2-horizontal-load.test.js'
+      - 'pod-provider/backend/tests/adsp-p2-horizontal-summarize.test.js'
+      - 'pod-provider/docker-compose-adsp-p2-horizontal.yml'
+      - 'pod-provider/docker-compose-phase8.yml'
+      - 'pod-provider/docker-compose-test.yml'
+      - 'pod-provider/docker/backend.dockerfile'
+  workflow_dispatch:
+    inputs:
+      recipient_counts:
+        description: Comma-separated canonical recipient counts for decision evidence
+        required: false
+        default: '10,100'
+      samples:
+        description: Measured windows per replica/count case (locked minimum is 5)
+        required: false
+        default: '5'
+      requests_per_window:
+        description: Completed application outcomes per measured window
+        required: false
+        default: '8'
+      concurrency:
+        description: Maximum concurrent completed outcomes offered to every replica arm
+        required: false
+        default: '8'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adsp-p2-horizontal-comparator-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  horizontal-redis-comparator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        working-directory: pod-provider
+    env:
+      ADSP_P2_NAMESPACE: 'adsp-p2-compare-${{ github.run_id }}-${{ github.run_attempt }}'
+      APDM_P8_RUN_ID: 'adsp-p2-${{ github.run_id }}-${{ github.run_attempt }}'
+      APDM_P8_PROVISION_CONCURRENCY: '4'
+      APDM_P8_PROVISION_BATCH_SIZE: '24'
+      APDM_P8_BOOTSTRAP_CONCURRENCY: '8'
+      APDM_P9_CONCURRENCY: '4'
+      APDM_P10_DATASET_EXIST_MEMO_ENABLED: 'false'
+      REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED: 'false'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+
+      - name: Resolve smoke versus evidence parameters
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]]; then
+            counts='${{ github.event.inputs.recipient_counts }}'
+            samples='${{ github.event.inputs.samples }}'
+            requests='${{ github.event.inputs.requests_per_window }}'
+            concurrency='${{ github.event.inputs.concurrency }}'
+            evidence=true
+          else
+            counts='10'
+            samples='1'
+            requests='2'
+            concurrency='2'
+            evidence=false
+          fi
+
+          node - "$counts" "$samples" "$requests" "$concurrency" "$evidence" <<'NODE' > /tmp/adsp-p2-params
+          const [countsRaw, samplesRaw, requestsRaw, concurrencyRaw, evidenceRaw] = process.argv.slice(2);
+          const counts = countsRaw.split(',').map(v => Number(v.trim()));
+          if (counts.length === 0 || counts.some(v => ![10, 100, 200, 1000].includes(v))) throw new Error('recipient_counts must be a non-empty subset of 10,100,200,1000');
+          for (const [name, raw] of [['samples', samplesRaw], ['requests', requestsRaw], ['concurrency', concurrencyRaw]]) {
+            const value = Number(raw);
+            if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
+          }
+          if (Number(concurrencyRaw) > Number(requestsRaw)) throw new Error('concurrency cannot exceed requests_per_window');
+          if (evidenceRaw === 'true' && Number(samplesRaw) < 5) throw new Error('Decision evidence requires at least five measured windows per case');
+          console.log(`ADSP_P2_RECIPIENT_COUNTS=${counts.join(',')}`);
+          console.log(`ADSP_P2_MAX_RECIPIENTS=${Math.max(...counts)}`);
+          console.log(`ADSP_P2_SAMPLES=${samplesRaw}`);
+          console.log(`ADSP_P2_REQUESTS=${requestsRaw}`);
+          console.log(`ADSP_P2_CONCURRENCY=${concurrencyRaw}`);
+          console.log(`ADSP_P2_EVIDENCE_MODE=${evidenceRaw}`);
+          NODE
+          cat /tmp/adsp-p2-params >> "$GITHUB_ENV"
+          cat /tmp/adsp-p2-params
+
+      - name: Prepare evidence directories
+        run: |
+          set -euo pipefail
+          sudo rm -rf measurements/adsp-p2 data/fuseki_test data/redis_test
+          mkdir -p measurements/adsp-p2/results measurements/adsp-p2/runtime measurements/adsp-p2/seed
+          mkdir -p data/fuseki_test data/redis_test
+
+      - name: Build production backend image once
+        run: |
+          set -euo pipefail
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            build backend
+
+      - name: Record immutable comparator provenance
+        run: |
+          set -euo pipefail
+          export BACKEND_IMAGE_ID="$(docker image inspect apdm-phase8-backend:local --format '{{.Id}}')"
+          node - <<'NODE' > measurements/adsp-p2/environment.json
+          const os = require('os');
+          const cpus = os.cpus();
+          const manifest = {
+            version: 1,
+            phase: 'ADSP-P2-A',
+            fixture: 'tier1-horizontal-local-fanout',
+            commitSha: process.env.GITHUB_SHA,
+            workflowRunId: process.env.GITHUB_RUN_ID,
+            runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            eventName: process.env.GITHUB_EVENT_NAME,
+            evidenceMode: process.env.ADSP_P2_EVIDENCE_MODE === 'true',
+            runnerOs: process.env.RUNNER_OS,
+            runnerArch: process.env.RUNNER_ARCH,
+            imageOs: process.env.ImageOS || 'unknown',
+            imageVersion: process.env.ImageVersion || 'unknown',
+            node: process.version,
+            hostCpuModel: cpus[0]?.model || 'unknown',
+            hostCpuCount: cpus.length,
+            hostTotalMemoryBytes: os.totalmem(),
+            backendImageId: process.env.BACKEND_IMAGE_ID,
+            transporter: 'redis',
+            replicas: [1, 2, 4],
+            recipientCounts: process.env.ADSP_P2_RECIPIENT_COUNTS.split(',').map(Number),
+            samplesPerCase: Number(process.env.ADSP_P2_SAMPLES),
+            requestsPerWindow: Number(process.env.ADSP_P2_REQUESTS),
+            offeredConcurrency: Number(process.env.ADSP_P2_CONCURRENCY),
+            localDeliveryConcurrency: Number(process.env.APDM_P9_CONCURRENCY),
+            datasetExistMemoEnabled: false,
+            activityPubRemoteDeliveryMode: 'native',
+            federationSidecarIncluded: false,
+            redisStreamPayloadCompressionEnabled: false,
+            namespace: process.env.ADSP_P2_NAMESPACE
+          };
+          process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+          cat measurements/adsp-p2/environment.json
+
+      - name: Provision one canonical fixture in the distributed namespace
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+          export APDM_P8_ENABLED=false APDM_P8_COUNT=0 ADSP_P2_REPLICAS=1
+          docker compose $files up -d fuseki_test redis mailcatcher
+          FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=60 ./scripts/fuseki-bootstrap.sh
+          docker compose $files up -d --no-deps backend
+
+          ready=false
+          for attempt in $(seq 1 180); do
+            if curl -fsS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+
+          docker compose $files exec -T backend \
+            node scripts/adsp-p2-provision.js \
+              /app/backend/measurements/adsp-p2/actors.json "$ADSP_P2_MAX_RECIPIENTS"
+
+          docker compose $files stop -t 30 backend
+          docker compose $files exec -T redis redis-cli SAVE >/dev/null
+          docker compose $files stop -t 30 redis fuseki_test
+
+          sudo cp -a data/fuseki_test measurements/adsp-p2/seed/fuseki_test
+          sudo cp -a data/redis_test measurements/adsp-p2/seed/redis_test
+          sudo chown -R "$(id -u):$(id -g)" measurements/adsp-p2/seed
+          test -s measurements/adsp-p2/actors.json
+
+      - name: Run matched 1 / 2 / 4 comparator matrix
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+
+          wait_port() {
+            local port="$1"
+            local ready=false
+            for attempt in $(seq 1 180); do
+              if curl -fsS --max-time 2 "http://localhost:${port}/" >/dev/null 2>&1; then ready=true; break; fi
+              sleep 1
+            done
+            test "$ready" = true
+          }
+
+          snapshot_container() {
+            local service="$1"
+            local output="$2"
+            local cid
+            cid="$(docker compose $files ps -q "$service")"
+            test -n "$cid"
+            {
+              echo "service=$service"
+              echo "container=$cid"
+              docker stats --no-stream "$cid" --format '{{json .}}' || true
+              echo '--- cpu.stat ---'
+              docker exec "$cid" sh -c 'cat /sys/fs/cgroup/cpu.stat 2>/dev/null || true'
+              echo '--- memory.current ---'
+              docker exec "$cid" sh -c 'cat /sys/fs/cgroup/memory.current 2>/dev/null || true'
+              echo '--- memory.peak ---'
+              docker exec "$cid" sh -c 'cat /sys/fs/cgroup/memory.peak 2>/dev/null || true'
+            } > "$output"
+          }
+
+          for replicas in 1 2 4; do
+            for count in ${ADSP_P2_RECIPIENT_COUNTS//,/ }; do
+              echo "=== ADSP P2 case replicas=${replicas} recipients=${count} ==="
+              docker compose $files down -v || true
+              sudo rm -rf data/fuseki_test data/redis_test
+              sudo cp -a measurements/adsp-p2/seed/fuseki_test data/fuseki_test
+              sudo cp -a measurements/adsp-p2/seed/redis_test data/redis_test
+
+              export APDM_P8_ENABLED=true APDM_P8_COUNT="$count" ADSP_P2_REPLICAS="$replicas"
+              docker compose $files up -d fuseki_test redis mailcatcher
+              FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=60 ./scripts/fuseki-bootstrap.sh
+
+              services='backend'
+              ports='3000'
+              trace_files="/app/backend/measurements/adsp-p2/trace-${count}-r1.jsonl"
+              if [[ "$replicas" -ge 2 ]]; then
+                services="$services backend_p2_2"
+                ports="$ports 3102"
+                trace_files="$trace_files,/app/backend/measurements/adsp-p2/trace-${count}-r2.jsonl"
+              fi
+              if [[ "$replicas" -ge 4 ]]; then
+                services="$services backend_p2_3 backend_p2_4"
+                ports="$ports 3103 3104"
+                trace_files="$trace_files,/app/backend/measurements/adsp-p2/trace-${count}-r3.jsonl,/app/backend/measurements/adsp-p2/trace-${count}-r4.jsonl"
+              fi
+
+              docker compose $files up -d --no-deps $services
+              for port in $ports; do wait_port "$port"; done
+
+              export ADSP_P2_TRACE_FILES="$trace_files"
+              export ADSP_P2_RUN_LABEL="warmup-${replicas}r-${count}n"
+              docker compose $files exec -T \
+                -e ADSP_P2_TRACE_FILES="$ADSP_P2_TRACE_FILES" \
+                -e ADSP_P2_RUN_LABEL="$ADSP_P2_RUN_LABEL" \
+                backend node scripts/adsp-p2-horizontal-load.js \
+                  /app/backend/measurements/adsp-p2/actors.json "$count" "$replicas" \
+                  "$ADSP_P2_REQUESTS" "$ADSP_P2_CONCURRENCY" \
+                  "/app/backend/measurements/adsp-p2/runtime/${replicas}r-${count}n-warmup.json"
+
+              for sample in $(seq 1 "$ADSP_P2_SAMPLES"); do
+                sample_dir="measurements/adsp-p2/runtime/${replicas}r-${count}n-s${sample}"
+                mkdir -p "$sample_dir"
+                for service in $services fuseki_test redis; do
+                  snapshot_container "$service" "$sample_dir/${service}-before.txt"
+                done
+                docker compose $files exec -T redis redis-cli INFO commandstats > "$sample_dir/redis-commandstats-before.txt"
+                docker compose $files exec -T redis redis-cli INFO memory > "$sample_dir/redis-memory-before.txt"
+
+                export ADSP_P2_RUN_LABEL="sample-${replicas}r-${count}n-s${sample}"
+                docker compose $files exec -T \
+                  -e ADSP_P2_TRACE_FILES="$ADSP_P2_TRACE_FILES" \
+                  -e ADSP_P2_RUN_LABEL="$ADSP_P2_RUN_LABEL" \
+                  backend node scripts/adsp-p2-horizontal-load.js \
+                    /app/backend/measurements/adsp-p2/actors.json "$count" "$replicas" \
+                    "$ADSP_P2_REQUESTS" "$ADSP_P2_CONCURRENCY" \
+                    "/app/backend/measurements/adsp-p2/results/${replicas}r-${count}n-s${sample}.json"
+
+                for service in $services fuseki_test redis; do
+                  snapshot_container "$service" "$sample_dir/${service}-after.txt"
+                done
+                docker compose $files exec -T redis redis-cli INFO commandstats > "$sample_dir/redis-commandstats-after.txt"
+                docker compose $files exec -T redis redis-cli INFO memory > "$sample_dir/redis-memory-after.txt"
+              done
+            done
+          done
+
+      - name: Summarize full decision evidence
+        if: env.ADSP_P2_EVIDENCE_MODE == 'true'
+        run: |
+          set -euo pipefail
+          node backend/scripts/adsp-p2-horizontal-summarize.js \
+            measurements/adsp-p2/results measurements/adsp-p2/summary.json \
+            > measurements/adsp-p2/summary.stdout.json
+          node - <<'NODE'
+          const fs = require('fs');
+          const summary = JSON.parse(fs.readFileSync('measurements/adsp-p2/summary.json', 'utf8'));
+          if (!summary.complete) throw new Error(`P2 evidence incomplete: ${JSON.stringify(summary.incompleteCases)}`);
+          const rows = [];
+          for (const [count, scale] of Object.entries(summary.scale)) {
+            for (const [step, result] of Object.entries(scale)) {
+              rows.push(`| ${count} | ${step} | ${result.throughputRatio.toFixed(3)}x | ${(100 * result.p95Reduction).toFixed(2)}% | ${result.throughputGatePassed ? 'yes' : 'no'} | ${result.latencyThresholdObserved ? 'observed; saturation proof required' : 'no'} |`);
+            }
+          }
+          const md = [
+            '## ADSP P2 horizontal Redis comparator', '',
+            '| workload | scale | throughput ratio | p95 reduction | throughput gate | latency-only path |',
+            '|---|---|---:|---:|---|---|', ...rows, '',
+            '> A latency-only threshold observation does not close the locked Phase-2 scale gate unless the smaller arm is independently proven saturated.'
+          ].join('\n');
+          fs.writeFileSync('measurements/adsp-p2/summary.md', `${md}\n`);
+          NODE
+          cat measurements/adsp-p2/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate PR smoke completed every topology
+        if: env.ADSP_P2_EVIDENCE_MODE != 'true'
+        run: |
+          set -euo pipefail
+          for replicas in 1 2 4; do
+            file="measurements/adsp-p2/results/${replicas}r-10n-s1.json"
+            test -s "$file"
+            node - "$file" "$replicas" <<'NODE'
+          const fs = require('fs');
+          const [file, replicas] = process.argv.slice(2);
+          const result = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (result.phase !== 'ADSP-P2-A' || Number(result.replicaCount) !== Number(replicas)) throw new Error('Smoke topology mismatch');
+          if (result.successfulOutcomes !== result.requestCount || result.failedOutcomes !== 0) throw new Error('Smoke correctness failure');
+          if (result.duplicateRequestIds !== 0 || result.duplicateActivityIds !== 0) throw new Error('Smoke duplicate outcome');
+          const total = Object.values(result.executorCounts || {}).reduce((sum, n) => sum + Number(n), 0);
+          if (total !== result.requestCount) throw new Error('Smoke executor accounting mismatch');
+          NODE
+          done
+
+      - name: Upload comparator evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adsp-p2-horizontal-redis-${{ github.run_id }}-${{ github.run_attempt }}
+          path: pod-provider/measurements/adsp-p2/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            logs --no-color --tail=500 backend backend_p2_2 backend_p2_3 backend_p2_4 fuseki_test redis || true
+
+      - name: Stop isolated comparator stack
+        if: always()
+        run: |
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test
