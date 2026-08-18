@@ -38,6 +38,36 @@ async function stopLauncher(launcher, stderr) {
   }
 }
 
+async function waitForLaunchedService(caller, launcher, getOutput) {
+  const serviceReady = caller.waitForServices('adsp.p1.rdfProbe', 15000).then(() => ({ kind: 'ready' }));
+  const launcherExit = waitForExit(launcher, 16000)
+    .then(exit => ({ kind: 'exit', exit }))
+    .catch(() => ({ kind: 'still-running' }));
+
+  let result;
+  try {
+    result = await Promise.race([serviceReady, launcherExit]);
+  } catch (error) {
+    const output = getOutput();
+    throw new Error(
+      `Timed out discovering launched probe: ${error.message}\nlauncher stdout:\n${output.stdout}\nlauncher stderr:\n${output.stderr}`
+    );
+  }
+
+  if (result.kind === 'exit') {
+    const output = getOutput();
+    throw new Error(
+      `Launcher exited before advertising probe (code=${result.exit.code}, signal=${result.exit.signal}).\nlauncher stdout:\n${output.stdout}\nlauncher stderr:\n${output.stderr}`
+    );
+  }
+  if (result.kind !== 'ready') {
+    const output = getOutput();
+    throw new Error(
+      `Launcher remained alive without advertising probe.\nlauncher stdout:\n${output.stdout}\nlauncher stderr:\n${output.stderr}`
+    );
+  }
+}
+
 async function main() {
   let stdout = '';
   let stderr = '';
@@ -73,7 +103,7 @@ async function main() {
 
   try {
     await caller.start();
-    await caller.waitForServices('adsp.p1.rdfProbe', 15000);
+    await waitForLaunchedService(caller, launcher, () => ({ stdout, stderr }));
 
     const inventory = await caller.call('adsp.p1.rdfProbe.inventory', {}, { timeout: 5000 });
     if (inventory.servedBy !== probeNodeID) {
@@ -88,16 +118,7 @@ async function main() {
       }
     }
 
-    const forbiddenPrefixes = [
-      'api',
-      'ldp',
-      'activitypub',
-      'auth',
-      'triplestore',
-      'webacl',
-      'webid',
-      'solid'
-    ];
+    const forbiddenPrefixes = ['api', 'ldp', 'activitypub', 'auth', 'triplestore', 'webacl', 'webid', 'solid'];
     const leaked = services.filter(service =>
       forbiddenPrefixes.some(prefix => service === prefix || service.startsWith(`${prefix}.`))
     );
@@ -105,9 +126,7 @@ async function main() {
       throw new Error(`p1-probe launcher loaded production services: ${JSON.stringify(leaked)}`);
     }
 
-    const startupLine = stdout
-      .split(/\r?\n/u)
-      .find(line => line.includes('"event":"moleculer_fabric_start"'));
+    const startupLine = stdout.split(/\r?\n/u).find(line => line.includes('"event":"moleculer_fabric_start"'));
     if (!startupLine) throw new Error(`Launcher did not emit fabric start metadata. stdout=${stdout}`);
     const startup = JSON.parse(startupLine);
     if (
@@ -123,20 +142,16 @@ async function main() {
     }
 
     process.stdout.write(
-      `${JSON.stringify(
-        {
-          ok: true,
-          nodeID: probeNodeID,
-          namespace,
-          serviceGroup: startup.serviceGroup,
-          servicePatterns: startup.servicePatterns,
-          loadedServices: services,
-          productionServicesLoaded: leaked,
-          independentGroupStart: true
-        },
-        null,
-        2
-      )}\n`
+      `${JSON.stringify({
+        ok: true,
+        nodeID: probeNodeID,
+        namespace,
+        serviceGroup: startup.serviceGroup,
+        servicePatterns: startup.servicePatterns,
+        loadedServices: services,
+        productionServicesLoaded: leaked,
+        independentGroupStart: true
+      }, null, 2)}\n`
     );
   } finally {
     await caller.stop().catch(() => undefined);
