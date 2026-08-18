@@ -1,0 +1,62 @@
+name: ADSP P1 Moleculer Fabric
+
+on:
+  pull_request:
+    paths:
+      - 'pod-provider/backend/config/moleculer-fabric.js'
+      - 'pod-provider/backend/moleculer.config.js'
+      - 'pod-provider/backend/RdfJSONSerializer.js'
+      - 'pod-provider/backend/scripts/run-moleculer-fabric.js'
+      - 'pod-provider/backend/scripts/proof-adsp-p1-moleculer-fabric.js'
+      - 'pod-provider/backend/p1-fixtures/**'
+      - 'pod-provider/backend/tests/moleculer-fabric.test.js'
+      - 'pod-provider/backend/package.json'
+      - '.github/workflows/adsp-p1-moleculer-fabric.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fabric-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          cache: npm
+          cache-dependency-path: pod-provider/backend/package-lock.json
+
+      - name: Enforce HTTPS for public Git dependencies
+        run: git config --global url."https://github.com/".insteadOf ssh://git@github.com/
+
+      - name: Install backend dependencies
+        run: npm ci --prefix pod-provider/backend
+
+      - name: Run fabric configuration tests
+        run: >-
+          node tests/node_modules/.bin/jest
+          --testEnvironment=node
+          --runInBand
+          pod-provider/backend/tests/moleculer-fabric.test.js
+
+      - name: Run genuine remote-call fabric proof
+        working-directory: pod-provider/backend
+        env:
+          SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379
+        run: node scripts/proof-adsp-p1-moleculer-fabric.js
