@@ -13,6 +13,8 @@ const { MoleculerError } = require('moleculer').Errors;
 // Utility Functions
 // ============================================================================
 
+const RSA_KEY_TYPE = 'https://www.w3.org/ns/auth/rsa#RSAKey';
+
 function toHttpDate(d = new Date()) {
   return d.toUTCString(); // IMF-fixdate format
 }
@@ -45,6 +47,30 @@ function buildRequestTarget(method, path, query) {
   const q = query ? String(query) : '';
   const qp = q ? (q.startsWith('?') ? q : `?${q}`) : '';
   return `${method.toLowerCase()} ${path}${qp}`;
+}
+
+function asArray(value) {
+  if (value == null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function getResourceId(resource) {
+  if (!resource || typeof resource !== 'object') return null;
+  return resource.id || resource['@id'] || null;
+}
+
+function isSafeHttpUrl(value) {
+  if (!value || typeof value !== 'string') return false;
+  try {
+    const parsed = new URL(value);
+    return (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      !parsed.username &&
+      !parsed.password
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -188,7 +214,6 @@ function signSecp256k1(privateKeyPem, dataBytes) {
 module.exports = {
   name: 'signing',
 
-  // "actors" intentionally omitted: only used by signHttpRequestsBatch, not AT endpoints
   dependencies: ['api', 'keys', 'activitypub.actor', 'identitybindings', 'auth.account'],
 
   async started() {
@@ -275,12 +300,8 @@ module.exports = {
      * Batch sign HTTP requests for ActivityPub federation.
      *
      * This is the formal contract endpoint that allows the Fedify sidecar to
-     * request signatures for outbound HTTP requests while keeping all private
+     * request signatures for outbound federation requests while keeping all private
      * keys inside ActivityPods.
-     *
-     * @param {Object} ctx - Moleculer context
-     * @param {Array} ctx.params.requests - Array of signing requests
-     * @returns {Object} Results with signed headers or errors per request
      */
     signHttpRequestsBatch: {
       rest: {
@@ -317,7 +338,7 @@ module.exports = {
           };
         }
 
-        // Group by actor for key reuse + locality checks
+        // Group by actor for one authoritative account/actor/key resolution per batch.
         const byActor = new Map();
         for (const r of reqs) {
           const a = r?.actorUri || '';
@@ -328,49 +349,24 @@ module.exports = {
         const results = [];
 
         for (const [actorUri, items] of byActor) {
-          // Validate local actor (authority boundary enforcement)
-          const locality = await this._validateLocalActor(ctx, actorUri);
-          if (!locality.ok) {
+          const authority = await this._validateLocalActor(ctx, actorUri);
+          if (!authority.ok) {
             for (const r of items) {
-              results.push(this._err(r, locality.error, locality.message, false));
+              results.push(this._err(r, authority.error, authority.message, authority.retryable === true));
             }
             continue;
           }
 
-          // Resolve private key (authority remains here - keys never leave ActivityPods)
-          let keyPair;
-          try {
-            // Resolve actorUri -> webId if they differ in your stack
-            const webId = await ctx.call('actors.resolveWebIdForActor', { actorUri });
-            keyPair = await ctx.call('keys.getOrCreateWebIdKeys', { webId });
-          } catch (e) {
+          const material = await this._resolveActivityPubSigningMaterial(ctx, actorUri, authority.account, authority.actor);
+          if (!material.ok) {
             for (const r of items) {
-              results.push(this._err(r, 'KEY_UNAVAILABLE', e?.message || 'key lookup failed', true));
+              results.push(this._err(r, material.error, material.message, material.retryable === true));
             }
             continue;
           }
 
-          if (!keyPair?.privateKey) {
-            for (const r of items) {
-              results.push(this._err(r, 'KEY_UNAVAILABLE', 'privateKey missing', true));
-            }
-            continue;
-          }
-
-          // Resolve keyId authoritatively (signer-controlled, NOT hardcoded by caller)
-          let keyId;
-          try {
-            keyId = await ctx.call('actors.getPublicKeyId', { actorUri });
-          } catch (e) {
-            for (const r of items) {
-              results.push(this._err(r, 'KEY_UNAVAILABLE', e?.message || 'keyId lookup failed', true));
-            }
-            continue;
-          }
-
-          // Sign each request in this actor's batch
           for (const r of items) {
-            results.push(await this._signOne(ctx, actorUri, keyId, keyPair.privateKey, r));
+            results.push(await this._signOne(ctx, actorUri, material.keyId, material.privateKeyPem, r));
           }
         }
 
@@ -431,14 +427,6 @@ module.exports = {
       }
     },
 
-    /**
-     * Sign an ATProto repository commit using the account's secp256k1 signing key.
-     *
-     * Called by the AT adapter's AtCommitBuilder during repo projection.
-     * Keys never leave ActivityPods — only the base64url signature is returned.
-     *
-     * REST: POST /api/internal/atproto/commit-sign
-     */
     signAtprotoCommit: {
       rest: {
         method: 'POST',
@@ -456,8 +444,6 @@ module.exports = {
 
         const { canonicalAccountId, did, unsignedCommitBytesBase64, rev } = ctx.params;
 
-        // Resolve IdentityBinding to get atSigningKeyRef
-        // Assumption: identitybindings.getByCanonicalAccountId returns the IdentityBinding
         let binding;
         try {
           binding = await ctx.call('identitybindings.getByCanonicalAccountId', { canonicalAccountId });
@@ -473,7 +459,6 @@ module.exports = {
           });
         }
 
-        // Fetch secp256k1 key pair from internal key boundary
         let keyPair;
         try {
           keyPair = await ctx.call('keys.getAtprotoKeyPair', { keyRef: binding.atSigningKeyRef });
@@ -487,7 +472,6 @@ module.exports = {
           });
         }
 
-        // Validate caller-supplied DID matches the binding
         if (binding.atprotoDid && did !== binding.atprotoDid) {
           throw new MoleculerError('Caller DID does not match bound DID', 400, 'INVALID_INPUT', {
             supplied: did,
@@ -495,11 +479,9 @@ module.exports = {
           });
         }
 
-        // Derive keyId: {did}#atproto (standard ATProto key fragment)
         const resolvedDid = binding.atprotoDid || did;
         const keyId = `${resolvedDid}#atproto`;
 
-        // Sign the commit bytes
         let signatureBase64Url;
         try {
           const commitBytes = Buffer.from(unsignedCommitBytesBase64, 'base64');
@@ -518,14 +500,6 @@ module.exports = {
       }
     },
 
-    /**
-     * Sign a did:plc operation using the account's secp256k1 rotation key.
-     *
-     * Called by the PLC state machine during DID provisioning and rotation.
-     * The rotation key is distinct from the commit signing key.
-     *
-     * REST: POST /api/internal/atproto/plc-sign
-     */
     signAtprotoPlcOp: {
       rest: {
         method: 'POST',
@@ -560,7 +534,6 @@ module.exports = {
           );
         }
 
-        // Validate caller-supplied DID matches the binding
         if (binding.atprotoDid && did !== binding.atprotoDid) {
           throw new MoleculerError('Caller DID does not match bound DID', 400, 'INVALID_INPUT', {
             supplied: did,
@@ -568,7 +541,6 @@ module.exports = {
           });
         }
 
-        // PLC signing is only valid for did:plc — reject did:web and all other methods
         const resolvedDid = binding.atprotoDid || did;
         if (!String(resolvedDid).startsWith('did:plc:')) {
           throw new MoleculerError('PLC signing is only allowed for did:plc', 400, 'INVALID_INPUT', {
@@ -589,7 +561,6 @@ module.exports = {
           });
         }
 
-        // PLC rotation key fragment: {did}#atproto-rotation-key (convention)
         const keyId = `${resolvedDid}#atproto-rotation-key`;
 
         let signatureBase64Url;
@@ -610,14 +581,6 @@ module.exports = {
       }
     },
 
-    /**
-     * Return the ATProto public key for an account in multibase format.
-     *
-     * Called during DID document construction and at provisioning time.
-     * Returns the compressed secp256k1 public key as multibase base58btc.
-     *
-     * REST: GET /api/internal/atproto/public-key
-     */
     getAtprotoPublicKey: {
       rest: {
         method: 'GET',
@@ -664,7 +627,6 @@ module.exports = {
           throw new MoleculerError('AT public key not available', 500, 'KEY_UNAVAILABLE', { keyRef });
         }
 
-        // Convert to multibase
         let publicKeyMultibase = keyPair?.publicKeyMultibase;
         if (!publicKeyMultibase) {
           try {
@@ -725,10 +687,6 @@ module.exports = {
   },
 
   methods: {
-    /**
-     * Authenticate the request using bearer token.
-     * This endpoint is internal-only and MUST be protected.
-     */
     _auth(ctx) {
       const auth = ctx.meta?.$headers?.authorization || ctx.meta?.$headers?.Authorization;
       if (!auth || !String(auth).startsWith('Bearer ')) {
@@ -740,9 +698,6 @@ module.exports = {
       }
     },
 
-    /**
-     * Create an error response for a signing request.
-     */
     _err(r, code, message, retryable) {
       return {
         requestId: r?.requestId,
@@ -752,47 +707,103 @@ module.exports = {
     },
 
     /**
-     * Validate that the actorUri is a local actor controlled by this ActivityPods deployment.
-     * This is the critical authority boundary enforcement.
+     * Prove that actorUri is an actor controlled by an account in this exact
+     * ActivityPods deployment. Same-host URL shape is never sufficient.
      */
     async _validateLocalActor(ctx, actorUri) {
-      if (!actorUri || typeof actorUri !== 'string') {
-        return { ok: false, error: 'INVALID_INPUT', message: 'actorUri missing' };
-      }
-      try {
-        new URL(actorUri);
-      } catch {
-        return { ok: false, error: 'INVALID_INPUT', message: 'actorUri not a URL' };
+      if (!isSafeHttpUrl(actorUri)) {
+        return { ok: false, error: 'INVALID_INPUT', message: 'actorUri must be an HTTP(S) URL without credentials', retryable: false };
       }
 
-      // Strong enforcement: verify actor is local to this deployment.
-      // Prefer activitypub.actor.isLocal when available, and fall back to
-      // ldp.remote.isRemote so local dev stacks can still validate locality.
+      let account;
       try {
-        const isLocal = await ctx.call('activitypub.actor.isLocal', { actorUri });
-        if (isLocal) {
-          return { ok: true };
-        }
+        account = await ctx.call('auth.account.findByWebId', { webId: actorUri });
       } catch {
-        // Ignore and continue to fallback check below.
+        return { ok: false, error: 'ACTOR_NOT_LOCAL', message: 'local account verification unavailable', retryable: true };
       }
 
-      try {
-        const isRemote = await ctx.call('ldp.remote.isRemote', { resourceUri: actorUri });
-        if (isRemote === false) {
-          return { ok: true };
-        }
-      } catch {
-        return { ok: false, error: 'ACTOR_NOT_LOCAL', message: 'locality verification unavailable' };
+      if (!account || account.webId !== actorUri || !account.username) {
+        return { ok: false, error: 'ACTOR_NOT_LOCAL', message: 'actorUri is not bound to a local ActivityPods account', retryable: false };
       }
 
-      return { ok: false, error: 'ACTOR_NOT_LOCAL', message: 'actorUri not local' };
+      let actor;
+      try {
+        actor = await ctx.call('activitypub.actor.get', { actorUri, webId: 'system' });
+      } catch {
+        return { ok: false, error: 'ACTOR_NOT_LOCAL', message: 'local actor verification unavailable', retryable: true };
+      }
+
+      if (!actor || getResourceId(actor) !== actorUri) {
+        return { ok: false, error: 'ACTOR_NOT_LOCAL', message: 'local account does not resolve to the requested ActivityPub actor', retryable: false };
+      }
+
+      return { ok: true, account, actor };
     },
 
     /**
-     * Parse body bytes from the request.
-     * Body must be the exact serialized bytes that will be transmitted.
+     * Resolve the actor's attached RSA key through SemApps' real key service.
+     * The private key stays inside ActivityPods; the keyId comes from the
+     * signer-controlled public-key linkage, never from the caller.
      */
+    async _resolveActivityPubSigningMaterial(ctx, actorUri, account, actor) {
+      const dataset = String(account?.username || '').trim();
+      if (!dataset) {
+        return { ok: false, error: 'KEY_UNAVAILABLE', message: 'local account dataset is unavailable', retryable: false };
+      }
+
+      let keyPairs;
+      try {
+        keyPairs = await ctx.call(
+          'keys.getOrCreateWebIdKeys',
+          { webId: actorUri, keyType: RSA_KEY_TYPE },
+          { meta: { ...ctx.meta, dataset, webId: actorUri } }
+        );
+      } catch {
+        return { ok: false, error: 'KEY_UNAVAILABLE', message: 'RSA key lookup unavailable', retryable: true };
+      }
+
+      if (!Array.isArray(keyPairs)) {
+        return { ok: false, error: 'KEY_UNAVAILABLE', message: 'RSA key lookup returned an invalid result', retryable: false };
+      }
+
+      const attachedPublicKeyIds = new Set(
+        asArray(actor?.publicKey)
+          .map(key => (typeof key === 'string' ? key : getResourceId(key)))
+          .filter(id => typeof id === 'string' && id.length > 0)
+      );
+
+      const candidates = keyPairs.filter(key => {
+        const keyId = key?.['rdfs:seeAlso'];
+        return (
+          key &&
+          key.owner === actorUri &&
+          key.controller === actorUri &&
+          typeof key.privateKeyPem === 'string' &&
+          key.privateKeyPem.length > 0 &&
+          isSafeHttpUrl(keyId) &&
+          attachedPublicKeyIds.has(keyId)
+        );
+      });
+
+      if (candidates.length !== 1) {
+        return {
+          ok: false,
+          error: 'KEY_UNAVAILABLE',
+          message: candidates.length === 0
+            ? 'no unambiguous actor-controlled RSA signing key is attached to the actor'
+            : 'multiple actor-controlled RSA signing keys are attached to the actor',
+          retryable: false
+        };
+      }
+
+      const keyPair = candidates[0];
+      return {
+        ok: true,
+        keyId: keyPair['rdfs:seeAlso'],
+        privateKeyPem: keyPair.privateKeyPem
+      };
+    },
+
     _parseBodyBytes(r) {
       const body = r?.body;
       if (!body) return null;
@@ -802,21 +813,14 @@ module.exports = {
       return Buffer.from(bytesStr, body?.encoding === 'utf8' ? 'utf8' : 'utf8');
     },
 
-    /**
-     * Validate date skew to prevent replay attacks.
-     */
     _validateDateSkew(dateStr) {
       const t = Date.parse(dateStr);
-      if (Number.isNaN(t)) return true; // Let unparseable dates through
+      if (Number.isNaN(t)) return true; // Hardened separately by PR #81.
       const now = Date.now();
       const skewMs = Math.abs(now - t);
       return skewMs <= this.settings.limits.maxClockSkewSeconds * 1000;
     },
 
-    /**
-     * Sign a single HTTP request.
-     * Returns signed headers or error.
-     */
     async _signOne(ctx, actorUri, keyId, privateKeyPem, r) {
       try {
         const requestId = r?.requestId;
@@ -832,7 +836,6 @@ module.exports = {
         const path = r?.target?.path;
         const query = r?.target?.query || '';
 
-        // Validate required fields
         if (!assertHost(host)) {
           return this._err(r, 'INVALID_INPUT', 'target.host invalid', false);
         }
@@ -843,7 +846,6 @@ module.exports = {
           return this._err(r, 'INVALID_INPUT', 'method invalid', false);
         }
 
-        // Handle date: use provided or generate
         let date = r?.headers?.date;
         if (!date) {
           date = toHttpDate();
@@ -852,7 +854,6 @@ module.exports = {
           return this._err(r, 'INVALID_INPUT', 'date skew too large', false);
         }
 
-        // Handle digest for POST/PUT requests
         let digest = null;
         let bodySha256Base64 = null;
 
@@ -860,7 +861,6 @@ module.exports = {
           const digestMode = r?.digest?.mode || 'server_compute';
 
           if (digestMode === 'server_compute') {
-            // Preferred: sidecar provides body bytes, we compute digest
             const bodyBuf = this._parseBodyBytes(r);
             if (!bodyBuf) {
               return this._err(r, 'INVALID_INPUT', 'body.bytes required for POST profile', false);
@@ -871,7 +871,6 @@ module.exports = {
             bodySha256Base64 = sha256Base64(bodyBuf);
             digest = `SHA-256=${bodySha256Base64}`;
           } else if (digestMode === 'caller_provided_strict') {
-            // Caller provides digest; we MUST verify it matches the body
             const providedDigest = r?.digest?.value;
             const providedBodyHash = r?.digest?.bodyHashSha256Base64;
             const bodyBuf = this._parseBodyBytes(r);
@@ -885,7 +884,6 @@ module.exports = {
               );
             }
 
-            // Verify the provided digest matches the body
             const computedHash = sha256Base64(bodyBuf);
             if (providedBodyHash && providedBodyHash !== computedHash) {
               return this._err(r, 'DIGEST_MISMATCH', 'provided bodyHashSha256Base64 does not match body', false);
@@ -903,22 +901,16 @@ module.exports = {
           }
         }
 
-        // Get content-type if needed for signing
         const contentType = r?.headers?.contentType || 'application/activity+json';
-
-        // Build the request target
         const requestTarget = buildRequestTarget(method, path, query);
 
-        // Build the signing string
         const signingString = buildSigningString(
           { requestTarget, host, date, digest, contentType },
           profile.signedHeaders
         );
 
-        // Sign with RSA-SHA256
         const signature = signRsaSha256(privateKeyPem, signingString);
 
-        // Build the Signature header (Cavage-style)
         const signedHeadersList = profile.signedHeaders.join(' ');
         const signatureHeader = [
           `keyId="${keyId}"`,
@@ -927,7 +919,6 @@ module.exports = {
           `signature="${signature}"`
         ].join(',');
 
-        // Build output headers
         const outHeaders = {
           Date: date,
           Signature: signatureHeader
