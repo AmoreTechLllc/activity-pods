@@ -64,6 +64,24 @@ function executorName(traceFile) {
   return match ? match[1] : base;
 }
 
+function expectedExecutors(replicaCount) {
+  return Array.from({ length: replicaCount }, (_, index) => `r${index + 1}`);
+}
+
+function assertExecutorCoverage(executorCounts, replicaCount, requestCount) {
+  const expected = expectedExecutors(replicaCount);
+  const actual = Object.keys(executorCounts || {}).sort();
+  const total = Object.values(executorCounts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+  if (total !== requestCount) throw new Error(`Executor accounting mismatch: expected ${requestCount}, observed ${total}`);
+  const unexpected = actual.filter(name => !expected.includes(name));
+  if (unexpected.length > 0) throw new Error(`Unexpected executor identity: ${unexpected.join(', ')}`);
+  for (const executor of expected) {
+    if (!Number.isInteger(Number(executorCounts[executor])) || Number(executorCounts[executor]) <= 0) {
+      throw new Error(`Replica ${executor} executed no measured work`);
+    }
+  }
+}
+
 function findTraceMatches(traceFiles, requestId) {
   const matches = [];
   for (const traceFile of traceFiles) {
@@ -130,6 +148,9 @@ async function runWindow({
   if (!namespace) throw new Error('ADSP P2 load driver requires SEMAPPS_MOLECULER_NAMESPACE or ADSP_P2_NAMESPACE');
   if (traceFiles.length !== replicaCount) {
     throw new Error(`Expected ${replicaCount} trace files, got ${traceFiles.length}`);
+  }
+  if (requestCount < replicaCount) {
+    throw new Error(`request count ${requestCount} cannot prove measured execution across ${replicaCount} replicas`);
   }
   if (!manifest?.sender?.outbox || !manifest?.sender?.webId || !manifest?.sender?.username) {
     throw new Error('Actor manifest is missing sender authority fields');
@@ -219,6 +240,7 @@ async function runWindow({
 
     const executorCounts = Object.create(null);
     for (const result of results) executorCounts[result.executor] = (executorCounts[result.executor] || 0) + 1;
+    assertExecutorCoverage(executorCounts, replicaCount, requestCount);
 
     return {
       version: 1,
@@ -289,7 +311,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+  assertExecutorCoverage,
   executorName,
+  expectedExecutors,
   findTraceMatches,
   percentile,
   readJsonLines,
