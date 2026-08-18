@@ -107,7 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo rm -rf measurements/adsp-p2 data/fuseki_test data/redis_test
-          mkdir -p measurements/adsp-p2/results measurements/adsp-p2/runtime measurements/adsp-p2/seed
+          mkdir -p measurements/adsp-p2/results measurements/adsp-p2/runtime measurements/adsp-p2/seed measurements/adsp-p2/barriers
           mkdir -p data/fuseki_test data/redis_test
 
       - name: Build production backend image once
@@ -155,7 +155,9 @@ jobs:
             activityPubRemoteDeliveryMode: 'native',
             federationSidecarIncluded: false,
             redisStreamPayloadCompressionEnabled: false,
-            namespace: process.env.ADSP_P2_NAMESPACE
+            namespace: process.env.ADSP_P2_NAMESPACE,
+            loadGeneratorResourceBoundary: 'separate one-shot backend-image container excluded from ActivityPods/whole-system service cgroup deltas',
+            resourceWindowExcludesLoadBrokerConnectDisconnect: true
           };
           process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
           NODE
@@ -236,6 +238,25 @@ jobs:
             done
           }
 
+          wait_barrier() {
+            local marker="$1"
+            local pid="$2"
+            local log="$3"
+            for attempt in $(seq 1 3600); do
+              if [[ -f "$marker" ]]; then return 0; fi
+              if ! kill -0 "$pid" 2>/dev/null; then
+                wait "$pid" || true
+                cat "$log"
+                echo "Load generator exited before marker ${marker}" >&2
+                return 1
+              fi
+              sleep 0.1
+            done
+            cat "$log"
+            echo "Timed out waiting for marker ${marker}" >&2
+            return 1
+          }
+
           for replicas in 1 2 4; do
             for count in ${ADSP_P2_RECIPIENT_COUNTS//,/ }; do
               echo "=== ADSP P2 case replicas=${replicas} recipients=${count} ==="
@@ -267,10 +288,10 @@ jobs:
 
               export ADSP_P2_TRACE_FILES="$trace_files"
               export ADSP_P2_RUN_LABEL="warmup-${replicas}r-${count}n"
-              docker compose $files exec -T \
+              docker compose $files run --rm -T --no-deps --entrypoint node \
                 -e ADSP_P2_TRACE_FILES="$ADSP_P2_TRACE_FILES" \
                 -e ADSP_P2_RUN_LABEL="$ADSP_P2_RUN_LABEL" \
-                backend node scripts/adsp-p2-horizontal-load.js \
+                backend scripts/adsp-p2-horizontal-load.js \
                   /app/backend/measurements/adsp-p2/actors.json "$count" "$replicas" \
                   "$ADSP_P2_REQUESTS" "$ADSP_P2_CONCURRENCY" \
                   "/app/backend/measurements/adsp-p2/runtime/${replicas}r-${count}n-warmup.json"
@@ -278,28 +299,48 @@ jobs:
 
               for sample in $(seq 1 "$ADSP_P2_SAMPLES"); do
                 sample_dir="measurements/adsp-p2/runtime/${replicas}r-${count}n-s${sample}"
-                mkdir -p "$sample_dir"
+                barrier_host="measurements/adsp-p2/barriers/${replicas}r-${count}n-s${sample}"
+                barrier_container="/app/backend/${barrier_host}"
+                load_log="$sample_dir/load-generator.log"
+                mkdir -p "$sample_dir" "$barrier_host"
+                rm -f "$barrier_host"/{ready,go,done,release}
+
+                export ADSP_P2_RUN_LABEL="sample-${replicas}r-${count}n-s${sample}"
+                docker compose $files run --rm -T --no-deps --entrypoint node \
+                  -e ADSP_P2_TRACE_FILES="$ADSP_P2_TRACE_FILES" \
+                  -e ADSP_P2_RUN_LABEL="$ADSP_P2_RUN_LABEL" \
+                  -e ADSP_P2_BARRIER_DIR="$barrier_container" \
+                  backend scripts/adsp-p2-horizontal-load.js \
+                    /app/backend/measurements/adsp-p2/actors.json "$count" "$replicas" \
+                    "$ADSP_P2_REQUESTS" "$ADSP_P2_CONCURRENCY" \
+                    "/app/backend/measurements/adsp-p2/results/${replicas}r-${count}n-s${sample}.json" \
+                    > "$load_log" 2>&1 &
+                load_pid=$!
+
+                wait_barrier "$barrier_host/ready" "$load_pid" "$load_log"
                 for service in $services fuseki_test redis; do
                   snapshot_container "$service" "$sample_dir/${service}-before.txt"
                 done
                 docker compose $files exec -T redis redis-cli INFO commandstats > "$sample_dir/redis-commandstats-before.txt"
                 docker compose $files exec -T redis redis-cli INFO memory > "$sample_dir/redis-memory-before.txt"
 
-                export ADSP_P2_RUN_LABEL="sample-${replicas}r-${count}n-s${sample}"
-                docker compose $files exec -T \
-                  -e ADSP_P2_TRACE_FILES="$ADSP_P2_TRACE_FILES" \
-                  -e ADSP_P2_RUN_LABEL="$ADSP_P2_RUN_LABEL" \
-                  backend node scripts/adsp-p2-horizontal-load.js \
-                    /app/backend/measurements/adsp-p2/actors.json "$count" "$replicas" \
-                    "$ADSP_P2_REQUESTS" "$ADSP_P2_CONCURRENCY" \
-                    "/app/backend/measurements/adsp-p2/results/${replicas}r-${count}n-s${sample}.json"
-                retain_traces "$replicas" "$count" "$sample_dir/traces"
+                touch "$barrier_host/go"
+                wait_barrier "$barrier_host/done" "$load_pid" "$load_log"
 
                 for service in $services fuseki_test redis; do
                   snapshot_container "$service" "$sample_dir/${service}-after.txt"
                 done
                 docker compose $files exec -T redis redis-cli INFO commandstats > "$sample_dir/redis-commandstats-after.txt"
                 docker compose $files exec -T redis redis-cli INFO memory > "$sample_dir/redis-memory-after.txt"
+                retain_traces "$replicas" "$count" "$sample_dir/traces"
+
+                touch "$barrier_host/release"
+                if ! wait "$load_pid"; then
+                  cat "$load_log"
+                  exit 1
+                fi
+                cat "$load_log"
+                test -s "measurements/adsp-p2/results/${replicas}r-${count}n-s${sample}.json"
               done
             done
           done
