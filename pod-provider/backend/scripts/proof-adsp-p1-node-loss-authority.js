@@ -13,6 +13,8 @@ const ACTION_BLOCK = 'adsp.p1.authorityProbe.commitThenBlock';
 const ACTION_COMMIT = 'adsp.p1.authorityProbe.commit';
 const VICTIM_NODE = 'p1-authority-victim';
 const SURVIVOR_NODE = 'p1-authority-survivor';
+const CALL_TIMEOUT_MS = 7000;
+const REPLAY_OBSERVATION_MS = CALL_TIMEOUT_MS + 1000;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -52,6 +54,20 @@ async function waitForMutationCount(mutationPath, token, expected, timeoutMs = 1
     await sleep(50);
   }
   throw new Error(`Timed out waiting for ${expected} durable mutation(s) for ${token}`);
+}
+
+async function assertMutationCountStable(mutationPath, token, expected, observationMs) {
+  const deadline = Date.now() + observationMs;
+  while (Date.now() < deadline) {
+    const matches = readMutations(mutationPath).filter(record => record.token === token);
+    if (matches.length !== expected) {
+      throw new Error(
+        `Authoritative mutation cardinality changed during replay observation: expected ${expected}, observed ${matches.length}; records=${JSON.stringify(matches)}`
+      );
+    }
+    await sleep(100);
+  }
+  return readMutations(mutationPath).filter(record => record.token === token);
 }
 
 function endpointCount(broker) {
@@ -140,7 +156,7 @@ async function main() {
     await caller.waitForServices('adsp.p1.authorityProbe', 10000);
     await waitForEndpointCount(caller, 1);
 
-    const pending = caller.call(ACTION_BLOCK, { token: originalToken }, { timeout: 7000 }).then(
+    const pending = caller.call(ACTION_BLOCK, { token: originalToken }, { timeout: CALL_TIMEOUT_MS }).then(
       value => ({ resolved: true, value }),
       error => ({ resolved: false, error })
     );
@@ -166,12 +182,13 @@ async function main() {
     }
 
     await waitForEndpointCount(caller, 1);
-    await sleep(750);
 
-    const afterLoss = readMutations(mutationPath).filter(record => record.token === originalToken);
-    if (afterLoss.length !== 1) {
-      throw new Error(`Authoritative mutation was silently duplicated after node loss: ${JSON.stringify(afterLoss)}`);
-    }
+    const afterLoss = await assertMutationCountStable(
+      mutationPath,
+      originalToken,
+      1,
+      REPLAY_OBSERVATION_MS
+    );
     if (afterLoss[0].nodeID !== VICTIM_NODE) {
       throw new Error(`Original mutation moved to an unexpected node: ${JSON.stringify(afterLoss)}`);
     }
@@ -207,7 +224,8 @@ async function main() {
             errorCode: outcome.error?.code || null,
             errorType: outcome.error?.type || outcome.error?.name || null,
             durableMutationCount: originalRecords.length,
-            silentReplayObserved: false
+            silentReplayObserved: false,
+            replayObservationMs: REPLAY_OBSERVATION_MS
           },
           loss: {
             victimNode: VICTIM_NODE,
