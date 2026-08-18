@@ -14,6 +14,7 @@ function record(recipientCount, index, overrides = {}) {
     elapsedMs: 100 + index,
     cpuUserMs: 20 + index,
     cpuSystemMs: 5,
+    heapUsedDelta: 100 + index,
     rssEnd: 1000 + index,
     actionCount: recipientCount * 2 + index,
     fuseki: { requestCount: recipientCount * 3 + index },
