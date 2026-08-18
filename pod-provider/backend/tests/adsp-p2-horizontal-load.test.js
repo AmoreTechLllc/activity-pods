@@ -4,7 +4,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const {
+  assertExecutorCoverage,
   executorName,
+  expectedExecutors,
   findTraceMatches,
   percentile,
   summarize,
@@ -24,6 +26,15 @@ describe('ADSP P2 horizontal Redis load evidence helpers', () => {
     expect(executorName('/tmp/trace-100-r1.jsonl')).toBe('r1');
     expect(executorName('/tmp/trace-100-r4.jsonl')).toBe('r4');
     expect(executorName('/tmp/custom.jsonl')).toBe('custom.jsonl');
+    expect(expectedExecutors(4)).toEqual(['r1', 'r2', 'r3', 'r4']);
+  });
+
+  test('executor coverage requires every configured replica and exact accounting', () => {
+    expect(() => assertExecutorCoverage({ r1: 2 }, 1, 2)).not.toThrow();
+    expect(() => assertExecutorCoverage({ r1: 1, r2: 1 }, 2, 2)).not.toThrow();
+    expect(() => assertExecutorCoverage({ r1: 2, r4: 2 }, 4, 4)).toThrow(/Replica r2 executed no measured work/u);
+    expect(() => assertExecutorCoverage({ r1: 1, r2: 1, r3: 1, r4: 1, r5: 1 }, 4, 5)).toThrow(/Unexpected executor identity/u);
+    expect(() => assertExecutorCoverage({ r1: 1, r2: 1 }, 2, 3)).toThrow(/Executor accounting mismatch/u);
   });
 
   test('findTraceMatches detects a request duplicated across replica files', () => {
