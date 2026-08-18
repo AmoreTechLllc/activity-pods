@@ -25,13 +25,12 @@ const { createMoleculerFabricConfig } = require('./config/moleculer-fabric');
 
 Error.stackTraceLimit = Infinity;
 
-// Use the cacher only if Redis is configured
 const cacherConfig = CONFIG.REDIS_CACHE_URL
   ? {
       type: 'Redis',
       options: {
         prefix: 'action',
-        ttl: 2592000, // Keep in cache for one month
+        ttl: 2592000,
         redis: CONFIG.REDIS_CACHE_URL
       }
     }
@@ -47,7 +46,7 @@ const phase8Instrumentation = createPhase8Tier1Instrumentation({
 });
 
 const middlewares = [
-  CacherMiddleware(cacherConfig), // Set the cacher before the WebAcl middleware
+  CacherMiddleware(cacherConfig),
   WebAclMiddleware({ baseUrl: CONFIG.BASE_URL, podProvider: true }),
   SkipOrphanBlankNodesCleanupMiddleware({ enabled: CONFIG.SKIP_ORPHAN_BLANK_NODE_CLEANUP }),
   ApdmLocalDeliveryDatasetExistMemoMiddleware({ enabled: CONFIG.APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED }),
@@ -69,13 +68,12 @@ const middlewares = [
   AppControlMiddleware({ baseUrl: CONFIG.BASE_URL })
 ];
 
-// Keep Phase 8 measurement entirely opt-in. When disabled, the production
-// middleware stack is exactly the pre-P8 stack and no HTTP functions are patched.
 if (phase8Instrumentation.middleware) middlewares.push(phase8Instrumentation.middleware);
 
 const localityTelemetry = AdspActionLocalityMiddleware({
   enabled: process.env.SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_ENABLED === 'true',
-  maxActions: Number(process.env.SEMAPPS_MOLECULER_LOCALITY_MAX_ACTIONS) || 200
+  maxActions: Number(process.env.SEMAPPS_MOLECULER_LOCALITY_MAX_ACTIONS) || 200,
+  outputPath: process.env.SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_OUTPUT || undefined
 });
 if (localityTelemetry) middlewares.push(localityTelemetry);
 
@@ -85,8 +83,7 @@ const fabric = createMoleculerFabricConfig();
 module.exports = {
   nodeID: fabric.nodeID,
   namespace: fabric.namespace,
-  // You can set all ServiceBroker configurations here
-  // See https://moleculer.services/docs/0.14/configuration.html
+  registry: fabric.registry,
   middlewares,
   errorHandler,
   logger: [
