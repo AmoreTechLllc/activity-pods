@@ -83,6 +83,8 @@ jobs:
           grep -q 'SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW: "true"' /tmp/adsp-p2-w3-compose.yml
           grep -q 'SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER: "false"' /tmp/adsp-p2-w3-compose.yml
           grep -q 'host.docker.internal:8080/webhook/outbox' /tmp/adsp-p2-w3-compose.yml
+          grep -q 'adsp-p2-w3-loopback-bridge.js' /tmp/adsp-p2-w3-compose.yml
+          grep -q 'pm2-runtime ecosystem.config.js' /tmp/adsp-p2-w3-compose.yml
 
       - name: Build production backend image once
         run: |
@@ -120,15 +122,40 @@ jobs:
             test "$ready" = true
           }
 
+          assert_bridge_listener() {
+            local service="$1"
+            local cid
+            cid="$(docker compose $files ps -q "$service")"
+            test -n "$cid"
+            docker exec "$cid" node - <<'NODE'
+          const net = require('net');
+          const socket = net.connect({ host: '127.0.0.1', port: 18080 });
+          socket.setTimeout(2000);
+          socket.once('connect', () => {
+            socket.end();
+            process.exit(0);
+          });
+          socket.once('timeout', () => {
+            socket.destroy();
+            process.exit(1);
+          });
+          socket.once('error', () => process.exit(1));
+          NODE
+          }
+
           docker compose $files up -d --no-deps backend
           wait_port 3000
+          assert_bridge_listener backend
 
           docker compose $files up -d --no-deps backend_p2_2
           wait_port 3102
+          assert_bridge_listener backend_p2_2
 
           docker compose $files up -d --no-deps backend_p2_3 backend_p2_4
           wait_port 3103
           wait_port 3104
+          assert_bridge_listener backend_p2_3
+          assert_bridge_listener backend_p2_4
 
           docker compose $files ps > measurements/adsp-p2-w3/compose-ps.txt
           for service in backend backend_p2_2 backend_p2_3 backend_p2_4; do
