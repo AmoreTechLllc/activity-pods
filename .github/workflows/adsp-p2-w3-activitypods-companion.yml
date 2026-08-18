@@ -127,7 +127,7 @@ jobs:
             local cid
             cid="$(docker compose $files ps -q "$service")"
             test -n "$cid"
-            docker exec "$cid" node - <<'NODE'
+            docker exec -i "$cid" node - <<'NODE'
           const net = require('net');
           const socket = net.connect({ host: '127.0.0.1', port: 18080 });
           socket.setTimeout(2000);
