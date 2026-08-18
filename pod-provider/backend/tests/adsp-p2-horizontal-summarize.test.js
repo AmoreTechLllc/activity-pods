@@ -1,8 +1,15 @@
 'use strict';
 
-const { buildSummary, compareScale, validateWindow } = require('../scripts/adsp-p2-horizontal-summarize');
+const {
+  assertCaseIdentityUniqueness,
+  buildSummary,
+  compareScale,
+  validateWindow
+} = require('../scripts/adsp-p2-horizontal-summarize');
 
-function windowFor({ replicas, recipients, throughput, p95 = 100, p99 = 120, executorCounts }) {
+function windowFor({ replicas, recipients, throughput, p95 = 100, p99 = 120, executorCounts, seed = 'w' }) {
+  const counts = executorCounts || { r1: 8 };
+  const executors = Object.entries(counts).flatMap(([name, count]) => Array.from({ length: Number(count) }, () => name));
   return {
     phase: 'ADSP-P2-A',
     replicaCount: replicas,
@@ -14,7 +21,12 @@ function windowFor({ replicas, recipients, throughput, p95 = 100, p99 = 120, exe
     duplicateActivityIds: 0,
     throughputPerSecond: throughput,
     completedMs: { p95, p99 },
-    executorCounts: executorCounts || { r1: 8 }
+    executorCounts: counts,
+    results: Array.from({ length: 8 }, (_, index) => ({
+      requestId: `${seed}-req-${index + 1}`,
+      activityId: `${seed}-activity-${index + 1}`,
+      executor: executors[index]
+    }))
   };
 }
 
@@ -23,8 +35,8 @@ function caseEntry(replicas, recipients, throughput, p95, executorCounts) {
     replicaCount: replicas,
     recipientCount: recipients,
     files: Array.from({ length: 5 }, (_, index) => `${replicas}r-${recipients}n-s${index + 1}.json`),
-    windows: Array.from({ length: 5 }, () =>
-      windowFor({ replicas, recipients, throughput, p95, executorCounts })
+    windows: Array.from({ length: 5 }, (_, index) =>
+      windowFor({ replicas, recipients, throughput, p95, executorCounts, seed: `${replicas}r-${recipients}n-s${index + 1}` })
     )
   };
 }
@@ -44,6 +56,19 @@ describe('ADSP P2 horizontal scale summarizer', () => {
         { label: 'bad', replicaCount: 1, recipientCount: 10 }
       )
     ).toThrow(/Duplicate authoritative outcome/u);
+  });
+
+  test('rejects missing per-request results and cross-window identity reuse', () => {
+    const first = windowFor({ replicas: 1, recipients: 10, throughput: 1, seed: 'first' });
+    expect(() =>
+      validateWindow({ ...first, results: first.results.slice(0, 7) }, { label: 'short', replicaCount: 1, recipientCount: 10 })
+    ).toThrow(/Per-request result accounting mismatch/u);
+
+    const second = windowFor({ replicas: 1, recipients: 10, throughput: 1, seed: 'second' });
+    second.results[0].activityId = first.results[0].activityId;
+    expect(() =>
+      assertCaseIdentityUniqueness({ replicaCount: 1, recipientCount: 10, windows: [first, second] })
+    ).toThrow(/Activity ID reused across measured windows/u);
   });
 
   test('throughput closes scale gate at 1.50x', () => {
@@ -82,6 +107,8 @@ describe('ADSP P2 horizontal scale summarizer', () => {
     };
     const summary = buildSummary(cases, [10]);
     expect(summary.complete).toBe(true);
+    expect(summary.cases['4r-10n'].uniqueRequestIds).toBe(40);
+    expect(summary.cases['4r-10n'].uniqueActivityIds).toBe(40);
     expect(summary.scale['10n'].oneToTwo.throughputGatePassed).toBe(true);
     expect(summary.scale['10n'].twoToFour.throughputGatePassed).toBe(true);
 
