@@ -4,6 +4,7 @@ const {
   REMOTE_DELIVERY_PLANNED_EVENT,
   createOutboxPostHandler
 } = require('../lib/activitypub-service-with-delivery-strategy');
+const { toSidecarOutboxPayload } = require('../utils/activitypub-delivery-handoff');
 
 function externalSettings() {
   return {
@@ -80,6 +81,43 @@ describe('ActivityPods zero-target Stream1 observation contract', () => {
       }),
       { meta: { webId: null } }
     );
+  });
+
+  test('serializes the exact authoritative zero-target sidecar wire shape', () => {
+    const activity = {
+      id: 'https://pods.example/as/activity/wire-zero-target',
+      type: 'Create',
+      actor: 'https://pods.example/alice',
+      to: ['https://www.w3.org/ns/activitystreams#Public']
+    };
+    const plan = {
+      schema: 'ap.delivery-plan.v1',
+      intentId: 'apdm-v1-wire-zero-target',
+      activityId: activity.id,
+      actorUri: activity.actor,
+      activity,
+      localRecipients: [],
+      remoteRecipients: [],
+      meta: {
+        visibility: 'public',
+        isPublicActivity: true,
+        isPublicIndexable: true
+      }
+    };
+
+    expect(toSidecarOutboxPayload(plan)).toEqual({
+      actorUri: activity.actor,
+      activityId: activity.id,
+      activity,
+      remoteTargets: [],
+      meta: {
+        visibility: 'public',
+        isPublicActivity: true,
+        isPublicIndexable: true,
+        deliveryPlanIntentId: plan.intentId,
+        deliveryPlanSchema: 'ap.delivery-plan.v1'
+      }
+    });
   });
 
   test('zero remote recipients never causes synthetic remotePost work', async () => {
