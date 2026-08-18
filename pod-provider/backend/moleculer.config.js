@@ -17,6 +17,7 @@ const Fep4adbMiddleware = require('./middlewares/fep-4adb');
 const Fep5bf0CollectionViewsMiddleware = require('./middlewares/fep-5bf0-collection-views');
 const SkipOrphanBlankNodesCleanupMiddleware = require('./middlewares/skip-orphan-blank-nodes-cleanup');
 const ApdmLocalDeliveryDatasetExistMemoMiddleware = require('./middlewares/apdm-local-delivery-dataset-exist-memo');
+const ApdmRemoteActorEgressMiddleware = require('./middlewares/apdm-remote-actor-egress');
 const { createPhase8Tier1Instrumentation } = require('./lib/apdm-phase8-tier1-instrumentation');
 const { createPhase11QueryAttribution } = require('./lib/apdm-phase11-query-attribution');
 const CONFIG = require('./config/config');
@@ -58,9 +59,17 @@ const phase11QueryAttribution = createPhase11QueryAttribution({
   maxContexts: CONFIG.APDM_PHASE11_QUERY_ATTRIBUTION_MAX_CONTEXTS
 });
 
+const apdmExternalRemoteActorEgressEnabled =
+  String(CONFIG.ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native').trim().toLowerCase() === 'external';
+
 const middlewares = [
   CacherMiddleware(cacherConfig), // Set the cacher before the WebAcl middleware
   WebAclMiddleware({ baseUrl: CONFIG.BASE_URL, podProvider: true }),
+  // SemApps 1.1.4 dereferences remote activitypub.actor.get targets with a raw
+  // node-fetch call. External APDM authority therefore replaces only that
+  // remote branch with DNS-aware, pinned, no-redirect actor discovery. Native
+  // ActivityPods remains on the upstream SemApps path.
+  ApdmRemoteActorEgressMiddleware({ enabled: apdmExternalRemoteActorEgressEnabled }),
   SkipOrphanBlankNodesCleanupMiddleware({ enabled: CONFIG.SKIP_ORPHAN_BLANK_NODE_CLEANUP }),
   // Phase 10 remains default-OFF. When explicitly enabled it owns exactly one
   // process-global local-delivery scope seam and refuses ambiguous duplicate ownership.

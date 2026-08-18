@@ -16,6 +16,7 @@ const {
 } = require('./activitypub-delivery-plan');
 
 const DEFAULT_TARGET_RESOLUTION_CONCURRENCY = 10;
+const MAX_TARGET_RESOLUTION_CONCURRENCY = 32;
 const DEFAULT_LOCAL_TARGET_CACHE_MAX_ENTRIES = 4096;
 const DEFAULT_REMOTE_TARGET_CACHE_MAX_ENTRIES = 4096;
 const LOCAL_COLLECTION_QUERIES = Object.freeze({
@@ -63,8 +64,14 @@ function determineVisibility(activity) {
   return determineActivityVisibility(activity);
 }
 
+function normalizeTargetResolutionConcurrency(concurrency) {
+  const numeric = Number(concurrency);
+  if (!Number.isFinite(numeric) || numeric <= 0) return 1;
+  return Math.min(MAX_TARGET_RESOLUTION_CONCURRENCY, Math.max(1, Math.floor(numeric)));
+}
+
 async function mapWithConcurrency(items, concurrency, mapper) {
-  const normalizedConcurrency = Math.max(1, Math.floor(concurrency || 1));
+  const normalizedConcurrency = normalizeTargetResolutionConcurrency(concurrency);
   const output = new Array(items.length);
   let nextIndex = 0;
 
@@ -145,6 +152,13 @@ async function resolveLocalOutboxUri(ctx, actorUri, dataset) {
   return resolveLocalActorCollectionUri(ctx, { actorUri, dataset, collection: 'outbox' });
 }
 
+function assertPreResolvedLocalAccount(actorUri, account) {
+  if (!account || typeof account !== 'object' || Array.isArray(account) || account.webId !== actorUri) {
+    throw new Error(`Pre-resolved local ActivityPub account does not match ${actorUri}`);
+  }
+  return account;
+}
+
 function localDatasetForAccount(actorUri, podProvider, account) {
   if (!account) throw new Error(`Unable to resolve local ActivityPub account for ${actorUri}`);
   const dataset = podProvider ? account.username : account.username || account.dataset;
@@ -174,7 +188,7 @@ async function resolveLocalDeliveryTarget(ctx, actorUri, podProvider, preResolve
   const account =
     preResolvedAccount === undefined
       ? await ctx.call('auth.account.findByWebId', { webId: actorUri })
-      : preResolvedAccount;
+      : assertPreResolvedLocalAccount(actorUri, preResolvedAccount);
   const dataset = localDatasetForAccount(actorUri, podProvider, account);
   const inboxUri = await resolveLocalInboxUri(ctx, actorUri, dataset);
   return { actorUri, dataset, inboxUri };
@@ -191,7 +205,7 @@ async function resolveLocalDeliveryTargetWithCache(
   const account =
     preResolvedAccount === undefined
       ? await ctx.call('auth.account.findByWebId', { webId: actorUri })
-      : preResolvedAccount;
+      : assertPreResolvedLocalAccount(actorUri, preResolvedAccount);
   const dataset = localDatasetForAccount(actorUri, podProvider, account);
 
   if (localDeliveryTargets instanceof Map && localDeliveryTargets.has(actorUri)) {
@@ -397,8 +411,10 @@ module.exports = {
   DEFAULT_LOCAL_TARGET_CACHE_MAX_ENTRIES,
   DEFAULT_REMOTE_TARGET_CACHE_MAX_ENTRIES,
   DEFAULT_TARGET_RESOLUTION_CONCURRENCY,
+  MAX_TARGET_RESOLUTION_CONCURRENCY,
   addressValues,
   assertConcreteRecipientUris,
+  assertPreResolvedLocalAccount,
   assertSourceRecipientCoverage,
   buildDeliveryPlanV1,
   createDeliveryIntentId,
@@ -409,6 +425,7 @@ module.exports = {
   normalizeActorUri,
   normalizeLocalDeliveryTarget,
   normalizeRemoteDeliveryTarget,
+  normalizeTargetResolutionConcurrency,
   resolveLocalActorCollectionUri,
   resolveLocalDeliveryTarget,
   resolveLocalDeliveryTargetWithCache,
