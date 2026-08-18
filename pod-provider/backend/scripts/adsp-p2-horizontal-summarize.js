@@ -54,6 +54,21 @@ function validateWindow(window, expected) {
       throw new Error(`Replica ${executor} executed no measured work in ${expected.label}`);
     }
   }
+
+  if (!Array.isArray(window.results) || window.results.length !== Number(window.requestCount)) {
+    throw new Error(`Per-request result accounting mismatch in ${expected.label}`);
+  }
+  for (const result of window.results) {
+    if (typeof result?.requestId !== 'string' || result.requestId.length === 0) {
+      throw new Error(`Missing request identity in ${expected.label}`);
+    }
+    if (typeof result?.activityId !== 'string' || result.activityId.length === 0) {
+      throw new Error(`Missing persisted Activity identity in ${expected.label}`);
+    }
+    if (!expectedNames.includes(result.executor)) {
+      throw new Error(`Per-request executor drift in ${expected.label}: ${result.executor}`);
+    }
+  }
   return window;
 }
 
@@ -79,8 +94,33 @@ function collectResults(directory, recipientCounts = DEFAULT_RECIPIENT_COUNTS) {
   return cases;
 }
 
+function assertCaseIdentityUniqueness(entry) {
+  const requestIds = new Set();
+  const activityIds = new Set();
+  let resultCount = 0;
+  for (const window of entry.windows) {
+    for (const result of window.results || []) {
+      resultCount += 1;
+      if (requestIds.has(result.requestId)) {
+        throw new Error(`Request ID reused across measured windows in ${entry.replicaCount}r-${entry.recipientCount}n: ${result.requestId}`);
+      }
+      if (activityIds.has(result.activityId)) {
+        throw new Error(`Activity ID reused across measured windows in ${entry.replicaCount}r-${entry.recipientCount}n: ${result.activityId}`);
+      }
+      requestIds.add(result.requestId);
+      activityIds.add(result.activityId);
+    }
+  }
+  const expectedResults = entry.windows.reduce((sum, window) => sum + Number(window.requestCount), 0);
+  if (resultCount !== expectedResults) {
+    throw new Error(`Cross-window result accounting mismatch in ${entry.replicaCount}r-${entry.recipientCount}n`);
+  }
+  return { requestIds: requestIds.size, activityIds: activityIds.size };
+}
+
 function summarizeCase(entry) {
   const windows = entry.windows;
+  const identityCounts = assertCaseIdentityUniqueness(entry);
   const executorTotals = Object.create(null);
   for (const window of windows) {
     for (const [executor, count] of Object.entries(window.executorCounts || {})) {
@@ -92,6 +132,8 @@ function summarizeCase(entry) {
     recipientCount: entry.recipientCount,
     successfulSamples: windows.length,
     complete: windows.length >= MIN_SAMPLES,
+    uniqueRequestIds: identityCounts.requestIds,
+    uniqueActivityIds: identityCounts.activityIds,
     throughputPerSecond: {
       p50: median(windows.map(window => Number(window.throughputPerSecond))),
       p95: percentile(windows.map(window => Number(window.throughputPerSecond)), 0.95)
@@ -185,6 +227,7 @@ if (require.main === module) {
 module.exports = {
   MIN_SAMPLES,
   REQUIRED_REPLICAS,
+  assertCaseIdentityUniqueness,
   buildSummary,
   collectResults,
   compareScale,
