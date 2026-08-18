@@ -11,6 +11,45 @@ function normalizeMode(value) {
   return normalized;
 }
 
+function describeAuthorityState({ mode, preview, authority, compatibilityPreviewGuard }) {
+  if (mode === 'native') {
+    return {
+      mode,
+      preview: false,
+      authority: false,
+      compatibilityPreviewGuard: false,
+      deliveryExecutor: 'semapps-native',
+      authorityProfile: 'native-rollback',
+      productionCanonical: false,
+      sidecarDeliveryAuthority: false
+    };
+  }
+
+  if (authority) {
+    return {
+      mode,
+      preview: false,
+      authority: true,
+      compatibilityPreviewGuard,
+      deliveryExecutor: 'sidecar-external',
+      authorityProfile: 'external-production-authority',
+      productionCanonical: true,
+      sidecarDeliveryAuthority: true
+    };
+  }
+
+  return {
+    mode,
+    preview: true,
+    authority: false,
+    compatibilityPreviewGuard,
+    deliveryExecutor: 'sidecar-external',
+    authorityProfile: 'external-preview',
+    productionCanonical: false,
+    sidecarDeliveryAuthority: true
+  };
+}
+
 /**
  * Resolve the APDM Phase 5 remote-authority state without weakening the
  * existing Phase 2-4 interception/handoff machinery.
@@ -40,12 +79,12 @@ function resolvePhase5RemoteAuthority({
   // Emergency rollback is intentionally one switch: native wins over stale
   // external flags and restores the original SemApps remote executor.
   if (mode === 'native') {
-    return {
+    return describeAuthorityState({
       mode,
       preview: false,
       authority: false,
       compatibilityPreviewGuard: false
-    };
+    });
   }
 
   if (preview && authority) {
@@ -68,14 +107,15 @@ function resolvePhase5RemoteAuthority({
     );
   }
 
-  return {
+  return describeAuthorityState({
     mode,
     preview: preview && previewEnvironment,
     authority,
     compatibilityPreviewGuard: true
-  };
+  });
 }
 
 module.exports = {
+  describeAuthorityState,
   resolvePhase5RemoteAuthority
 };
