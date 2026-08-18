@@ -84,42 +84,16 @@ jobs:
         run: |
           set -euo pipefail
           files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
-          diagnostics="${GITHUB_WORKSPACE}/adsp-p2-replica2-diagnostics.txt"
-          : > "$diagnostics"
           docker compose $files up -d --no-deps backend_p2_2
           ready=false
           for attempt in $(seq 1 120); do
             if curl -fsS --max-time 2 http://localhost:3102/ >/dev/null 2>&1; then ready=true; break; fi
             sleep 1
           done
-          if [ "$ready" != true ]; then
-            {
-              echo 'replica2_readiness=false'
-              echo '--- compose ps ---'
-              docker compose $files ps -a backend backend_p2_2 || true
-              echo '--- replica2 inspect state ---'
-              docker inspect "$(docker compose $files ps -q backend_p2_2)" --format '{{json .State}}' || true
-              echo '--- replica2 last logs ---'
-              docker compose $files logs --no-color --tail=160 backend_p2_2 || true
-            } | tee "$diagnostics"
-            exit 1
-          fi
-          echo 'replica2_readiness=true' | tee "$diagnostics"
-          set +e
+          test "$ready" = true
           docker compose $files exec -T backend \
             node scripts/proof-adsp-p2-horizontal-pod-cells.js 2 \
-              adsp-p2-pod-cell-1 adsp-p2-pod-cell-2 2>&1 | tee -a "$diagnostics"
-          proof_status=${PIPESTATUS[0]}
-          set -e
-          if [ "$proof_status" -ne 0 ]; then
-            {
-              echo '--- compose ps after proof failure ---'
-              docker compose $files ps -a backend backend_p2_2 || true
-              echo '--- replica2 last logs after proof failure ---'
-              docker compose $files logs --no-color --tail=160 backend_p2_2 || true
-            } | tee -a "$diagnostics"
-            exit "$proof_status"
-          fi
+              adsp-p2-pod-cell-1 adsp-p2-pod-cell-2
 
       - name: Add replicas 3 and 4 and prove four-node Redis fabric
         run: |
@@ -147,24 +121,46 @@ jobs:
             node scripts/proof-adsp-p2-horizontal-pod-cells.js 2 \
               adsp-p2-pod-cell-1 adsp-p2-pod-cell-2
 
-      - name: Upload compact replica-2 diagnostics
+      - name: Capture topology diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+          diagnostics="${GITHUB_WORKSPACE}/adsp-p2-horizontal-topology-diagnostics.txt"
+          : > "$diagnostics"
+          {
+            echo '--- compose ps ---'
+            docker compose $files ps -a backend backend_p2_2 backend_p2_3 backend_p2_4 fuseki_test redis
+            echo '--- backend container states ---'
+            for service in backend backend_p2_2 backend_p2_3 backend_p2_4; do
+              id="$(docker compose $files ps -aq "$service" | head -n 1)"
+              echo "service=${service} container=${id:-missing}"
+              if [ -n "$id" ]; then
+                docker inspect "$id" --format 'status={{.State.Status}} exitCode={{.State.ExitCode}} oomKilled={{.State.OOMKilled}} error={{json .State.Error}} startedAt={{.State.StartedAt}} finishedAt={{.State.FinishedAt}}'
+              fi
+            done
+            echo '--- live container resource snapshot ---'
+            docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.PIDs}}'
+            echo '--- docker info memory ---'
+            docker info --format 'totalMemory={{.MemTotal}} ncpu={{.NCPU}}'
+            echo '--- runner memory ---'
+            free -h || true
+            echo '--- runner cgroup memory events ---'
+            cat /sys/fs/cgroup/memory.events 2>/dev/null || true
+            echo '--- recent backend logs ---'
+            docker compose $files logs --no-color --tail=220 backend backend_p2_2 backend_p2_3 backend_p2_4
+            echo '--- recent dependency logs ---'
+            docker compose $files logs --no-color --tail=120 fuseki_test redis
+          } 2>&1 | tee "$diagnostics"
+
+      - name: Upload topology diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: adsp-p2-replica2-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: adsp-p2-replica2-diagnostics.txt
-          if-no-files-found: ignore
+          name: adsp-p2-horizontal-topology-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: adsp-p2-horizontal-topology-diagnostics.txt
+          if-no-files-found: error
           retention-days: 7
-
-      - name: Show topology logs on failure
-        if: failure()
-        run: |
-          docker compose \
-            -f docker-compose-test.yml \
-            -f docker-compose-phase8.yml \
-            -f docker-compose-adsp-p2-horizontal.yml \
-            logs --no-color --tail=500 \
-              backend backend_p2_2 backend_p2_3 backend_p2_4 fuseki_test redis || true
 
       - name: Stop isolated P2 foundation stack
         if: always()
