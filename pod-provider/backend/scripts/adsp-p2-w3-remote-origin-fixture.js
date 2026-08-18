@@ -21,10 +21,22 @@ const DEFAULT_TRANSPORTER_URL = 'redis://127.0.0.1:6379/12';
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_EVIDENCE_TIMEOUT_MS = 120_000;
 const CORRELATION_SCHEMA = 'adsp.p2.w3.origin-correlation.v1';
+const ROOT_ACTION = 'activitypub.outbox.post';
+const W3_REPLICA_COUNTS = new Set([1, 2, 4]);
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 function positiveInteger(value, fallback, label) {
   const parsed = Number(value === undefined ? fallback : value);
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${label} must be a positive integer`);
+  return parsed;
+}
+
+function validateReplicaCount(value) {
+  const parsed = positiveInteger(value, undefined, 'ADSP P2 W3 expected replicas');
+  if (!W3_REPLICA_COUNTS.has(parsed)) throw new Error('ADSP P2 W3 expected replicas must be one of 1, 2, or 4');
   return parsed;
 }
 
@@ -47,6 +59,20 @@ function createW3RunnerBroker(transporterUrl, runId, namespace) {
   });
 }
 
+function endpointCount(broker, actionName = ROOT_ACTION) {
+  return broker.registry.getActionEndpoints(actionName)?.count?.() ?? 0;
+}
+
+async function waitForExactRootEndpoints(broker, expectedReplicas, timeoutMs) {
+  const expected = validateReplicaCount(expectedReplicas);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (endpointCount(broker) === expected) return expected;
+    await sleep(100);
+  }
+  throw new Error(`Expected exactly ${expected} ${ROOT_ACTION} endpoints, observed ${endpointCount(broker)}`);
+}
+
 function writeCorrelationEvidence(filePath, evidence) {
   if (!filePath) return;
   if (typeof filePath !== 'string' || filePath.trim() !== filePath || filePath.length === 0 || /[\r\n\0]/u.test(filePath)) {
@@ -56,9 +82,11 @@ function writeCorrelationEvidence(filePath, evidence) {
     schema: CORRELATION_SCHEMA,
     requestId: evidence.requestId,
     activityId: evidence.activityId,
-    moleculerNamespace: validateNamespace(evidence.moleculerNamespace)
+    moleculerNamespace: validateNamespace(evidence.moleculerNamespace),
+    expectedReplicas: validateReplicaCount(evidence.expectedReplicas)
   };
   for (const [name, value] of Object.entries(record)) {
+    if (name === 'expectedReplicas') continue;
     if (typeof value !== 'string' || value.length === 0) throw new Error(`ADSP P2 W3 correlation ${name} is required`);
   }
   const outputPath = path.resolve(filePath);
@@ -71,6 +99,7 @@ function writeCorrelationEvidence(filePath, evidence) {
 async function runW3RemoteOriginFixture({
   remoteActorUri,
   namespace = process.env.ADSP_P2_NAMESPACE,
+  expectedReplicas = process.env.ADSP_P2_W3_EXPECTED_REPLICAS,
   correlationOutput = process.env.ADSP_P2_W3_CORRELATION_OUTPUT,
   baseUrl = process.env.ADSP_P2_W3_BACKEND_BASE_URL || DEFAULT_BASE_URL,
   transporterUrl = process.env.SEMAPPS_REDIS_TRANSPORTER_URL || DEFAULT_TRANSPORTER_URL,
@@ -84,6 +113,7 @@ async function runW3RemoteOriginFixture({
 }) {
   const normalizedRemoteActorUri = validateRemoteActorUri(remoteActorUri);
   const normalizedNamespace = validateNamespace(namespace);
+  const normalizedExpectedReplicas = validateReplicaCount(expectedReplicas);
   const broker = createW3RunnerBroker(transporterUrl, runId, normalizedNamespace);
   const senderWebIdRef = { value: null };
   const marker = `ADSP P2 W3 remote-origin ${normalizeRunId(runId)} ${crypto.randomBytes(12).toString('hex')}`;
@@ -92,6 +122,7 @@ async function runW3RemoteOriginFixture({
   await broker.start();
   try {
     await broker.waitForServices(['auth', 'activitypub.outbox', 'activitypub.actor'], readyTimeoutMs);
+    await waitForExactRootEndpoints(broker, normalizedExpectedReplicas, readyTimeoutMs);
     const password = process.env.ADSP_P2_W3_SIGNUP_PASSWORD || `${crypto.randomBytes(24).toString('base64url')}A1!`;
     const sender = await signupWithCandidateRetries({
       baseUrl,
@@ -106,7 +137,7 @@ async function runW3RemoteOriginFixture({
     latch.arm();
     const [postResult, plannedEvent] = await Promise.all([
       broker.call(
-        'activitypub.outbox.post',
+        ROOT_ACTION,
         {
           collectionUri: sender.outbox,
           type: 'Create',
@@ -132,7 +163,8 @@ async function runW3RemoteOriginFixture({
     writeCorrelationEvidence(correlationOutput, {
       requestId,
       activityId: evidence.activityId,
-      moleculerNamespace: normalizedNamespace
+      moleculerNamespace: normalizedNamespace,
+      expectedReplicas: normalizedExpectedReplicas
     });
 
     // Keep stdout/parser compatibility with the strict P0 origin schema. W3
@@ -164,8 +196,12 @@ if (require.main === module) {
 
 module.exports = {
   CORRELATION_SCHEMA,
+  ROOT_ACTION,
   createW3RunnerBroker,
+  endpointCount,
   runW3RemoteOriginFixture,
   validateNamespace,
+  validateReplicaCount,
+  waitForExactRootEndpoints,
   writeCorrelationEvidence
 };
