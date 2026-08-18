@@ -2,6 +2,7 @@
 
 const { ServiceBroker } = require('moleculer');
 const RdfJSONSerializer = require('../RdfJSONSerializer');
+const AdspActionLocalityMiddleware = require('../middlewares/adsp-action-locality');
 const probeService = require('../p1-fixtures/services/rdf-probe.service');
 
 const redisUrl = process.env.SEMAPPS_REDIS_TRANSPORTER_URL || 'redis://127.0.0.1:6379';
@@ -32,6 +33,7 @@ function brokerOptions(nodeID, brokerNamespace = namespace) {
     namespace: brokerNamespace,
     transporter: redisUrl,
     serializer: new RdfJSONSerializer(),
+    middlewares: [AdspActionLocalityMiddleware({ enabled: true, maxActions: 20 })],
     logger: false,
     heartbeatInterval: 1,
     heartbeatTimeout: 3,
@@ -67,6 +69,13 @@ async function expectServiceUnavailable(broker) {
     return { unavailable: true, code: error?.code || error?.name || 'UNKNOWN' };
   }
   throw new Error('Expected remote probe service to be unavailable');
+}
+
+function localitySnapshot(broker) {
+  if (!broker.adspActionLocality?.snapshot) {
+    throw new Error(`Missing ADSP locality telemetry on ${broker.nodeID}`);
+  }
+  return broker.adspActionLocality.snapshot();
 }
 
 async function main() {
@@ -122,6 +131,15 @@ async function main() {
       throw new Error('Remote error propagation parity failed');
     }
 
+    const firstCallerTelemetry = localitySnapshot(caller);
+    const firstProbeTelemetry = localitySnapshot(probeA);
+    if ((firstCallerTelemetry.remoteByAction[ACTION] || 0) < 1) {
+      throw new Error('Caller did not record the genuine remote action');
+    }
+    if ((firstProbeTelemetry.localByAction[ACTION] || 0) < 1) {
+      throw new Error('Probe node did not record local execution of the remotely requested action');
+    }
+
     const isolatedResult = await expectServiceUnavailable(isolated);
 
     await probeA.stop();
@@ -140,6 +158,15 @@ async function main() {
       throw new Error('Registry did not converge to the rejoined service node');
     }
 
+    const finalCallerTelemetry = localitySnapshot(caller);
+    const replacementTelemetry = localitySnapshot(probeB);
+    if ((finalCallerTelemetry.remoteByAction[ACTION] || 0) < 2) {
+      throw new Error('Caller telemetry did not include the rejoined remote action');
+    }
+    if ((replacementTelemetry.localByAction[ACTION] || 0) < 1) {
+      throw new Error('Replacement node telemetry did not include local execution');
+    }
+
     process.stdout.write(
       `${JSON.stringify(
         {
@@ -153,6 +180,10 @@ async function main() {
           remoteRdfParity: true,
           remoteJsonLdParity: true,
           remoteErrorParity: true,
+          localityTelemetry: {
+            caller: finalCallerTelemetry,
+            replacementProbe: replacementTelemetry
+          },
           namespaceIsolation: isolatedResult,
           leaveRegistryEndpointCount: 0,
           leaveRemovesRoute: unavailableAfterLeave,
