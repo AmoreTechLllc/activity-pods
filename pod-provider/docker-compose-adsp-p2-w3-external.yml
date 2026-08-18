@@ -9,6 +9,7 @@ x-adsp-p2-w3-external-environment: &adsp-p2-w3-external-environment
   SIDECAR_DELIVERY_HANDOFF_URL: '${ADSP_P2_W3_SIDECAR_HANDOFF_URL:-http://host.docker.internal:8080/webhook/outbox}'
   ACTIVITYPODS_TOKEN: '${ACTIVITYPODS_TOKEN:-}'
   SIDECAR_TOKEN: '${SIDECAR_TOKEN:-}'
+  SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_ENABLED: 'true'
 
 x-adsp-p2-w3-external-hosts: &adsp-p2-w3-external-hosts
   - 'host.docker.internal:host-gateway'
@@ -18,18 +19,22 @@ services:
     extra_hosts: *adsp-p2-w3-external-hosts
     environment:
       <<: *adsp-p2-w3-external-environment
+      SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_OUTPUT: '/app/backend/measurements/adsp-p2-w3/locality-r1.json'
 
   backend_p2_2:
     extra_hosts: *adsp-p2-w3-external-hosts
     environment:
       <<: *adsp-p2-w3-external-environment
+      SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_OUTPUT: '/app/backend/measurements/adsp-p2-w3/locality-r2.json'
 
   backend_p2_3:
     extra_hosts: *adsp-p2-w3-external-hosts
     environment:
       <<: *adsp-p2-w3-external-environment
+      SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_OUTPUT: '/app/backend/measurements/adsp-p2-w3/locality-r3.json'
 
   backend_p2_4:
     extra_hosts: *adsp-p2-w3-external-hosts
     environment:
       <<: *adsp-p2-w3-external-environment
+      SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_OUTPUT: '/app/backend/measurements/adsp-p2-w3/locality-r4.json'
