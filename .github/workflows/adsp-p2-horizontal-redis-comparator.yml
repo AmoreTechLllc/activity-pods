@@ -75,8 +75,8 @@ jobs:
           else
             counts='10'
             samples='1'
-            requests='2'
-            concurrency='2'
+            requests='8'
+            concurrency='8'
             evidence=false
           fi
 
@@ -88,6 +88,7 @@ jobs:
             const value = Number(raw);
             if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
           }
+          if (Number(requestsRaw) < 4) throw new Error('requests_per_window must be at least 4 to prove execution across the 4-replica arm');
           if (Number(concurrencyRaw) > Number(requestsRaw)) throw new Error('concurrency cannot exceed requests_per_window');
           if (evidenceRaw === 'true' && Number(samplesRaw) < 5) throw new Error('Decision evidence requires at least five measured windows per case');
           console.log(`ADSP_P2_RECIPIENT_COUNTS=${counts.join(',')}`);
@@ -323,13 +324,23 @@ jobs:
             test -s "$file"
             node - "$file" "$replicas" <<'NODE'
           const fs = require('fs');
-          const [file, replicas] = process.argv.slice(2);
+          const [file, replicasRaw] = process.argv.slice(2);
+          const replicas = Number(replicasRaw);
           const result = JSON.parse(fs.readFileSync(file, 'utf8'));
-          if (result.phase !== 'ADSP-P2-A' || Number(result.replicaCount) !== Number(replicas)) throw new Error('Smoke topology mismatch');
+          if (result.phase !== 'ADSP-P2-A' || Number(result.replicaCount) !== replicas) throw new Error('Smoke topology mismatch');
           if (result.successfulOutcomes !== result.requestCount || result.failedOutcomes !== 0) throw new Error('Smoke correctness failure');
           if (result.duplicateRequestIds !== 0 || result.duplicateActivityIds !== 0) throw new Error('Smoke duplicate outcome');
-          const total = Object.values(result.executorCounts || {}).reduce((sum, n) => sum + Number(n), 0);
+          const counts = result.executorCounts || {};
+          const total = Object.values(counts).reduce((sum, n) => sum + Number(n), 0);
           if (total !== result.requestCount) throw new Error('Smoke executor accounting mismatch');
+          for (let index = 1; index <= replicas; index += 1) {
+            if (!Number.isInteger(Number(counts[`r${index}`])) || Number(counts[`r${index}`]) <= 0) {
+              throw new Error(`Smoke replica r${index} executed no measured work`);
+            }
+          }
+          if (Object.keys(counts).some(name => !/^r[1-4]$/u.test(name) || Number(name.slice(1)) > replicas)) {
+            throw new Error('Smoke unexpected executor identity');
+          }
           NODE
           done
 
