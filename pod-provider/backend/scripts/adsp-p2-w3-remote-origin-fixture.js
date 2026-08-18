@@ -35,6 +35,9 @@ function positiveInteger(value, fallback, label) {
 }
 
 function validateReplicaCount(value) {
+  if (typeof value === 'string' && !/^(?:1|2|4)$/u.test(value)) {
+    throw new Error('ADSP P2 W3 expected replicas must be one of 1, 2, or 4');
+  }
   const parsed = positiveInteger(value, undefined, 'ADSP P2 W3 expected replicas');
   if (!W3_REPLICA_COUNTS.has(parsed)) throw new Error('ADSP P2 W3 expected replicas must be one of 1, 2, or 4');
   return parsed;
