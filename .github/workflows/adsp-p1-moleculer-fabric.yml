@@ -10,6 +10,8 @@ on:
       - 'pod-provider/backend/scripts/run-moleculer-fabric.js'
       - 'pod-provider/backend/scripts/proof-adsp-p1-moleculer-fabric.js'
       - 'pod-provider/backend/scripts/proof-adsp-p1-service-group-launcher.js'
+      - 'pod-provider/backend/scripts/proof-adsp-p1-node-loss-authority.js'
+      - 'pod-provider/backend/scripts/adsp-p1-authority-probe-worker.js'
       - 'pod-provider/backend/p1-fixtures/**'
       - 'pod-provider/backend/tests/moleculer-fabric.test.js'
       - 'pod-provider/backend/package.json'
@@ -83,3 +85,9 @@ jobs:
         env:
           SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379
         run: node scripts/proof-adsp-p1-service-group-launcher.js
+
+      - name: Prove node loss does not replay authoritative work
+        working-directory: pod-provider/backend
+        env:
+          SEMAPPS_REDIS_TRANSPORTER_URL: redis://127.0.0.1:6379
+        run: node scripts/proof-adsp-p1-node-loss-authority.js
