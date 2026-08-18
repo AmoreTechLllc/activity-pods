@@ -6,6 +6,7 @@ on:
       - 'pod-provider/backend/config/moleculer-fabric.js'
       - 'pod-provider/backend/moleculer.config.js'
       - 'pod-provider/backend/RdfJSONSerializer.js'
+      - 'pod-provider/backend/middlewares/adsp-action-locality.js'
       - 'pod-provider/backend/scripts/run-moleculer-fabric.js'
       - 'pod-provider/backend/scripts/proof-adsp-p1-moleculer-fabric.js'
       - 'pod-provider/backend/p1-fixtures/**'
