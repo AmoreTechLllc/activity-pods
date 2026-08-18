@@ -10,7 +10,8 @@ const {
 const {
   AS_PUBLIC,
   buildFixtureEvidence,
-  createEvidenceLatch
+  createEvidenceLatch,
+  validateRemoteActorUri
 } = require('./adsp-p0-remote-origin-fixture');
 
 const DEFAULT_BASE_URL = 'http://localhost:3000';
@@ -56,11 +57,9 @@ async function runW3RemoteOriginFixture({
   ),
   runId = process.env.ADSP_P2_W3_RUN_ID || `${Date.now()}`
 }) {
-  if (typeof remoteActorUri !== 'string' || remoteActorUri.length === 0) {
-    throw new Error('ADSP P2 W3 remote actor URI is required');
-  }
-
-  const broker = createW3RunnerBroker(transporterUrl, runId, namespace);
+  const normalizedRemoteActorUri = validateRemoteActorUri(remoteActorUri);
+  const normalizedNamespace = validateNamespace(namespace);
+  const broker = createW3RunnerBroker(transporterUrl, runId, normalizedNamespace);
   const senderWebIdRef = { value: null };
   const marker = `ADSP P2 W3 remote-origin ${normalizeRunId(runId)} ${crypto.randomBytes(12).toString('hex')}`;
   const latch = createEvidenceLatch(broker, { senderWebIdRef, marker, timeoutMs: evidenceTimeoutMs });
@@ -86,7 +85,7 @@ async function runW3RemoteOriginFixture({
           collectionUri: sender.outbox,
           type: 'Create',
           actor: sender.webId,
-          to: [remoteActorUri],
+          to: [normalizedRemoteActorUri],
           cc: [AS_PUBLIC],
           object: { type: 'Note', content: marker }
         },
@@ -101,14 +100,14 @@ async function runW3RemoteOriginFixture({
     const evidence = buildFixtureEvidence({
       postResult,
       plannedEvent,
-      remoteActorUri,
+      remoteActorUri: normalizedRemoteActorUri,
       senderWebId: sender.webId
     });
 
     return {
       ...evidence,
       adspPhase: 'ADSP-P2-W3',
-      moleculerNamespace: validateNamespace(namespace),
+      moleculerNamespace: normalizedNamespace,
       senderUsername: sender.username
     };
   } finally {
