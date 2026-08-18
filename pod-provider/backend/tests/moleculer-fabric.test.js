@@ -5,6 +5,7 @@ const {
 } = require('../config/moleculer-fabric');
 const { childExitCode } = require('../scripts/run-moleculer-fabric');
 const RdfJSONSerializer = require('../RdfJSONSerializer');
+const dockerEcosystem = require('../../docker/ecosystem.config');
 
 describe('ADSP P1 Moleculer fabric configuration', () => {
   test('single-process defaults preserve the native pod-provider identity and full service cell', () => {
@@ -130,5 +131,14 @@ describe('ADSP P1 Moleculer fabric configuration', () => {
     expect(childExitCode(null, 'SIGTERM')).toBe(143);
     expect(childExitCode(null, 'SIGKILL')).toBe(137);
     expect(childExitCode(null, 'UNKNOWN_SIGNAL')).toBe(1);
+  });
+
+  test('Docker PM2 startup cannot bypass the validated fabric launcher', () => {
+    expect(dockerEcosystem.apps).toHaveLength(1);
+    const backend = dockerEcosystem.apps[0];
+    expect(backend.script).toBe('./scripts/run-moleculer-fabric.js');
+    expect(backend.interpreter).toBe('node');
+    expect(String(backend.args || '')).not.toMatch(/services\//u);
+    expect(String(backend.args || '')).not.toMatch(/moleculer-runner/u);
   });
 });
