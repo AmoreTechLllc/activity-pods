@@ -68,15 +68,20 @@ jobs:
           const fs = require('node:fs');
           const path = 'measurements/apdm-pre-createjob/benchmark.json';
           const result = JSON.parse(fs.readFileSync(path, 'utf8'));
-          if (result.schema !== 'apdm-pre-createjob-benchmark.v1') throw new Error('Unexpected benchmark schema');
+          if (result.schema !== 'apdm-pre-createjob-benchmark.v2') throw new Error('Unexpected benchmark schema');
+          if (!/paired samples/u.test(result.methodology || '')) throw new Error('Benchmark must use paired methodology');
           if (!Array.isArray(result.cases) || result.cases.length !== 5) throw new Error('Expected five fanout cases');
           const expected = [10, 100, 1000, 5000, 10000];
           if (JSON.stringify(result.cases.map(c => c.fanout)) !== JSON.stringify(expected)) {
             throw new Error('Unexpected fanout matrix');
           }
           for (const sample of result.cases) {
+            if (sample.ordering !== 'paired-alternating') throw new Error(`Unpaired ordering for N=${sample.fanout}`);
             if (!Number.isFinite(sample.current.wallMs.p95) || !Number.isFinite(sample.preCreateJob.wallMs.p95)) {
               throw new Error(`Missing p95 evidence for N=${sample.fanout}`);
+            }
+            if (!Number.isFinite(sample.pairedSaved.wallMs.p50)) {
+              throw new Error(`Missing paired absolute saving for N=${sample.fanout}`);
             }
             if (sample.constructionBytes.currentCapturedJobJsonBytes <= sample.constructionBytes.directRecipientVectorJsonBytes) {
               throw new Error(`Expected current representation overhead for N=${sample.fanout}`);
