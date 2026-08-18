@@ -1,0 +1,61 @@
+x-adsp-p2-common: &adsp-p2-common
+  image: apdm-phase8-backend:local
+  depends_on:
+    - fuseki_test
+    - redis
+    - mailcatcher
+  restart: 'no'
+  expose:
+    - '3000'
+  environment: &adsp-p2-environment
+    NODE_ENV: test
+    SEMAPPS_SPARQL_ENDPOINT: http://fuseki_test:3030/
+    SEMAPPS_QUEUE_SERVICE_URL: redis://redis:6379/11
+    SEMAPPS_REDIS_TRANSPORTER_URL: redis://redis:6379/12
+    SEMAPPS_REDIS_OIDC_PROVIDER_URL: redis://redis:6379/13
+    SEMAPPS_REDIS_CACHE_URL: redis://redis:6379/10
+    REDIS_URL: redis://redis:6379
+    SEMAPPS_SMTP_HOST: mailcatcher
+    SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: native
+    SIDECAR_WEBHOOK_URL: ''
+    SEMAPPS_MOLECULER_MODE: distributed
+    SEMAPPS_MOLECULER_NAMESPACE: '${ADSP_P2_NAMESPACE:-adsp-p2-horizontal}'
+    SEMAPPS_MOLECULER_SERVICE_GROUP: pod-cell
+    APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
+    APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+    APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+    APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED: 'false'
+    SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_ENABLED: 'false'
+
+services:
+  # Replica 1 deliberately reuses the canonical `backend` service so existing
+  # provisioning and measurement tooling can keep one stable HTTP ingress on
+  # localhost:3000 while the Moleculer fabric expands behind it.
+  backend:
+    environment:
+      <<: *adsp-p2-environment
+      SEMAPPS_MOLECULER_NODE_ID: adsp-p2-pod-cell-1
+
+  backend_p2_2:
+    <<: *adsp-p2-common
+    ports:
+      - '3102:3000'
+    environment:
+      <<: *adsp-p2-environment
+      SEMAPPS_MOLECULER_NODE_ID: adsp-p2-pod-cell-2
+
+  backend_p2_3:
+    <<: *adsp-p2-common
+    ports:
+      - '3103:3000'
+    environment:
+      <<: *adsp-p2-environment
+      SEMAPPS_MOLECULER_NODE_ID: adsp-p2-pod-cell-3
+
+  backend_p2_4:
+    <<: *adsp-p2-common
+    ports:
+      - '3104:3000'
+    environment:
+      <<: *adsp-p2-environment
+      SEMAPPS_MOLECULER_NODE_ID: adsp-p2-pod-cell-4
