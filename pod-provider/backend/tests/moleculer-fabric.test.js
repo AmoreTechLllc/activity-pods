@@ -1,7 +1,9 @@
 const {
   createMoleculerFabricConfig,
-  resolveServicePatterns
+  resolveServicePatterns,
+  validateRedisTransporterUrl
 } = require('../config/moleculer-fabric');
+const { childExitCode } = require('../scripts/run-moleculer-fabric');
 const RdfJSONSerializer = require('../RdfJSONSerializer');
 
 describe('ADSP P1 Moleculer fabric configuration', () => {
@@ -28,6 +30,19 @@ describe('ADSP P1 Moleculer fabric configuration', () => {
     expect(withTransport.serializer).toBeInstanceOf(RdfJSONSerializer);
     expect(withoutTransport.registry.preferLocal).toBe(true);
     expect(withTransport.registry.preferLocal).toBe(true);
+  });
+
+  test('Redis transporter URLs accept only explicit Redis schemes', () => {
+    expect(validateRedisTransporterUrl('redis://127.0.0.1:6379/12')).toBe('redis://127.0.0.1:6379/12');
+    expect(validateRedisTransporterUrl('rediss://redis.example.test:6380/12')).toBe(
+      'rediss://redis.example.test:6380/12'
+    );
+    expect(validateRedisTransporterUrl('  redis://redis:6379  ')).toBe('redis://redis:6379');
+    expect(validateRedisTransporterUrl('')).toBeUndefined();
+
+    for (const value of ['Redis', 'not-a-url', 'nats://127.0.0.1:4222', 'http://redis:6379', 'redis:///12']) {
+      expect(() => validateRedisTransporterUrl(value)).toThrow(/redis:\/\/ or rediss:\/\//);
+    }
   });
 
   test('distributed mode requires an explicit unique node ID', () => {
@@ -67,6 +82,17 @@ describe('ADSP P1 Moleculer fabric configuration', () => {
     ).toThrow(/requires SEMAPPS_REDIS_TRANSPORTER_URL/);
   });
 
+  test('distributed mode rejects a non-Redis transporter before broker startup', () => {
+    expect(() =>
+      createMoleculerFabricConfig({
+        SEMAPPS_MOLECULER_MODE: 'distributed',
+        SEMAPPS_MOLECULER_NODE_ID: 'pod-provider-a',
+        SEMAPPS_MOLECULER_NAMESPACE: 'prod-fabric',
+        SEMAPPS_REDIS_TRANSPORTER_URL: 'nats://127.0.0.1:4222'
+      })
+    ).toThrow(/redis:\/\/ or rediss:\/\//);
+  });
+
   test('two distinct distributed node identities are accepted in the same namespace', () => {
     const common = {
       SEMAPPS_MOLECULER_MODE: 'distributed',
@@ -96,5 +122,13 @@ describe('ADSP P1 Moleculer fabric configuration', () => {
 
   test('the P1 probe group is isolated from the production service tree', () => {
     expect(resolveServicePatterns('p1-probe')).toEqual(['p1-fixtures/services/*.service.js']);
+  });
+
+  test('launcher maps child signal termination to conventional process exit status without self-signalling', () => {
+    expect(childExitCode(0, null)).toBe(0);
+    expect(childExitCode(null, 'SIGINT')).toBe(130);
+    expect(childExitCode(null, 'SIGTERM')).toBe(143);
+    expect(childExitCode(null, 'SIGKILL')).toBe(137);
+    expect(childExitCode(null, 'UNKNOWN_SIGNAL')).toBe(1);
   });
 });
