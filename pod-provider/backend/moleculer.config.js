@@ -17,6 +17,7 @@ const Fep4adbMiddleware = require('./middlewares/fep-4adb');
 const Fep5bf0CollectionViewsMiddleware = require('./middlewares/fep-5bf0-collection-views');
 const SkipOrphanBlankNodesCleanupMiddleware = require('./middlewares/skip-orphan-blank-nodes-cleanup');
 const ApdmLocalDeliveryDatasetExistMemoMiddleware = require('./middlewares/apdm-local-delivery-dataset-exist-memo');
+const AdspActionLocalityMiddleware = require('./middlewares/adsp-action-locality');
 const { createPhase8Tier1Instrumentation } = require('./lib/apdm-phase8-tier1-instrumentation');
 const CONFIG = require('./config/config');
 const errorHandler = require('./config/errorHandler');
@@ -71,6 +72,12 @@ const middlewares = [
 // Keep Phase 8 measurement entirely opt-in. When disabled, the production
 // middleware stack is exactly the pre-P8 stack and no HTTP functions are patched.
 if (phase8Instrumentation.middleware) middlewares.push(phase8Instrumentation.middleware);
+
+const localityTelemetry = AdspActionLocalityMiddleware({
+  enabled: process.env.SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_ENABLED === 'true',
+  maxActions: Number(process.env.SEMAPPS_MOLECULER_LOCALITY_MAX_ACTIONS) || 200
+});
+if (localityTelemetry) middlewares.push(localityTelemetry);
 
 const fabric = createMoleculerFabricConfig();
 
