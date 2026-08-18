@@ -56,7 +56,7 @@ describe('ADSP P2 W3 ActivityPods companion', () => {
     const broker = createW3RunnerBroker('redis://127.0.0.1:6379/12', 'test-run', 'adsp-p2-w3-run-123');
     expect(broker.options.namespace).toBe('adsp-p2-w3-run-123');
     expect(broker.options.retryPolicy.enabled).toBe(false);
-    expect(broker.options.nodeID).toMatch(/^adsp-p2-w3-remote-origin-test-run-/u);
+    expect(broker.options.nodeID).toMatch(/^adsp-p2-w3-remote-origin-p8testrun-[0-9]+$/u);
   });
 
   test('writes request correlation separately from strict P0-compatible origin evidence', () => {
