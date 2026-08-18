@@ -7,6 +7,8 @@ x-adsp-p2-common: &adsp-p2-common
   restart: 'no'
   expose:
     - '3000'
+  volumes:
+    - ./measurements:/app/backend/measurements
   environment: &adsp-p2-environment
     NODE_ENV: test
     SEMAPPS_SPARQL_ENDPOINT: http://fuseki_test:3030/
@@ -24,17 +26,34 @@ x-adsp-p2-common: &adsp-p2-common
     APODS_AUTO_PROVISION_ATPROTO_ON_SIGNUP: 'false'
     APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
     APODS_DEFER_COMPLETE_SIGNUP_BOOTSTRAP: 'true'
+    APODS_KEY_CONTAINER_WAIT_TIMEOUT_MS: '90000'
+    APODS_FORCE_COMPLETE_SIGNUP_BOOTSTRAP_ATTEMPTS: '3'
+    APDM_P8_SIGNUP_TIMEOUT_MS: '900000'
+    APODS_HTTP_SERVER_TIMEOUT_MS: '960000'
+    APDM_LOCAL_DELIVERY_CONCURRENCY: '${APDM_P9_CONCURRENCY:-4}'
     APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED: 'false'
-    SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_ENABLED: 'false'
+    SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_ENABLED: '${ADSP_P2_LOCALITY_TELEMETRY_ENABLED:-false}'
+    SEMAPPS_APDM_PHASE8_INSTRUMENTATION_ENABLED: '${APDM_P8_ENABLED:-false}'
+    SEMAPPS_APDM_PHASE8_RECIPIENT_COUNT: '${APDM_P8_COUNT:-0}'
+    SEMAPPS_APDM_PHASE8_CASE_LABEL: 'adsp-p2-${ADSP_P2_REPLICAS:-0}r-${APDM_P8_COUNT:-0}n'
+    APDM_P8_RUN_ID: '${APDM_P8_RUN_ID:-adsp-p2}'
+    APDM_P8_SAMPLES: '${APDM_P8_SAMPLES:-5}'
+    APDM_P8_WARMUPS: '${APDM_P8_WARMUPS:-1}'
+    APDM_P8_PROVISION_CONCURRENCY: '${APDM_P8_PROVISION_CONCURRENCY:-4}'
+    APDM_P8_PROVISION_BATCH_SIZE: '${APDM_P8_PROVISION_BATCH_SIZE:-24}'
+    APDM_P8_BOOTSTRAP_CONCURRENCY: '${APDM_P8_BOOTSTRAP_CONCURRENCY:-8}'
 
 services:
   # Replica 1 deliberately reuses the canonical `backend` service so existing
-  # provisioning and measurement tooling can keep one stable HTTP ingress on
-  # localhost:3000 while the Moleculer fabric expands behind it.
+  # provisioning tooling keeps one stable HTTP ingress. Comparative P2 measured
+  # roots enter through a separate Redis-transported benchmark broker so all
+  # eligible pod-cell replicas may receive the root while nested Tier-1 calls
+  # remain local under registry.preferLocal.
   backend:
     environment:
       <<: *adsp-p2-environment
       SEMAPPS_MOLECULER_NODE_ID: adsp-p2-pod-cell-1
+      SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT: '/app/backend/measurements/adsp-p2/trace-${APDM_P8_COUNT:-0}-r1.jsonl'
 
   backend_p2_2:
     <<: *adsp-p2-common
@@ -43,6 +62,7 @@ services:
     environment:
       <<: *adsp-p2-environment
       SEMAPPS_MOLECULER_NODE_ID: adsp-p2-pod-cell-2
+      SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT: '/app/backend/measurements/adsp-p2/trace-${APDM_P8_COUNT:-0}-r2.jsonl'
 
   backend_p2_3:
     <<: *adsp-p2-common
@@ -51,6 +71,7 @@ services:
     environment:
       <<: *adsp-p2-environment
       SEMAPPS_MOLECULER_NODE_ID: adsp-p2-pod-cell-3
+      SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT: '/app/backend/measurements/adsp-p2/trace-${APDM_P8_COUNT:-0}-r3.jsonl'
 
   backend_p2_4:
     <<: *adsp-p2-common
@@ -59,3 +80,4 @@ services:
     environment:
       <<: *adsp-p2-environment
       SEMAPPS_MOLECULER_NODE_ID: adsp-p2-pod-cell-4
+      SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT: '/app/backend/measurements/adsp-p2/trace-${APDM_P8_COUNT:-0}-r4.jsonl'
