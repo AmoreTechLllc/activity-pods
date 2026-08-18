@@ -1,0 +1,35 @@
+# ADSP Phase 2 W3 only. Compose this after docker-compose-adsp-p2-horizontal.yml.
+# W1 remains native and unchanged; this overlay flips the same 1/2/4 pod cells to
+# the already-proven ActivityPods -> sidecar external-delivery authority path.
+
+x-adsp-p2-w3-external-environment: &adsp-p2-w3-external-environment
+  SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: external
+  SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW: 'true'
+  SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER: 'false'
+  SIDECAR_DELIVERY_HANDOFF_URL: '${ADSP_P2_W3_SIDECAR_HANDOFF_URL:-http://host.docker.internal:8080/webhook/outbox}'
+  ACTIVITYPODS_TOKEN: '${ACTIVITYPODS_TOKEN:-}'
+  SIDECAR_TOKEN: '${SIDECAR_TOKEN:-}'
+
+x-adsp-p2-w3-external-hosts: &adsp-p2-w3-external-hosts
+  - 'host.docker.internal:host-gateway'
+
+services:
+  backend:
+    extra_hosts: *adsp-p2-w3-external-hosts
+    environment:
+      <<: *adsp-p2-w3-external-environment
+
+  backend_p2_2:
+    extra_hosts: *adsp-p2-w3-external-hosts
+    environment:
+      <<: *adsp-p2-w3-external-environment
+
+  backend_p2_3:
+    extra_hosts: *adsp-p2-w3-external-hosts
+    environment:
+      <<: *adsp-p2-w3-external-environment
+
+  backend_p2_4:
+    extra_hosts: *adsp-p2-w3-external-hosts
+    environment:
+      <<: *adsp-p2-w3-external-environment
