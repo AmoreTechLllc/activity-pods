@@ -1,5 +1,8 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
+
 const DEFAULT_MAX_ACTIONS = 200;
 
 function createCounterState(maxActions) {
@@ -30,23 +33,39 @@ module.exports = function AdspActionLocalityMiddleware(options = {}) {
   const maxActions = Number.isInteger(options.maxActions) && options.maxActions > 0
     ? options.maxActions
     : DEFAULT_MAX_ACTIONS;
+  const outputPath = typeof options.outputPath === 'string' && options.outputPath.trim().length > 0
+    ? options.outputPath.trim()
+    : undefined;
   const state = createCounterState(maxActions);
+  let brokerRef;
+
+  function snapshot() {
+    return {
+      nodeID: brokerRef?.nodeID || null,
+      namespace: brokerRef?.namespace || null,
+      localExecutions: state.localExecutions,
+      remoteCalls: state.remoteCalls,
+      localByAction: mapToObject(state.localByAction),
+      remoteByAction: mapToObject(state.remoteByAction)
+    };
+  }
+
+  function flush() {
+    if (!outputPath) return;
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    const tempPath = `${outputPath}.tmp-${process.pid}`;
+    fs.writeFileSync(tempPath, `${JSON.stringify(snapshot(), null, 2)}\n`, 'utf8');
+    fs.renameSync(tempPath, outputPath);
+  }
 
   return {
     name: 'AdspActionLocality',
 
     created(broker) {
+      brokerRef = broker;
       broker.adspActionLocality = {
-        snapshot() {
-          return {
-            nodeID: broker.nodeID,
-            namespace: broker.namespace || null,
-            localExecutions: state.localExecutions,
-            remoteCalls: state.remoteCalls,
-            localByAction: mapToObject(state.localByAction),
-            remoteByAction: mapToObject(state.remoteByAction)
-          };
-        },
+        snapshot,
+        flush,
         reset() {
           state.localExecutions = 0;
           state.remoteCalls = 0;
@@ -54,6 +73,10 @@ module.exports = function AdspActionLocalityMiddleware(options = {}) {
           state.remoteByAction.clear();
         }
       };
+    },
+
+    stopped() {
+      flush();
     },
 
     localAction(next, action) {

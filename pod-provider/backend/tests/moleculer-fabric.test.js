@@ -12,12 +12,13 @@ describe('ADSP P1 Moleculer fabric configuration', () => {
     expect(config.nodeID).toBe('pod-provider');
     expect(config.namespace).toBeUndefined();
     expect(config.transporter).toBeUndefined();
+    expect(config.registry).toEqual({ preferLocal: true });
     expect(config.serializer).toBeInstanceOf(RdfJSONSerializer);
     expect(config.serviceGroup).toBe('pod-cell');
     expect(config.servicePatterns).toEqual(['services/*.js', 'services/**/*.js']);
   });
 
-  test('serializer is transport-independent', () => {
+  test('serializer and local-first registry policy are transport-independent', () => {
     const withoutTransport = createMoleculerFabricConfig({});
     const withTransport = createMoleculerFabricConfig({
       SEMAPPS_REDIS_TRANSPORTER_URL: 'redis://127.0.0.1:6379'
@@ -25,6 +26,8 @@ describe('ADSP P1 Moleculer fabric configuration', () => {
 
     expect(withoutTransport.serializer).toBeInstanceOf(RdfJSONSerializer);
     expect(withTransport.serializer).toBeInstanceOf(RdfJSONSerializer);
+    expect(withoutTransport.registry.preferLocal).toBe(true);
+    expect(withTransport.registry.preferLocal).toBe(true);
   });
 
   test('distributed mode requires an explicit unique node ID', () => {
@@ -75,6 +78,8 @@ describe('ADSP P1 Moleculer fabric configuration', () => {
 
     expect(a.nodeID).not.toBe(b.nodeID);
     expect(a.namespace).toBe(b.namespace);
+    expect(a.registry.preferLocal).toBe(true);
+    expect(b.registry.preferLocal).toBe(true);
   });
 
   test('invalid fabric identifiers and unknown service groups fail closed', () => {
