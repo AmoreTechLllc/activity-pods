@@ -4,6 +4,7 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
+const RdfJSONSerializer = require('../RdfJSONSerializer');
 const {
   CORRELATION_SCHEMA,
   createW3RunnerBroker,
@@ -45,7 +46,7 @@ function request(url, options = {}) {
 }
 
 describe('ADSP P2 W3 ActivityPods companion', () => {
-  test('requires an explicit safe namespace and exact 1/2/4 topology contract', () => {
+  test('requires an explicit safe namespace, exact topology, and P2 RDF wire serializer', () => {
     expect(validateNamespace('adsp-p2-w3-run-123')).toBe('adsp-p2-w3-run-123');
     for (const value of [undefined, '', ' bad', 'bad ', 'bad\nname', 'bad\0name']) {
       expect(() => validateNamespace(value)).toThrow(/namespace/u);
@@ -56,6 +57,8 @@ describe('ADSP P2 W3 ActivityPods companion', () => {
     const broker = createW3RunnerBroker('redis://127.0.0.1:6379/12', 'test-run', 'adsp-p2-w3-run-123');
     expect(broker.options.namespace).toBe('adsp-p2-w3-run-123');
     expect(broker.options.retryPolicy.enabled).toBe(false);
+    expect(broker.options.registry.preferLocal).toBe(true);
+    expect(broker.serializer).toBeInstanceOf(RdfJSONSerializer);
     expect(broker.options.nodeID).toMatch(/^adsp-p2-w3-remote-origin-p8testrun-[0-9]+$/u);
   });
 
