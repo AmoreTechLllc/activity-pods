@@ -7,6 +7,9 @@ const EXPECTED_PACKAGE = '@semapps/ldp';
 const EXPECTED_VERSION = '1.1.4';
 const ACTION_NAME = 'ldp.registry.register';
 const PATCH_MARKER = 'ADSP-P2_LOCAL_LDP_REGISTRY_BOOTSTRAP';
+const LOCAL_READY_ACTIONS = [ACTION_NAME, 'jsonld.parser.expandTypes', 'jsonld.context.get'];
+const LOCAL_READY_TIMEOUT_MS = 30000;
+const LOCAL_READY_POLL_MS = 25;
 
 function findPackageRoot() {
   let current = path.dirname(require.resolve(EXPECTED_PACKAGE));
@@ -147,6 +150,11 @@ function patchControlledContainerSource(source) {
     throw new Error(`[ADSP-P2] ${ACTION_NAME} is no longer invoked through this.broker.call`);
   }
 
+  const statementIndex = source.lastIndexOf('const registration', callIndex);
+  if (statementIndex === -1 || statementIndex > callIndex) {
+    throw new Error(`[ADSP-P2] Could not locate the pinned registration assignment before ${ACTION_NAME}`);
+  }
+
   const openParen = source.indexOf('(', callIndex);
   const closeParen = findMatchingCallParen(source, openParen);
   const callSource = source.slice(callIndex, closeParen + 1);
@@ -157,9 +165,24 @@ function patchControlledContainerSource(source) {
     throw new Error(`[ADSP-P2] ${ACTION_NAME} already has local node targeting without the expected patch marker`);
   }
 
-  const insertion = `, { nodeID: this.broker.nodeID } /* ${PATCH_MARKER} */`;
+  const semicolonIndex = source.indexOf(';', closeParen);
+  if (semicolonIndex === -1 || semicolonIndex - closeParen > 8) {
+    throw new Error(`[ADSP-P2] Could not locate the end of the pinned ${ACTION_NAME} assignment`);
+  }
+
+  const readyActionsJson = JSON.stringify(LOCAL_READY_ACTIONS);
+  const barrier = `const adspP2LocalBootstrapActions = ${readyActionsJson}; // ${PATCH_MARKER}\n    const adspP2LocalBootstrapDeadline = Date.now() + ${LOCAL_READY_TIMEOUT_MS};\n    while (\n      !adspP2LocalBootstrapActions.every(actionName =>\n        this.broker.registry.getActionEndpointByNodeId(actionName, this.broker.nodeID)\n      )\n    ) {\n      if (Date.now() >= adspP2LocalBootstrapDeadline) {\n        const missingLocalActions = adspP2LocalBootstrapActions.filter(\n          actionName => !this.broker.registry.getActionEndpointByNodeId(actionName, this.broker.nodeID)\n        );\n        throw new Error(\n          \`Timed out waiting for local SemApps bootstrap actions on \${this.broker.nodeID}: \${missingLocalActions.join(', ')}\`\n        );\n      }\n      await new Promise(resolve => setTimeout(resolve, ${LOCAL_READY_POLL_MS}));\n    }\n    `;
+
+  const targetedCall = `${source.slice(statementIndex, closeParen)}, { nodeID: this.broker.nodeID }${source.slice(
+    closeParen,
+    semicolonIndex + 1
+  )}`;
+  const registrationGuard = `\n    if (!registration || typeof registration !== 'object') {\n      throw new Error('Local ldp.registry.register returned no registration object');\n    }`;
+
   return {
-    source: `${source.slice(0, closeParen)}${insertion}${source.slice(closeParen)}`,
+    source: `${source.slice(0, statementIndex)}${barrier}${targetedCall}${registrationGuard}${source.slice(
+      semicolonIndex + 1
+    )}`,
     changed: true
   };
 }
@@ -180,7 +203,7 @@ function applyPatch() {
   if (result.changed) {
     fs.writeFileSync(controlledContainerFile, result.source, 'utf8');
     process.stdout.write(
-      `[ADSP-P2] Patched ${path.relative(packageRoot, controlledContainerFile)} so LDP registry bootstrap stays on the local broker\n`
+      `[ADSP-P2] Patched ${path.relative(packageRoot, controlledContainerFile)} so LDP registry bootstrap waits for and stays on the local broker\n`
     );
   } else {
     process.stdout.write(`[ADSP-P2] ${path.relative(packageRoot, controlledContainerFile)} already patched\n`);
@@ -196,6 +219,9 @@ module.exports = {
   EXPECTED_VERSION,
   ACTION_NAME,
   PATCH_MARKER,
+  LOCAL_READY_ACTIONS,
+  LOCAL_READY_TIMEOUT_MS,
+  LOCAL_READY_POLL_MS,
   findPackageRoot,
   locateControlledContainerSource,
   findMatchingCallParen,
