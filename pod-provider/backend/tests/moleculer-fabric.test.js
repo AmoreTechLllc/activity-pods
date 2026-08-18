@@ -3,6 +3,7 @@ const {
   resolveServicePatterns,
   validateRedisTransporterUrl
 } = require('../config/moleculer-fabric');
+const { childExitCode } = require('../scripts/run-moleculer-fabric');
 const RdfJSONSerializer = require('../RdfJSONSerializer');
 
 describe('ADSP P1 Moleculer fabric configuration', () => {
@@ -121,5 +122,13 @@ describe('ADSP P1 Moleculer fabric configuration', () => {
 
   test('the P1 probe group is isolated from the production service tree', () => {
     expect(resolveServicePatterns('p1-probe')).toEqual(['p1-fixtures/services/*.service.js']);
+  });
+
+  test('launcher maps child signal termination to conventional process exit status without self-signalling', () => {
+    expect(childExitCode(0, null)).toBe(0);
+    expect(childExitCode(null, 'SIGINT')).toBe(130);
+    expect(childExitCode(null, 'SIGTERM')).toBe(143);
+    expect(childExitCode(null, 'SIGKILL')).toBe(137);
+    expect(childExitCode(null, 'UNKNOWN_SIGNAL')).toBe(1);
   });
 });
