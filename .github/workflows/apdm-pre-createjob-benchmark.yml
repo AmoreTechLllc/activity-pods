@@ -56,10 +56,10 @@ jobs:
 
       - name: Run planning-tail benchmark
         env:
-          APDM_PRE_CREATEJOB_BENCHMARK_OUTPUT: ../../../measurements/apdm-pre-createjob/benchmark.json
+          APDM_PRE_CREATEJOB_BENCHMARK_OUTPUT: ../../measurements/apdm-pre-createjob/benchmark.json
         run: |
-          mkdir -p ../../../measurements/apdm-pre-createjob
-          node --expose-gc scripts/apdm-pre-createjob-benchmark.js | tee ../../../measurements/apdm-pre-createjob/benchmark.stdout.json
+          mkdir -p ../../measurements/apdm-pre-createjob
+          node --expose-gc scripts/apdm-pre-createjob-benchmark.js | tee ../../measurements/apdm-pre-createjob/benchmark.stdout.json
 
       - name: Validate benchmark evidence
         working-directory: .
