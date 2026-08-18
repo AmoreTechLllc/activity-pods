@@ -131,7 +131,7 @@ describe('ADSP P2 W3 ActivityPods companion', () => {
     }
   });
 
-  test('W3 overlay flips all four pod cells to external authority without modifying the W1 overlay', () => {
+  test('W3 overlay launches the bridge in all four cells and leaves W1 native', () => {
     const overlayPath = path.resolve(__dirname, '../../docker-compose-adsp-p2-w3-external.yml');
     const source = fs.readFileSync(overlayPath, 'utf8');
     for (const service of ['backend', 'backend_p2_2', 'backend_p2_3', 'backend_p2_4']) {
@@ -143,6 +143,8 @@ describe('ADSP P2 W3 ActivityPods companion', () => {
     expect(source).toMatch(/SIDECAR_DELIVERY_HANDOFF_URL:.*host\.docker\.internal:8080\/webhook\/outbox/u);
     expect(source).toMatch(/host\.docker\.internal:host-gateway/u);
     expect(source).toMatch(/SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_ENABLED: 'true'/u);
+    expect(source).toMatch(/node scripts\/adsp-p2-w3-loopback-bridge\.js & exec pm2-runtime ecosystem\.config\.js/u);
+    expect((source.match(/command: \*adsp-p2-w3-command/gu) || []).length).toBe(4);
     for (const replica of [1, 2, 3, 4]) {
       expect(source).toMatch(new RegExp(`locality-r${replica}\\.json`, 'u'));
     }
@@ -150,5 +152,6 @@ describe('ADSP P2 W3 ActivityPods companion', () => {
     const w1Path = path.resolve(__dirname, '../../docker-compose-adsp-p2-horizontal.yml');
     const w1 = fs.readFileSync(w1Path, 'utf8');
     expect(w1).toMatch(/SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: native/u);
+    expect(w1).not.toMatch(/adsp-p2-w3-loopback-bridge/u);
   });
 });
