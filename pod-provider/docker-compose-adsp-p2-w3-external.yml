@@ -16,26 +16,39 @@ x-adsp-p2-w3-external-environment: &adsp-p2-w3-external-environment
 x-adsp-p2-w3-external-hosts: &adsp-p2-w3-external-hosts
   - 'host.docker.internal:host-gateway'
 
+# The production image normally executes `pm2-runtime ecosystem.config.js`.
+# W3 alone starts the benchmark-only loopback discovery bridge first and then
+# execs the unchanged PM2 runtime as PID 1. Container teardown therefore still
+# owns both processes, while production/W1 command semantics remain untouched.
+x-adsp-p2-w3-command: &adsp-p2-w3-command
+  - /bin/sh
+  - -ec
+  - 'node scripts/adsp-p2-w3-loopback-bridge.js & exec pm2-runtime ecosystem.config.js'
+
 services:
   backend:
+    command: *adsp-p2-w3-command
     extra_hosts: *adsp-p2-w3-external-hosts
     environment:
       <<: *adsp-p2-w3-external-environment
       SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_OUTPUT: '/app/backend/measurements/adsp-p2-w3/locality-r1.json'
 
   backend_p2_2:
+    command: *adsp-p2-w3-command
     extra_hosts: *adsp-p2-w3-external-hosts
     environment:
       <<: *adsp-p2-w3-external-environment
       SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_OUTPUT: '/app/backend/measurements/adsp-p2-w3/locality-r2.json'
 
   backend_p2_3:
+    command: *adsp-p2-w3-command
     extra_hosts: *adsp-p2-w3-external-hosts
     environment:
       <<: *adsp-p2-w3-external-environment
       SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_OUTPUT: '/app/backend/measurements/adsp-p2-w3/locality-r3.json'
 
   backend_p2_4:
+    command: *adsp-p2-w3-command
     extra_hosts: *adsp-p2-w3-external-hosts
     environment:
       <<: *adsp-p2-w3-external-environment
