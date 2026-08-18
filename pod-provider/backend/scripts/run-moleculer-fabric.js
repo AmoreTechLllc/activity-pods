@@ -1,11 +1,26 @@
 'use strict';
 
+const fs = require('node:fs');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const { createMoleculerFabricConfig } = require('../config/moleculer-fabric');
 
+function resolveMoleculerRunner() {
+  // Moleculer 0.14 exports its public package entry but does not export the
+  // internal `moleculer/bin/moleculer-runner.js` subpath under Node's package
+  // exports rules. Resolve the public entry first, then locate the CLI shipped
+  // inside that same installed package without asking Node to resolve a blocked
+  // package subpath.
+  const packageEntry = require.resolve('moleculer');
+  const runner = path.join(path.dirname(packageEntry), 'bin', 'moleculer-runner.js');
+  if (!fs.existsSync(runner)) {
+    throw new Error(`Unable to locate Moleculer runner beside public package entry: ${runner}`);
+  }
+  return runner;
+}
+
 const fabric = createMoleculerFabricConfig();
-const runner = require.resolve('moleculer/bin/moleculer-runner.js');
+const runner = resolveMoleculerRunner();
 const args = [runner];
 
 if (process.argv.includes('--repl')) args.push('--repl');
@@ -47,3 +62,5 @@ child.on('exit', (code, signal) => {
   }
   process.exitCode = code ?? 1;
 });
+
+module.exports = { resolveMoleculerRunner };
