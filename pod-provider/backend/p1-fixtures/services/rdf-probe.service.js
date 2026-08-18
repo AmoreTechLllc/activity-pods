@@ -11,6 +11,17 @@ module.exports = {
         };
       }
     },
+    inventory: {
+      handler() {
+        return {
+          servedBy: this.broker.nodeID,
+          services: this.broker.services
+            .map(service => service.fullName || service.name)
+            .filter(Boolean)
+            .sort()
+        };
+      }
+    },
     fail: {
       handler() {
         const error = new Error('ADSP P1 remote probe failure');
