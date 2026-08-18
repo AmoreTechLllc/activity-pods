@@ -9,7 +9,9 @@ const {
   expectedExecutors,
   findTraceMatches,
   percentile,
+  signalBarrier,
   summarize,
+  waitForBarrier,
   waitForUniqueTrace
 } = require('../scripts/adsp-p2-horizontal-load');
 
@@ -35,6 +37,20 @@ describe('ADSP P2 horizontal Redis load evidence helpers', () => {
     expect(() => assertExecutorCoverage({ r1: 2, r4: 2 }, 4, 4)).toThrow(/Replica r2 executed no measured work/u);
     expect(() => assertExecutorCoverage({ r1: 1, r2: 1, r3: 1, r4: 1, r5: 1 }, 4, 5)).toThrow(/Unexpected executor identity/u);
     expect(() => assertExecutorCoverage({ r1: 1, r2: 1 }, 2, 3)).toThrow(/Executor accounting mismatch/u);
+  });
+
+  test('barrier signaling is atomic and waitable', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-p2-barrier-'));
+    try {
+      const wait = waitForBarrier(dir, 'go', 500);
+      setTimeout(() => signalBarrier(dir, 'go'), 10);
+      await expect(wait).resolves.toBeUndefined();
+      expect(fs.existsSync(path.join(dir, 'go'))).toBe(true);
+      expect(fs.readdirSync(dir).filter(name => name.endsWith('.tmp'))).toHaveLength(0);
+      await expect(waitForBarrier(dir, 'missing', 25)).rejects.toThrow(/barrier missing/u);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test('findTraceMatches detects a request duplicated across replica files', () => {
