@@ -5,9 +5,11 @@ on:
     paths:
       - '.github/workflows/adsp-p2-horizontal-redis-comparator.yml'
       - 'pod-provider/backend/scripts/adsp-p2-horizontal-load.js'
+      - 'pod-provider/backend/scripts/adsp-p2-horizontal-resources.js'
       - 'pod-provider/backend/scripts/adsp-p2-horizontal-summarize.js'
       - 'pod-provider/backend/scripts/adsp-p2-provision.js'
       - 'pod-provider/backend/tests/adsp-p2-horizontal-load.test.js'
+      - 'pod-provider/backend/tests/adsp-p2-horizontal-resources.test.js'
       - 'pod-provider/backend/tests/adsp-p2-horizontal-summarize.test.js'
       - 'pod-provider/docker-compose-adsp-p2-horizontal.yml'
       - 'pod-provider/docker-compose-phase8.yml'
@@ -222,6 +224,18 @@ jobs:
             } > "$output"
           }
 
+          retain_traces() {
+            local replicas="$1"
+            local count="$2"
+            local output_dir="$3"
+            mkdir -p "$output_dir"
+            for replica_index in $(seq 1 "$replicas"); do
+              local source="measurements/adsp-p2/trace-${count}-r${replica_index}.jsonl"
+              test -s "$source"
+              cp "$source" "$output_dir/trace-r${replica_index}.jsonl"
+            done
+          }
+
           for replicas in 1 2 4; do
             for count in ${ADSP_P2_RECIPIENT_COUNTS//,/ }; do
               echo "=== ADSP P2 case replicas=${replicas} recipients=${count} ==="
@@ -260,6 +274,7 @@ jobs:
                   /app/backend/measurements/adsp-p2/actors.json "$count" "$replicas" \
                   "$ADSP_P2_REQUESTS" "$ADSP_P2_CONCURRENCY" \
                   "/app/backend/measurements/adsp-p2/runtime/${replicas}r-${count}n-warmup.json"
+              retain_traces "$replicas" "$count" "measurements/adsp-p2/runtime/${replicas}r-${count}n-warmup-traces"
 
               for sample in $(seq 1 "$ADSP_P2_SAMPLES"); do
                 sample_dir="measurements/adsp-p2/runtime/${replicas}r-${count}n-s${sample}"
@@ -278,6 +293,7 @@ jobs:
                     /app/backend/measurements/adsp-p2/actors.json "$count" "$replicas" \
                     "$ADSP_P2_REQUESTS" "$ADSP_P2_CONCURRENCY" \
                     "/app/backend/measurements/adsp-p2/results/${replicas}r-${count}n-s${sample}.json"
+                retain_traces "$replicas" "$count" "$sample_dir/traces"
 
                 for service in $services fuseki_test redis; do
                   snapshot_container "$service" "$sample_dir/${service}-after.txt"
@@ -287,6 +303,28 @@ jobs:
               done
             done
           done
+
+      - name: Derive whole-system resource evidence
+        run: |
+          set -euo pipefail
+          node backend/scripts/adsp-p2-horizontal-resources.js \
+            measurements/adsp-p2/runtime measurements/adsp-p2/results \
+            measurements/adsp-p2/resource-summary.json \
+            > measurements/adsp-p2/resource-summary.stdout.json
+          node - <<'NODE'
+          const fs = require('fs');
+          const summary = JSON.parse(fs.readFileSync('measurements/adsp-p2/resource-summary.json', 'utf8'));
+          const rows = Object.entries(summary.cases).map(([key, value]) =>
+            `| ${key} | ${value.samples} | ${value.wholeSystemCpuMsPerOutcomeP50.toFixed(2)} | ${(value.backendMemoryCurrentAfterBytesP50 / 1048576).toFixed(1)} | ${(value.wholeSystemMemoryCurrentAfterBytesP50 / 1048576).toFixed(1)} | ${value.redisCommandCallsP50.toFixed(0)} | ${value.redisFailedCallsTotal} |`
+          );
+          const md = [
+            '## ADSP P2 resource evidence', '',
+            '| case | samples | whole CPU ms/outcome p50 | backend memory MiB p50 | whole memory MiB p50 | Redis calls p50 | Redis failed calls |',
+            '|---|---:|---:|---:|---:|---:|---:|', ...rows
+          ].join('\n');
+          fs.writeFileSync('measurements/adsp-p2/resource-summary.md', `${md}\n`);
+          NODE
+          cat measurements/adsp-p2/resource-summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summarize full decision evidence
         if: env.ADSP_P2_EVIDENCE_MODE == 'true'
@@ -319,6 +357,7 @@ jobs:
         if: env.ADSP_P2_EVIDENCE_MODE != 'true'
         run: |
           set -euo pipefail
+          test -s measurements/adsp-p2/resource-summary.json
           for replicas in 1 2 4; do
             file="measurements/adsp-p2/results/${replicas}r-10n-s1.json"
             test -s "$file"
