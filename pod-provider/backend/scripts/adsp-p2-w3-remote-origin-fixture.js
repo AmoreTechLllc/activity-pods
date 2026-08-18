@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { ServiceBroker } = require('moleculer');
+const RdfJSONSerializer = require('../RdfJSONSerializer');
 const {
   awaitActorBootstrap,
   normalizeRunId,
@@ -57,8 +58,10 @@ function createW3RunnerBroker(transporterUrl, runId, namespace) {
     nodeID: `adsp-p2-w3-remote-origin-${normalizeRunId(runId)}-${process.pid}`,
     logger: false,
     transporter: transporterUrl,
+    serializer: new RdfJSONSerializer(),
     requestTimeout: DEFAULT_READY_TIMEOUT_MS,
-    retryPolicy: { enabled: false }
+    retryPolicy: { enabled: false },
+    registry: { preferLocal: true }
   });
 }
 
