@@ -96,31 +96,79 @@ function summarize(samples) {
   };
 }
 
-function measure(fn, remoteRecipients, activity, iterations, warmups) {
-  for (let i = 0; i < warmups; i += 1) fn(remoteRecipients, activity);
-  const wallMs = [];
-  const cpuMicros = [];
-  const heapDeltas = [];
+function measureOne(fn, remoteRecipients, activity, expectedRecipientCount) {
+  if (typeof global.gc === 'function') global.gc();
+  const heapBefore = process.memoryUsage().heapUsed;
+  const cpuBefore = process.cpuUsage();
+  const started = performance.now();
+  const result = fn(remoteRecipients, activity);
+  const wallMs = performance.now() - started;
+  const cpu = process.cpuUsage(cpuBefore);
+  const cpuMicros = cpu.user + cpu.system;
+  const heapDeltaBytes = Math.max(0, process.memoryUsage().heapUsed - heapBefore);
+  if (result.length !== expectedRecipientCount) {
+    throw new Error('Benchmark path changed recipient semantics');
+  }
+  return { wallMs, cpuMicros, heapDeltaBytes };
+}
+
+/**
+ * Measure the two arms as matched pairs and alternate which arm goes first on
+ * every iteration. That prevents a millisecond-scale conclusion from being an
+ * artifact of JIT warmup, thermal/runner drift, or always running one arm after
+ * the other. GC is requested before each arm when --expose-gc is available.
+ */
+function measurePaired(remoteRecipients, activity, iterations, warmups) {
+  const expectedRecipientCount = new Set(remoteRecipients).size;
+  for (let i = 0; i < warmups; i += 1) {
+    const first = i % 2 === 0 ? currentCreateJobCaptureTail : preCreateJobPlanningTail;
+    const second = i % 2 === 0 ? preCreateJobPlanningTail : currentCreateJobCaptureTail;
+    first(remoteRecipients, activity);
+    second(remoteRecipients, activity);
+  }
+
+  const current = { wallMs: [], cpuMicros: [], heapDeltaBytes: [] };
+  const direct = { wallMs: [], cpuMicros: [], heapDeltaBytes: [] };
+  const pairedSaved = { wallMs: [], cpuMicros: [], heapDeltaBytes: [] };
 
   for (let i = 0; i < iterations; i += 1) {
-    if (typeof global.gc === 'function') global.gc();
-    const heapBefore = process.memoryUsage().heapUsed;
-    const cpuBefore = process.cpuUsage();
-    const started = performance.now();
-    const result = fn(remoteRecipients, activity);
-    wallMs.push(performance.now() - started);
-    const cpu = process.cpuUsage(cpuBefore);
-    cpuMicros.push(cpu.user + cpu.system);
-    heapDeltas.push(Math.max(0, process.memoryUsage().heapUsed - heapBefore));
-    if (result.length !== new Set(remoteRecipients).size) {
-      throw new Error('Benchmark path changed recipient semantics');
+    let currentSample;
+    let directSample;
+    if (i % 2 === 0) {
+      currentSample = measureOne(currentCreateJobCaptureTail, remoteRecipients, activity, expectedRecipientCount);
+      directSample = measureOne(preCreateJobPlanningTail, remoteRecipients, activity, expectedRecipientCount);
+    } else {
+      directSample = measureOne(preCreateJobPlanningTail, remoteRecipients, activity, expectedRecipientCount);
+      currentSample = measureOne(currentCreateJobCaptureTail, remoteRecipients, activity, expectedRecipientCount);
     }
+
+    current.wallMs.push(currentSample.wallMs);
+    current.cpuMicros.push(currentSample.cpuMicros);
+    current.heapDeltaBytes.push(currentSample.heapDeltaBytes);
+    direct.wallMs.push(directSample.wallMs);
+    direct.cpuMicros.push(directSample.cpuMicros);
+    direct.heapDeltaBytes.push(directSample.heapDeltaBytes);
+    pairedSaved.wallMs.push(currentSample.wallMs - directSample.wallMs);
+    pairedSaved.cpuMicros.push(currentSample.cpuMicros - directSample.cpuMicros);
+    pairedSaved.heapDeltaBytes.push(currentSample.heapDeltaBytes - directSample.heapDeltaBytes);
   }
 
   return {
-    wallMs: summarize(wallMs),
-    cpuMicros: summarize(cpuMicros),
-    heapDeltaBytes: summarize(heapDeltas),
+    current: {
+      wallMs: summarize(current.wallMs),
+      cpuMicros: summarize(current.cpuMicros),
+      heapDeltaBytes: summarize(current.heapDeltaBytes),
+    },
+    preCreateJob: {
+      wallMs: summarize(direct.wallMs),
+      cpuMicros: summarize(direct.cpuMicros),
+      heapDeltaBytes: summarize(direct.heapDeltaBytes),
+    },
+    pairedSaved: {
+      wallMs: summarize(pairedSaved.wallMs),
+      cpuMicros: summarize(pairedSaved.cpuMicros),
+      heapDeltaBytes: summarize(pairedSaved.heapDeltaBytes),
+    },
   };
 }
 
@@ -152,34 +200,34 @@ function runBenchmark({ fanouts = DEFAULT_FANOUTS, iterations = DEFAULT_ITERATIO
 
   const cases = fanouts.map(fanout => {
     const remoteRecipients = createRemoteRecipients(fanout);
-    const current = measure(currentCreateJobCaptureTail, remoteRecipients, activity, iterations, warmups);
-    const direct = measure(preCreateJobPlanningTail, remoteRecipients, activity, iterations, warmups);
+    const measured = measurePaired(remoteRecipients, activity, iterations, warmups);
     const constructionBytes = estimateSemanticConstructionBytes(remoteRecipients, activity);
     return {
       fanout,
       iterations,
       warmups,
+      ordering: 'paired-alternating',
       modeledSharedInboxScenarios: [
         { uniqueDeliveryEndpoints: fanout, collapseRatio: 1 },
         { uniqueDeliveryEndpoints: Math.min(100, fanout), collapseRatio: fanout / Math.min(100, fanout) },
         { uniqueDeliveryEndpoints: Math.min(10, fanout), collapseRatio: fanout / Math.min(10, fanout) },
       ],
-      current,
-      preCreateJob: direct,
+      ...measured,
       constructionBytes,
-      p95WallSpeedup: current.wallMs.p95 / Math.max(direct.wallMs.p95, Number.EPSILON),
-      p95CpuSpeedup: current.cpuMicros.p95 / Math.max(direct.cpuMicros.p95, Number.EPSILON),
+      p95WallSpeedup: measured.current.wallMs.p95 / Math.max(measured.preCreateJob.wallMs.p95, Number.EPSILON),
+      p95CpuSpeedup: measured.current.cpuMicros.p95 / Math.max(measured.preCreateJob.cpuMicros.p95, Number.EPSILON),
       constructionByteReductionRatio:
         constructionBytes.currentCapturedJobJsonBytes / Math.max(constructionBytes.directRecipientVectorJsonBytes, 1),
     };
   });
 
   return {
-    schema: 'apdm-pre-createjob-benchmark.v1',
+    schema: 'apdm-pre-createjob-benchmark.v2',
     measuredAt: new Date().toISOString(),
     node: process.version,
     scope: 'post-SemApps-recipient-classification planning tail only',
     invariant: 'no recipient addressing/classification/local-delivery work is removed by this benchmark',
+    methodology: 'paired samples; alternating arm order; explicit GC before each arm when available',
     cases,
   };
 }
@@ -200,5 +248,6 @@ module.exports = {
   currentCreateJobCaptureTail,
   preCreateJobPlanningTail,
   estimateSemanticConstructionBytes,
+  measurePaired,
   runBenchmark,
 };
