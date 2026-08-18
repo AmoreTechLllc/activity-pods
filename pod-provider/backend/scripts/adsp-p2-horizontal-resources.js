@@ -35,16 +35,51 @@ function parseContainerSnapshot(text, label = 'container snapshot') {
 
 function parseRedisCommandstats(text) {
   const commands = Object.create(null);
-  for (const line of String(text).split(/\r?\n/u)) {
-    const match = line.match(/^cmdstat_([^:]+):calls=(\d+),usec=(\d+),usec_per_call=[^,]+,rejected_calls=(\d+),failed_calls=(\d+)$/u);
-    if (!match) continue;
-    commands[match[1]] = {
-      calls: Number(match[2]),
-      usec: Number(match[3]),
-      rejectedCalls: Number(match[4]),
-      failedCalls: Number(match[5])
+  let sawCommandstatsHeader = false;
+  for (const rawLine of String(text).split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line === '# Commandstats') {
+      sawCommandstatsHeader = true;
+      continue;
+    }
+    if (!line) continue;
+    if (!line.startsWith('cmdstat_')) continue;
+
+    const match = line.match(/^cmdstat_([^:]+):(.+)$/u);
+    if (!match) throw new Error(`Malformed Redis commandstats line: ${line}`);
+    const command = match[1];
+    if (Object.prototype.hasOwnProperty.call(commands, command)) {
+      throw new Error(`Duplicate Redis commandstats entry for ${command}`);
+    }
+
+    const fields = Object.create(null);
+    for (const entry of match[2].split(',')) {
+      const separator = entry.indexOf('=');
+      if (separator <= 0 || separator === entry.length - 1) {
+        throw new Error(`Malformed Redis commandstats field for ${command}: ${entry}`);
+      }
+      const key = entry.slice(0, separator);
+      const value = entry.slice(separator + 1);
+      if (Object.prototype.hasOwnProperty.call(fields, key)) {
+        throw new Error(`Duplicate Redis commandstats field ${key} for ${command}`);
+      }
+      fields[key] = value;
+    }
+
+    const required = ['calls', 'usec', 'rejected_calls', 'failed_calls'];
+    for (const key of required) {
+      if (fields[key] === undefined) throw new Error(`Redis commandstats ${command} missing ${key}`);
+      if (!/^\d+$/u.test(fields[key])) throw new Error(`Redis commandstats ${command} ${key} must be a non-negative integer`);
+    }
+    commands[command] = {
+      calls: finiteNonNegative(fields.calls, `Redis ${command} calls`),
+      usec: finiteNonNegative(fields.usec, `Redis ${command} usec`),
+      rejectedCalls: finiteNonNegative(fields.rejected_calls, `Redis ${command} rejected_calls`),
+      failedCalls: finiteNonNegative(fields.failed_calls, `Redis ${command} failed_calls`)
     };
   }
+  if (!sawCommandstatsHeader) throw new Error('Redis commandstats snapshot missing # Commandstats header');
+  if (Object.keys(commands).length === 0) throw new Error('Redis commandstats snapshot contains no command counters');
   return commands;
 }
 
