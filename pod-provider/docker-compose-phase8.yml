@@ -59,12 +59,6 @@ services:
       # intended memo boolean before any measured root is accepted.
       APDM_P10_MEASUREMENT_ARM: '${APDM_P10_ARM:-}'
 
-      # ADSP P1 locality evidence is entirely opt-in. Normal Phase 8/P0 runs keep
-      # the middleware disabled; the dedicated P1 proof enables it and writes an
-      # atomic snapshot into the already-mounted measurement directory on broker stop.
-      SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_ENABLED: '${ADSP_P1_LOCALITY_TELEMETRY_ENABLED:-false}'
-      SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_OUTPUT: '${ADSP_P1_LOCALITY_TELEMETRY_OUTPUT:-/app/backend/measurements/adsp-p1-locality.json}'
-
       # These values are supplied by the measurement workflow before each
       # backend recreation. The recipient count is metadata only; the runner
       # independently validates that the Activity contains exactly N actors.
