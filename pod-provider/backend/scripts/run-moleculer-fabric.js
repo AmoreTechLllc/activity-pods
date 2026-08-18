@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const os = require('node:os');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const { createMoleculerFabricConfig } = require('../config/moleculer-fabric');
@@ -19,48 +20,62 @@ function resolveMoleculerRunner() {
   return runner;
 }
 
-const fabric = createMoleculerFabricConfig();
-const runner = resolveMoleculerRunner();
-const args = [runner];
-
-if (process.argv.includes('--repl')) args.push('--repl');
-if (process.argv.includes('--hot')) args.push('--hot');
-args.push(...fabric.servicePatterns);
-
-process.stdout.write(
-  `${JSON.stringify({
-    event: 'moleculer_fabric_start',
-    mode: fabric.mode,
-    nodeID: fabric.nodeID,
-    namespace: fabric.namespace || null,
-    serviceGroup: fabric.serviceGroup,
-    servicePatterns: fabric.servicePatterns
-  })}\n`
-);
-
-const child = spawn(process.execPath, args, {
-  cwd: path.resolve(__dirname, '..'),
-  env: process.env,
-  stdio: 'inherit'
-});
-
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => {
-    if (!child.killed) child.kill(signal);
-  });
+function childExitCode(code, signal) {
+  if (signal) {
+    const signalNumber = os.constants.signals[signal];
+    return Number.isInteger(signalNumber) ? 128 + signalNumber : 1;
+  }
+  return Number.isInteger(code) ? code : 1;
 }
 
-child.on('error', error => {
-  console.error('Failed to start Moleculer fabric runner', error);
-  process.exitCode = 1;
-});
+function run() {
+  const fabric = createMoleculerFabricConfig();
+  const runner = resolveMoleculerRunner();
+  const args = [runner];
 
-child.on('exit', (code, signal) => {
-  if (signal) {
-    process.kill(process.pid, signal);
-    return;
+  if (process.argv.includes('--repl')) args.push('--repl');
+  if (process.argv.includes('--hot')) args.push('--hot');
+  args.push(...fabric.servicePatterns);
+
+  process.stdout.write(
+    `${JSON.stringify({
+      event: 'moleculer_fabric_start',
+      mode: fabric.mode,
+      nodeID: fabric.nodeID,
+      namespace: fabric.namespace || null,
+      serviceGroup: fabric.serviceGroup,
+      servicePatterns: fabric.servicePatterns
+    })}\n`
+  );
+
+  const child = spawn(process.execPath, args, {
+    cwd: path.resolve(__dirname, '..'),
+    env: process.env,
+    stdio: 'inherit'
+  });
+
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => {
+      if (!child.killed) child.kill(signal);
+    });
   }
-  process.exitCode = code ?? 1;
-});
 
-module.exports = { resolveMoleculerRunner };
+  child.on('error', error => {
+    console.error('Failed to start Moleculer fabric runner', error);
+    process.exitCode = 1;
+  });
+
+  child.on('exit', (code, signal) => {
+    // Do not re-signal this process while our SIGINT/SIGTERM handlers are
+    // installed. Node suppresses the default signal termination behavior when
+    // a listener exists, which can leave a launcher alive after its broker
+    // child has died. Preserve conventional shell exit status instead.
+    process.exitCode = childExitCode(code, signal);
+  });
+
+  return child;
+}
+
+if (require.main === module) run();
+
+module.exports = { childExitCode, resolveMoleculerRunner, run };
