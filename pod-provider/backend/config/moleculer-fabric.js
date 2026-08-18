@@ -8,6 +8,7 @@ const GROUP_POD_CELL = 'pod-cell';
 const GROUP_P1_PROBE = 'p1-probe';
 
 const VALID_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const VALID_REDIS_PROTOCOLS = new Set(['redis:', 'rediss:']);
 
 function optionalString(value) {
   if (typeof value !== 'string') return undefined;
@@ -22,6 +23,24 @@ function validateIdentifier(value, label) {
     );
   }
   return value;
+}
+
+function validateRedisTransporterUrl(value) {
+  const explicit = optionalString(value);
+  if (!explicit) return undefined;
+
+  let parsed;
+  try {
+    parsed = new URL(explicit);
+  } catch {
+    throw new Error('SEMAPPS_REDIS_TRANSPORTER_URL must be a valid redis:// or rediss:// URL');
+  }
+
+  if (!VALID_REDIS_PROTOCOLS.has(parsed.protocol) || !parsed.hostname) {
+    throw new Error('SEMAPPS_REDIS_TRANSPORTER_URL must be a valid redis:// or rediss:// URL');
+  }
+
+  return explicit;
 }
 
 function parseMode(value) {
@@ -78,7 +97,7 @@ function createMoleculerFabricConfig(env = process.env) {
   const serviceGroup = parseServiceGroup(env.SEMAPPS_MOLECULER_SERVICE_GROUP);
   const nodeID = resolveNodeId(mode, env.SEMAPPS_MOLECULER_NODE_ID);
   const namespace = resolveNamespace(mode, env.SEMAPPS_MOLECULER_NAMESPACE);
-  const transporterUrl = optionalString(env.SEMAPPS_REDIS_TRANSPORTER_URL);
+  const transporterUrl = validateRedisTransporterUrl(env.SEMAPPS_REDIS_TRANSPORTER_URL);
 
   if (mode === MODE_DISTRIBUTED && !transporterUrl) {
     throw new Error('Distributed Moleculer mode requires SEMAPPS_REDIS_TRANSPORTER_URL in ADSP Phase 1');
@@ -89,7 +108,7 @@ function createMoleculerFabricConfig(env = process.env) {
     serviceGroup,
     nodeID,
     namespace,
-    transporter: transporterUrl || undefined,
+    transporter: transporterUrl,
     // Pin Moleculer's local-first routing contract explicitly. Tightly coupled
     // services that exist inside the same Pod/SemApps cell must never take a
     // remote hop merely because another cell advertises the same action.
@@ -110,5 +129,6 @@ module.exports = {
   GROUP_POD_CELL,
   GROUP_P1_PROBE,
   createMoleculerFabricConfig,
-  resolveServicePatterns
+  resolveServicePatterns,
+  validateRedisTransporterUrl
 };
