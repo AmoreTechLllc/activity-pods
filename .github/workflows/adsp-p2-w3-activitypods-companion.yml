@@ -1,0 +1,192 @@
+name: ADSP P2 W3 ActivityPods Companion
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/adsp-p2-w3-activitypods-companion.yml'
+      - 'pod-provider/backend/services/activitypub-provisioning.js'
+      - 'pod-provider/backend/scripts/adsp-p2-w3-remote-origin-fixture.js'
+      - 'pod-provider/backend/scripts/adsp-p2-w3-loopback-bridge.js'
+      - 'pod-provider/backend/tests/adsp-p2-w3-companion.test.js'
+      - 'pod-provider/docker-compose-adsp-p2-w3-external.yml'
+      - 'pod-provider/docker-compose-adsp-p2-horizontal.yml'
+      - 'pod-provider/backend/moleculer.config.js'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adsp-p2-w3-activitypods-companion-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  external-horizontal-companion:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: pod-provider
+    env:
+      ADSP_P2_NAMESPACE: 'adsp-p2-w3-companion-${{ github.run_id }}-${{ github.run_attempt }}'
+      APDM_P9_CONCURRENCY: '4'
+      APDM_P10_DATASET_EXIST_MEMO_ENABLED: 'false'
+      ADSP_P2_W3_SIDECAR_HANDOFF_URL: 'http://host.docker.internal:8080/webhook/outbox'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+
+      - name: Install backend dependencies
+        working-directory: pod-provider/backend
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          sed -i 's#ssh://git@github.com/#https://github.com/#g; s#git+ssh://git@github.com/#git+https://github.com/#g; s#git@github.com:#https://github.com/#g' yarn.lock
+          yarn install --frozen-lockfile
+
+      - name: Run W3 companion semantic tests
+        working-directory: pod-provider/backend
+        run: |
+          npm exec --yes \
+            --package=jest@29.7.0 \
+            --package=esbuild@0.25.4 \
+            --package=esbuild-jest@0.5.0 \
+            -- \
+            jest --testEnvironment=node \
+              --runInBand \
+              tests/adsp-p2-w3-companion.test.js
+
+      - name: Prepare ephemeral external-authority token
+        run: |
+          set -euo pipefail
+          token="$(openssl rand -hex 32)"
+          echo "::add-mask::${token}"
+          {
+            echo "ACTIVITYPODS_TOKEN=${token}"
+            echo "SIDECAR_TOKEN=${token}"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate merged compose contract
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml -f docker-compose-adsp-p2-w3-external.yml'
+          docker compose $files config > /tmp/adsp-p2-w3-compose.yml
+          for service in backend backend_p2_2 backend_p2_3 backend_p2_4; do
+            grep -q "${service}:" /tmp/adsp-p2-w3-compose.yml
+          done
+          grep -q 'SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE: external' /tmp/adsp-p2-w3-compose.yml
+          grep -q 'SEMAPPS_ACTIVITYPUB_ALLOW_EXTERNAL_DELIVERY_PREVIEW: "true"' /tmp/adsp-p2-w3-compose.yml
+          grep -q 'SEMAPPS_ACTIVITYPUB_EXTERNAL_AUTHORITY_CUTOVER: "false"' /tmp/adsp-p2-w3-compose.yml
+          grep -q 'host.docker.internal:8080/webhook/outbox' /tmp/adsp-p2-w3-compose.yml
+          grep -q 'adsp-p2-w3-loopback-bridge.js' /tmp/adsp-p2-w3-compose.yml
+          grep -q 'pm2-runtime ecosystem.config.js' /tmp/adsp-p2-w3-compose.yml
+
+      - name: Build production backend image once
+        run: |
+          set -euo pipefail
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            -f docker-compose-adsp-p2-w3-external.yml \
+            build backend
+
+      - name: Start clean shared services
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml -f docker-compose-adsp-p2-w3-external.yml'
+          docker compose $files down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test
+          mkdir -p data/fuseki_test data/redis_test measurements/adsp-p2-w3
+          docker compose $files up -d fuseki_test redis mailcatcher
+          FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=90 ./scripts/fuseki-bootstrap.sh
+          docker compose $files exec -T redis redis-cli PING
+
+      - name: Prove external-mode 1 to 2 to 4 pod-cell startup
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml -f docker-compose-adsp-p2-w3-external.yml'
+
+          wait_port() {
+            local port="$1"
+            local ready=false
+            for attempt in $(seq 1 180); do
+              if curl -sS --max-time 2 -o /dev/null "http://127.0.0.1:${port}/"; then ready=true; break; fi
+              sleep 1
+            done
+            test "$ready" = true
+          }
+
+          assert_bridge_listener() {
+            local service="$1"
+            local cid
+            cid="$(docker compose $files ps -q "$service")"
+            test -n "$cid"
+            docker exec -i "$cid" node - <<'NODE'
+          const net = require('net');
+          const socket = net.connect({ host: '127.0.0.1', port: 18080 });
+          socket.setTimeout(2000);
+          socket.once('connect', () => {
+            socket.end();
+            process.exit(0);
+          });
+          socket.once('timeout', () => {
+            socket.destroy();
+            process.exit(1);
+          });
+          socket.once('error', () => process.exit(1));
+          NODE
+          }
+
+          docker compose $files up -d --no-deps backend
+          wait_port 3000
+          assert_bridge_listener backend
+
+          docker compose $files up -d --no-deps backend_p2_2
+          wait_port 3102
+          assert_bridge_listener backend_p2_2
+
+          docker compose $files up -d --no-deps backend_p2_3 backend_p2_4
+          wait_port 3103
+          wait_port 3104
+          assert_bridge_listener backend_p2_3
+          assert_bridge_listener backend_p2_4
+
+          docker compose $files ps > measurements/adsp-p2-w3/compose-ps.txt
+          for service in backend backend_p2_2 backend_p2_3 backend_p2_4; do
+            cid="$(docker compose $files ps -q "$service")"
+            test -n "$cid"
+            test "$(docker inspect "$cid" --format '{{.State.Running}}')" = true
+          done
+
+      - name: Capture diagnostics on failure
+        if: failure()
+        run: |
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml -f docker-compose-adsp-p2-w3-external.yml'
+          mkdir -p measurements/adsp-p2-w3
+          docker compose $files ps -a > measurements/adsp-p2-w3/compose-ps-failure.txt || true
+          docker compose $files logs --no-color > measurements/adsp-p2-w3/compose-failure.log 2>&1 || true
+
+      - name: Upload companion diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adsp-p2-w3-activitypods-companion-${{ github.run_id }}-${{ github.run_attempt }}
+          path: pod-provider/measurements/adsp-p2-w3
+          if-no-files-found: ignore
+
+      - name: Stop isolated W3 companion stack
+        if: always()
+        run: |
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            -f docker-compose-adsp-p2-w3-external.yml \
+            down -v || true

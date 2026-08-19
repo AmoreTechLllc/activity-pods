@@ -1,0 +1,173 @@
+name: ADSP P2 Horizontal Redis Foundation
+
+on:
+  pull_request:
+    paths:
+      - 'pod-provider/backend/config/moleculer-fabric.js'
+      - 'pod-provider/backend/moleculer.config.js'
+      - 'pod-provider/backend/scripts/run-moleculer-fabric.js'
+      - 'pod-provider/backend/scripts/proof-adsp-p2-horizontal-pod-cells.js'
+      - 'pod-provider/backend/tests/moleculer-fabric.test.js'
+      - 'pod-provider/docker/backend.dockerfile'
+      - 'pod-provider/docker/ecosystem.config.js'
+      - 'pod-provider/docker-compose-test.yml'
+      - 'pod-provider/docker-compose-phase8.yml'
+      - 'pod-provider/docker-compose-adsp-p2-horizontal.yml'
+      - '.github/workflows/adsp-p2-horizontal-redis-foundation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adsp-p2-horizontal-foundation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  horizontal-pod-cell-topology:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: pod-provider
+    env:
+      ADSP_P2_NAMESPACE: 'adsp-p2-${{ github.run_id }}-${{ github.run_attempt }}'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+
+      - name: Build production backend image once
+        run: |
+          set -euo pipefail
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            build backend
+
+      - name: Start clean shared Redis, Fuseki and mail services
+        run: |
+          set -euo pipefail
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test
+          mkdir -p data/fuseki_test data/redis_test
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            up -d fuseki_test redis mailcatcher
+          FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=60 ./scripts/fuseki-bootstrap.sh
+
+      - name: Start replica 1 and prove one production pod-cell endpoint
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+          docker compose $files up -d --no-deps backend
+          ready=false
+          for attempt in $(seq 1 120); do
+            if curl -fsS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          docker compose $files exec -T backend \
+            node scripts/proof-adsp-p2-horizontal-pod-cells.js 1 adsp-p2-pod-cell-1
+
+      - name: Add replica 2 and prove two-node Redis fabric
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+          docker compose $files up -d --no-deps backend_p2_2
+          ready=false
+          for attempt in $(seq 1 120); do
+            if curl -fsS --max-time 2 http://localhost:3102/ >/dev/null 2>&1; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          docker compose $files exec -T backend \
+            node scripts/proof-adsp-p2-horizontal-pod-cells.js 2 \
+              adsp-p2-pod-cell-1 adsp-p2-pod-cell-2
+
+      - name: Add replicas 3 and 4 and prove four-node Redis fabric
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+          docker compose $files up -d --no-deps backend_p2_3 backend_p2_4
+          for port in 3103 3104; do
+            ready=false
+            for attempt in $(seq 1 120); do
+              if curl -fsS --max-time 2 "http://localhost:${port}/" >/dev/null 2>&1; then ready=true; break; fi
+              sleep 1
+            done
+            test "$ready" = true
+          done
+          docker compose $files exec -T backend \
+            node scripts/proof-adsp-p2-horizontal-pod-cells.js 4 \
+              adsp-p2-pod-cell-1 adsp-p2-pod-cell-2 adsp-p2-pod-cell-3 adsp-p2-pod-cell-4
+
+      - name: Remove replicas 3 and 4 and prove registry contracts back to two
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+          docker compose $files stop -t 10 backend_p2_3 backend_p2_4
+          docker compose $files exec -T backend \
+            node scripts/proof-adsp-p2-horizontal-pod-cells.js 2 \
+              adsp-p2-pod-cell-1 adsp-p2-pod-cell-2
+
+      - name: Capture topology diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+          diagnostics="${GITHUB_WORKSPACE}/adsp-p2-horizontal-topology-diagnostics.txt"
+          : > "$diagnostics"
+          {
+            echo '--- compose ps ---'
+            docker compose $files ps -a backend backend_p2_2 backend_p2_3 backend_p2_4 fuseki_test redis
+            echo '--- backend container states ---'
+            for service in backend backend_p2_2 backend_p2_3 backend_p2_4; do
+              id="$(docker compose $files ps -aq "$service" | head -n 1)"
+              echo "service=${service} container=${id:-missing}"
+              if [ -n "$id" ]; then
+                docker inspect "$id" --format 'status={{.State.Status}} exitCode={{.State.ExitCode}} oomKilled={{.State.OOMKilled}} error={{json .State.Error}} startedAt={{.State.StartedAt}} finishedAt={{.State.FinishedAt}}'
+              fi
+            done
+            echo '--- live container resource snapshot ---'
+            docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.PIDs}}'
+            echo '--- docker info memory ---'
+            docker info --format 'totalMemory={{.MemTotal}} ncpu={{.NCPU}}'
+            echo '--- runner memory ---'
+            free -h || true
+            echo '--- runner cgroup memory events ---'
+            cat /sys/fs/cgroup/memory.events 2>/dev/null || true
+            echo '--- recent backend logs ---'
+            docker compose $files logs --no-color --tail=220 backend backend_p2_2 backend_p2_3 backend_p2_4
+            echo '--- recent dependency logs ---'
+            docker compose $files logs --no-color --tail=120 fuseki_test redis
+          } 2>&1 | tee "$diagnostics"
+
+      - name: Upload topology diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adsp-p2-horizontal-topology-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: adsp-p2-horizontal-topology-diagnostics.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Stop isolated P2 foundation stack
+        if: always()
+        run: |
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test

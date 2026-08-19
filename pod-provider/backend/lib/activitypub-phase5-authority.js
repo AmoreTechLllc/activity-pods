@@ -12,6 +12,49 @@ function normalizeMode(value) {
 }
 
 /**
+ * Derive non-secret operational diagnostics from the already-authorized Phase 5
+ * state without changing the resolver's established return contract.
+ */
+function describePhase5RemoteAuthority(state) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    throw new TypeError('ActivityPub Phase 5 authority state must be an object.');
+  }
+
+  if (state.mode === 'native') {
+    return {
+      deliveryExecutor: 'semapps-native',
+      authorityProfile: 'native-rollback',
+      productionCanonical: false,
+      sidecarDeliveryAuthority: false
+    };
+  }
+
+  if (state.mode !== 'external') {
+    throw new Error(`Unsupported resolved ActivityPub remote delivery mode '${state.mode}'.`);
+  }
+
+  if (state.authority === true) {
+    return {
+      deliveryExecutor: 'sidecar-external',
+      authorityProfile: 'external-production-authority',
+      productionCanonical: true,
+      sidecarDeliveryAuthority: true
+    };
+  }
+
+  if (state.preview === true) {
+    return {
+      deliveryExecutor: 'sidecar-external',
+      authorityProfile: 'external-preview',
+      productionCanonical: false,
+      sidecarDeliveryAuthority: true
+    };
+  }
+
+  throw new Error('Resolved external ActivityPub authority state must be either preview or production authority.');
+}
+
+/**
  * Resolve the APDM Phase 5 remote-authority state without weakening the
  * existing Phase 2-4 interception/handoff machinery.
  *
@@ -77,5 +120,6 @@ function resolvePhase5RemoteAuthority({
 }
 
 module.exports = {
+  describePhase5RemoteAuthority,
   resolvePhase5RemoteAuthority
 };

@@ -226,6 +226,12 @@ function sanitizeDeliveryActivity(value, seen = new WeakSet(), inheritedContext)
       for (const [key, item] of Object.entries(value)) {
         const term = canonicalAddressingTerm(key, state);
         if (term === 'bto' || term === 'bcc') continue;
+        // SemApps reattaches optional `capability` after persistence even when it
+        // was absent, producing an own property whose value is undefined. Its
+        // native remote transport serializes with JSON.stringify(), which omits
+        // undefined object properties. Preserve that incumbent wire semantic
+        // without weakening arrays or other unsupported JSON values below.
+        if (item === undefined) continue;
         output[key] = sanitizeDeliveryActivity(item, seen, state);
       }
       seen.delete(value);

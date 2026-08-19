@@ -1,0 +1,10 @@
+services:
+  backend:
+    environment:
+      # This evidence lane keeps the normal single Pod/SemApps service cell and
+      # the existing Redis transporter, then records whether any production
+      # Moleculer action crosses the transport boundary during representative
+      # Tier-1 ActivityPods work.
+      SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_ENABLED: 'true'
+      SEMAPPS_MOLECULER_LOCALITY_MAX_ACTIONS: '500'
+      SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_OUTPUT: '/app/backend/measurements/adsp-p1/pod-cell-locality.json'
