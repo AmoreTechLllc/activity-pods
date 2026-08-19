@@ -42,9 +42,17 @@ function summarize(values) {
 
 function readJsonLines(filePath) {
   if (!fs.existsSync(filePath)) return [];
-  return fs
-    .readFileSync(filePath, 'utf8')
-    .split(/\r?\n/u)
+  const content = fs.readFileSync(filePath, 'utf8');
+  const lines = content.split(/\r?\n/u);
+
+  // Trace writers append one complete JSON object followed by a newline. A
+  // concurrent reader can observe the final append between the object bytes
+  // and its newline, so an unterminated trailing segment is not yet a
+  // committed JSONL record. Ignore only that final segment until a later poll.
+  // Any malformed newline-terminated record remains a hard evidence failure.
+  if (content.length > 0 && !content.endsWith('\n')) lines.pop();
+
+  return lines
     .map(line => line.trim())
     .filter(Boolean)
     .map(line => JSON.parse(line));
