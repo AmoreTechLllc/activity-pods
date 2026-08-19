@@ -108,14 +108,20 @@ function compareResourceStep(smaller, larger) {
     smaller.redisRejectedCallsTotal === 0 &&
     larger.redisFailedCallsTotal === 0 &&
     larger.redisRejectedCallsTotal === 0;
-  const guards = {
+
+  // The frozen +15%/+20% regression limits are candidate guardrails for a
+  // matched workload where replica count is held constant. Phase 2's 1→2→4
+  // comparison intentionally changes replica count, so these ratios are
+  // retained as diagnostics but are not promotion gates for the scale step.
+  const matchedCandidateIndicators = {
     wholeSystemCpu: wholeSystemCpuRatio <= CPU_RATIO_MAX,
     backendMemory: backendMemoryRatio <= MEMORY_RATIO_MAX,
     wholeSystemMemory: wholeSystemMemoryRatio <= MEMORY_RATIO_MAX,
     redisCommandCalls: redisCommandCallsRatio <= REDIS_WORK_RATIO_MAX,
-    redisCommandUsec: redisCommandUsecRatio <= REDIS_WORK_RATIO_MAX,
-    redisErrorsZero
+    redisCommandUsec: redisCommandUsecRatio <= REDIS_WORK_RATIO_MAX
   };
+  const scaleSafety = { redisErrorsZero };
+
   return {
     fromReplicas: smaller.replicaCount,
     toReplicas: larger.replicaCount,
@@ -124,8 +130,10 @@ function compareResourceStep(smaller, larger) {
     wholeSystemMemoryRatio,
     redisCommandCallsRatio,
     redisCommandUsecRatio,
-    guards,
-    passed: Object.values(guards).every(Boolean)
+    matchedCandidateThresholdsApplicable: false,
+    matchedCandidateIndicators,
+    scaleSafety,
+    passed: Object.values(scaleSafety).every(Boolean)
   };
 }
 
@@ -152,25 +160,31 @@ function buildResourceGuardrails(resourceSummary, recipientCounts) {
   }
 
   const complete = incompleteCases.length === 0;
-  const allStepsPassed = Object.values(scale).every(group => Object.values(group).every(step => step.passed));
+  const allStepsSafe = Object.values(scale).every(group => Object.values(group).every(step => step.passed));
   return {
-    version: 1,
+    version: 2,
     phase: 'ADSP-P2-A',
     fixture: 'tier1-horizontal-local-fanout-resource-guardrails',
-    thresholds: {
+    matchedCandidateRegressionThresholds: {
+      applicableAcrossReplicaScaleSteps: false,
       wholeSystemCpuRatioMax: CPU_RATIO_MAX,
       backendMemoryRatioMax: MEMORY_RATIO_MAX,
       wholeSystemMemoryRatioMax: MEMORY_RATIO_MAX,
-      redisCommandWorkRatioMax: REDIS_WORK_RATIO_MAX,
+      redisCommandWorkRatioMax: REDIS_WORK_RATIO_MAX
+    },
+    phase2ScaleResourceRequirements: {
+      completeMeasuredWindowsPerCase: MIN_SAMPLES,
       redisFailedAndRejectedCalls: 0
     },
+    interpretationRule:
+      'The frozen +15%/+20% regression thresholds are retained as diagnostics but are not applied across 1→2→4 because replica count is the Phase-2 dimension under test. They become hard gates for matched same-replica candidate comparisons such as Phase 3 Redis versus NATS Core.',
     recipientCounts: counts,
     minimumSamplesPerCase: MIN_SAMPLES,
     cases,
     incompleteCases,
     complete,
     scale,
-    passed: complete && allStepsPassed
+    passed: complete && allStepsSafe
   };
 }
 
