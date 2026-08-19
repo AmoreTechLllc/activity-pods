@@ -129,6 +129,21 @@ describe('ADSP P2 normalized resource guardrails', () => {
     expect(step.passed).toBe(true);
   });
 
+  test('rejects ambiguous zero baselines instead of manufacturing a favorable ratio', () => {
+    const smaller = {
+      replicaCount: 1,
+      wholeSystemCpuMsPerOutcomeP50: 0,
+      backendMemoryCurrentAfterBytesP50: 100,
+      wholeSystemMemoryCurrentAfterBytesP50: 200,
+      redisCommandCallsPerOutcomeP50: 10,
+      redisCommandUsecPerOutcomeP50: 20,
+      redisFailedCallsTotal: 0,
+      redisRejectedCallsTotal: 0
+    };
+    const larger = { ...smaller, replicaCount: 2, wholeSystemCpuMsPerOutcomeP50: 1 };
+    expect(() => compareResourceStep(smaller, larger)).toThrow(/cannot normalize against zero baseline/u);
+  });
+
   test('CLI fails closed in evidence mode when a complete guardrail decision fails', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-p2-resource-guardrails-'));
     try {
