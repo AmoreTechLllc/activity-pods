@@ -48,10 +48,8 @@ function writeMeasuredWindow(runtimeDir, resultsDir, { replicas, sample, cpuScal
   for (const [index, service] of services.entries()) {
     const beforeCpu = 1000 * (index + 1);
     const cpuDelta = Math.round(1000 * cpuScale / replicas);
-    const isBackend = service === 'backend' || service.startsWith('backend_p2_');
-    const memoryCurrent = isBackend ? Math.round(1000 / replicas) : 1000;
-    fs.writeFileSync(path.join(sampleDir, `${service}-before.txt`), snapshot(service, beforeCpu, memoryCurrent));
-    fs.writeFileSync(path.join(sampleDir, `${service}-after.txt`), snapshot(service, beforeCpu + cpuDelta, memoryCurrent));
+    fs.writeFileSync(path.join(sampleDir, `${service}-before.txt`), snapshot(service, beforeCpu, 1000));
+    fs.writeFileSync(path.join(sampleDir, `${service}-after.txt`), snapshot(service, beforeCpu + cpuDelta, 1000));
   }
   fs.writeFileSync(path.join(sampleDir, 'redis-commandstats-before.txt'), commandstats(10, 20));
   fs.writeFileSync(path.join(sampleDir, 'redis-commandstats-after.txt'), commandstats(18, 35));
@@ -149,7 +147,7 @@ describe('ADSP P2 horizontal resource evidence', () => {
     }
   });
 
-  test('embeds a complete normalized guardrail decision in the existing resource summary', () => {
+  test('embeds complete scale-resource evidence without misapplying same-topology memory thresholds', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-p2-resource-summary-'));
     try {
       const runtimeDir = path.join(root, 'runtime');
@@ -163,7 +161,8 @@ describe('ADSP P2 horizontal resource evidence', () => {
       expect(summary.guardrails.complete).toBe(true);
       expect(summary.guardrails.passed).toBe(true);
       expect(summary.guardrails.cases['4r-10n'].samples).toBe(5);
-      expect(summary.guardrails.scale['10n'].oneToTwo.guards.redisErrorsZero).toBe(true);
+      expect(summary.guardrails.scale['10n'].oneToTwo.scaleSafety.redisErrorsZero).toBe(true);
+      expect(summary.guardrails.scale['10n'].oneToTwo.matchedCandidateIndicators.backendMemory).toBe(false);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
