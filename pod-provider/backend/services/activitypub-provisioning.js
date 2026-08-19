@@ -22,10 +22,21 @@ module.exports = {
           );
         }
 
-        const actor = await ctx.call('activitypub.actor.awaitCreateComplete', {
-          actorUri: webId,
-          additionalKeys: ['preferredUsername', 'inbox', 'outbox', 'followers', 'following']
-        });
+        const actor = await ctx.call(
+          'activitypub.actor.awaitCreateComplete',
+          {
+            actorUri: webId,
+            additionalKeys: ['preferredUsername', 'inbox', 'outbox', 'followers', 'following']
+          },
+          {
+            // ActivityPods pod-provider actors live in the account dataset.
+            // Supplying it explicitly keeps SemApps actor bootstrap polling on
+            // the authoritative shared LDP dataset in distributed mode instead
+            // of falling back to an HTTP self-fetch when ctx.meta.dataset is
+            // absent. The account username is already the dataset authority.
+            meta: { dataset: username }
+          }
+        );
 
         if (!actor?.id || !actor?.inbox || !actor?.outbox) {
           throw new MoleculerError('ActivityPub actor provisioning is incomplete', 500, 'ACTIVITYPUB_PROVISIONING_FAILED');
