@@ -1,0 +1,185 @@
+name: ADSP P2 W3 Horizontal Provisioning
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/adsp-p2-w3-horizontal-provisioning.yml'
+      - 'pod-provider/backend/package.json'
+      - 'pod-provider/docker/backend.dockerfile'
+      - 'pod-provider/backend/services/activitypub-provisioning.js'
+      - 'pod-provider/backend/scripts/adsp-p2-w3-horizontal-provisioning-proof.js'
+      - 'pod-provider/backend/scripts/adsp-p2-w3-remote-origin-fixture.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-real-measure.js'
+      - 'pod-provider/backend/scripts/patch-semapps-ldp-special-endpoint-race.js'
+      - 'pod-provider/backend/tests/adsp-p2-w3-horizontal-provisioning-proof.test.js'
+      - 'pod-provider/backend/tests/adsp-p2-w3-companion.test.js'
+      - 'pod-provider/backend/tests/patch-semapps-ldp-special-endpoint-race.test.js'
+      - 'pod-provider/docker-compose-adsp-p2-horizontal.yml'
+      - 'pod-provider/docker-compose-adsp-p2-w3-external.yml'
+      - 'pod-provider/backend/moleculer.config.js'
+      - 'pod-provider/backend/config/moleculer-fabric.js'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adsp-p2-w3-horizontal-provisioning-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  provisioning:
+    name: prove signup and AP actor bootstrap at 1 2 4 replicas
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: pod-provider
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+
+      - name: Prepare ephemeral external-authority credential
+        run: |
+          set -euo pipefail
+          token="$(openssl rand -hex 32)"
+          echo "::add-mask::${token}"
+          {
+            echo "SIDECAR_TOKEN=${token}"
+            echo "ACTIVITYPODS_TOKEN=${token}"
+          } >> "$GITHUB_ENV"
+
+      - name: Install backend dependencies
+        working-directory: pod-provider/backend
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          sed -i 's#ssh://git@github.com/#https://github.com/#g; s#git+ssh://git@github.com/#git+https://github.com/#g; s#git@github.com:#https://github.com/#g' yarn.lock
+          yarn install --frozen-lockfile
+
+      - name: Run provisioning and repair unit tests
+        working-directory: pod-provider/backend
+        run: |
+          npm exec --yes \
+            --package=jest@29.7.0 \
+            --package=esbuild@0.25.4 \
+            --package=esbuild-jest@0.5.0 \
+            -- \
+            jest --testEnvironment=node --runInBand \
+              tests/adsp-p2-w3-horizontal-provisioning-proof.test.js \
+              tests/adsp-p2-w3-companion.test.js \
+              tests/patch-semapps-ldp-special-endpoint-race.test.js
+
+      - name: Build production backend image once
+        run: |
+          set -euo pipefail
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            -f docker-compose-adsp-p2-w3-external.yml \
+            build backend
+
+      - name: Prove horizontal signup and ActivityPub actor bootstrap
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml -f docker-compose-adsp-p2-w3-external.yml'
+          root="$PWD/measurements/adsp-p2-w3-horizontal-provisioning"
+          mkdir -p "$root"
+
+          wait_http() {
+            local port="$1"
+            for attempt in $(seq 1 180); do
+              if curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:${port}/"; then return 0; fi
+              sleep 1
+            done
+            return 1
+          }
+
+          capture_arm() {
+            local replicas="$1"
+            local arm_dir="$root/${replicas}r"
+            mkdir -p "$arm_dir"
+            docker compose $files ps -a > "$arm_dir/compose-ps.txt" || true
+            docker compose $files logs --no-color > "$arm_dir/compose.log" 2>&1 || true
+            for service in backend backend_p2_2 backend_p2_3 backend_p2_4; do
+              cid="$(docker compose $files ps -q "$service" 2>/dev/null || true)"
+              if [[ -n "$cid" ]]; then
+                docker inspect "$cid" > "$arm_dir/${service}-inspect.json" 2>/dev/null || true
+              fi
+            done
+          }
+
+          for replicas in 1 2 4; do
+            arm_dir="$root/${replicas}r"
+            mkdir -p "$arm_dir"
+            export ADSP_P2_NAMESPACE="adsp-p2-w3-provision-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${replicas}r"
+            export ADSP_P2_REPLICAS="$replicas"
+            export APDM_P9_CONCURRENCY=4
+            export APDM_P10_DATASET_EXIST_MEMO_ENABLED=false
+
+            docker compose $files down -v || true
+            sudo rm -rf data/fuseki_test data/redis_test
+            mkdir -p data/fuseki_test data/redis_test
+            docker compose $files up -d fuseki_test redis mailcatcher
+            FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=90 ./scripts/fuseki-bootstrap.sh
+            docker compose $files exec -T redis redis-cli PING
+
+            services=(backend)
+            ports=(3000)
+            if [[ "$replicas" -ge 2 ]]; then services+=(backend_p2_2); ports+=(3102); fi
+            if [[ "$replicas" -ge 4 ]]; then services+=(backend_p2_3 backend_p2_4); ports+=(3103 3104); fi
+            docker compose $files up -d --no-deps "${services[@]}"
+            for port in "${ports[@]}"; do
+              if ! wait_http "$port"; then
+                capture_arm "$replicas"
+                echo "Replica ${replicas} HTTP readiness failed" >&2
+                exit 1
+              fi
+            done
+
+            set +e
+            (
+              cd backend
+              ADSP_P2_NAMESPACE="$ADSP_P2_NAMESPACE" \
+              ADSP_P2_W3_EXPECTED_REPLICAS="$replicas" \
+              ADSP_P2_W3_BACKEND_BASE_URL=http://127.0.0.1:3000 \
+              SEMAPPS_REDIS_TRANSPORTER_URL=redis://127.0.0.1:6379/12 \
+              ADSP_P2_W3_READY_TIMEOUT_MS=120000 \
+              ADSP_P2_W3_RUN_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${replicas}r" \
+              node scripts/adsp-p2-w3-horizontal-provisioning-proof.js \
+                > "$arm_dir/proof.json" 2> "$arm_dir/proof.stderr.log"
+            )
+            status=$?
+            set -e
+            capture_arm "$replicas"
+            if [[ "$status" -ne 0 ]]; then
+              cat "$arm_dir/proof.stderr.log" >&2 || true
+              exit "$status"
+            fi
+            node -e "const v=require(process.argv[1]); const n=Number(process.argv[2]); if(v.schema!=='adsp.p2.w3.horizontal-provisioning.v1'||v.ok!==true||v.expectedReplicas!==n||v.observedReplicas!==n||v.observedReplicasBeforeProvisioning!==n||v.observedReplicasAfterBootstrap!==n||!v.webId||!v.outbox) process.exit(1)" "$arm_dir/proof.json" "$replicas"
+          done
+
+      - name: Upload horizontal provisioning evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adsp-p2-w3-horizontal-provisioning-${{ github.run_id }}-${{ github.run_attempt }}
+          path: pod-provider/measurements/adsp-p2-w3-horizontal-provisioning
+          if-no-files-found: error
+
+      - name: Stop isolated horizontal stack
+        if: always()
+        run: |
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            -f docker-compose-adsp-p2-w3-external.yml \
+            down -v || true
