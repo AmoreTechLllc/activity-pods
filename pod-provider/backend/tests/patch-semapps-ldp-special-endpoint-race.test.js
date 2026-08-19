@@ -4,6 +4,7 @@ const vm = require('vm');
 const {
   PATCH_MARKER,
   assertParsableJavaScript,
+  isPatchedSpecialEndpointCandidate,
   isSpecialEndpointCandidate,
   patchSpecialEndpointSource
 } = require('../scripts/patch-semapps-ldp-special-endpoint-race');
@@ -49,6 +50,7 @@ describe('SemApps special-endpoint horizontal startup patch', () => {
     const result = patchSpecialEndpointSource(PINNED_SOURCE);
     expect(result.changed).toBe(true);
     expect(result.source).toContain(PATCH_MARKER);
+    expect(isPatchedSpecialEndpointCandidate(result.source)).toBe(true);
     expect(result.source).toContain("'ldp.resource.create'");
     expect(result.source.match(/'ldp\.resource\.exist'/gu)).toHaveLength(2);
     expect(result.source).toContain('if (!adspP2EndpointExistsAfterCreateRace) throw error');
@@ -81,5 +83,22 @@ describe('SemApps special-endpoint horizontal startup patch', () => {
   test('fails closed if the reviewed create call is no longer directly awaited', () => {
     const drifted = PINNED_SOURCE.replace("await this.broker.call(\n        'ldp.resource.create'", "this.broker.call(\n        'ldp.resource.create'");
     expect(() => patchSpecialEndpointSource(drifted)).toThrow(/no longer directly awaited as reviewed/u);
+  });
+
+  test('fails closed when an existing marker remains but exact URI or dataset revalidation drifts', () => {
+    const patched = patchSpecialEndpointSource(PINNED_SOURCE).source;
+    const wrongDataset = patched.replace(
+      '{ meta: { dataset: this.settings.settingsDataset } }',
+      "{ meta: { dataset: 'settings' } }"
+    );
+    expect(isPatchedSpecialEndpointCandidate(wrongDataset)).toBe(false);
+    expect(() => patchSpecialEndpointSource(wrongDataset)).toThrow(/marker no longer matches the reviewed repair contract/u);
+
+    const wrongUri = patched.replace(
+      "{ resourceUri: this.endpointUrl, webId: 'system' }",
+      "{ resourceUri: this.settings.baseUrl, webId: 'system' }"
+    );
+    expect(isPatchedSpecialEndpointCandidate(wrongUri)).toBe(false);
+    expect(() => patchSpecialEndpointSource(wrongUri)).toThrow(/marker no longer matches the reviewed repair contract/u);
   });
 });
