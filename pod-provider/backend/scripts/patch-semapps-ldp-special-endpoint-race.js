@@ -35,13 +35,22 @@ function isSpecialEndpointCandidate(source) {
   return (
     source.includes('ldp.resource.exist') &&
     source.includes('ldp.resource.create') &&
-    source.includes('this.settings.path') &&
-    source.includes('this.settings.get') &&
-    source.includes('async started')
+    source.includes('this.settings.endpoint.path') &&
+    source.includes('this.settings.endpoint.initialData') &&
+    source.includes('this.endpointUrl') &&
+    source.includes('settingsDataset') &&
+    source.includes('started')
   );
 }
 
 function locateSpecialEndpointSource(packageRoot) {
+  const preferred = path.join(packageRoot, 'mixins', 'special-endpoint.js');
+  if (fs.existsSync(preferred)) {
+    const preferredSource = fs.readFileSync(preferred, 'utf8');
+    if (preferredSource.includes(PATCH_MARKER) || isSpecialEndpointCandidate(preferredSource)) return preferred;
+    throw new Error('[ADSP-P2] Pinned @semapps/ldp mixins/special-endpoint.js no longer matches the reviewed v1.1.4 contract');
+  }
+
   const candidates = walkJavaScriptFiles(packageRoot).filter(file => {
     const source = fs.readFileSync(file, 'utf8');
     return source.includes(PATCH_MARKER) || isSpecialEndpointCandidate(source);
@@ -99,7 +108,7 @@ function patchSpecialEndpointSource(source) {
 
   const createBounds = findCallBounds(source, 'ldp.resource.create');
   const createCall = source.slice(createBounds.start, createBounds.end);
-  const replacement = `/* ${PATCH_MARKER} */\n          try {\n            ${createCall}\n          } catch (error) {\n            // Multiple full ActivityPods replicas may start against the same shared LDP dataset.\n            // The upstream special-endpoint mixin uses an exist-then-create sequence, so two\n            // replicas can both observe absence and race to create the same canonical endpoint.\n            // Only suppress that race if a fresh authoritative existence read proves another\n            // replica completed the exact resource creation. All other failures remain fatal.\n            const adspP2ResourceExistsAfterCreateRace = await this.broker.call(\n              'ldp.resource.exist',\n              { resourceUri },\n              { meta: { webId: 'system', dataset: this.settings.settingsDataset } }\n            );\n            if (!adspP2ResourceExistsAfterCreateRace) throw error;\n            this.logger.info(\n              \`[ADSP-P2] Special endpoint already initialized by another replica: \${resourceUri}\`\n            );\n          }`;
+  const replacement = `/* ${PATCH_MARKER} */\n      try {\n        ${createCall}\n      } catch (error) {\n        // Multiple full ActivityPods replicas may start against the same shared LDP dataset.\n        // The upstream special-endpoint mixin uses an exist-then-create sequence, so two\n        // replicas can both observe absence and race to create the same canonical endpoint.\n        // Only suppress that race if a fresh authoritative existence read proves another\n        // replica completed the exact resource creation. All other failures remain fatal.\n        const adspP2EndpointExistsAfterCreateRace = await this.broker.call(\n          'ldp.resource.exist',\n          { resourceUri: this.endpointUrl, webId: 'system' },\n          { meta: { dataset: this.settings.settingsDataset } }\n        );\n        if (!adspP2EndpointExistsAfterCreateRace) throw error;\n        this.logger.info(\n          \`[ADSP-P2] Special endpoint already initialized by another replica: \${this.endpointUrl}\`\n        );\n      }`;
 
   return {
     source: `${source.slice(0, createBounds.start)}${replacement}${source.slice(createBounds.end)}`,
