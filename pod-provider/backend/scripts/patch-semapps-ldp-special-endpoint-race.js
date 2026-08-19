@@ -7,7 +7,13 @@ const vm = require('vm');
 const EXPECTED_PACKAGE = '@semapps/ldp';
 const EXPECTED_VERSION = '1.1.4';
 const PATCH_MARKER = 'ADSP-P2_IDEMPOTENT_SPECIAL_ENDPOINT_STARTUP';
-const PATCH_REVALIDATION_CONTRACT = `const adspP2EndpointExistsAfterCreateRace = await this.broker.call(
+const PATCH_REVALIDATION_CONTRACT = `const adspP2IsCreateConflict =
+          error &&
+          error.code === 400 &&
+          error.type === 'BAD_REQUEST' &&
+          error.message === \`A resource already exist with URI \${this.endpointUrl}\`;
+        if (!adspP2IsCreateConflict) throw error;
+        const adspP2EndpointExistsAfterCreateRace = await this.broker.call(
           'ldp.resource.exist',
           { resourceUri: this.endpointUrl, webId: 'system' },
           { meta: { dataset: this.settings.settingsDataset } }
@@ -148,7 +154,7 @@ function patchSpecialEndpointSource(source) {
 
   const createBounds = findCallBounds(source, 'ldp.resource.create');
   const createCall = source.slice(createBounds.start, createBounds.end);
-  const replacement = `/* ${PATCH_MARKER} */\n      try {\n        ${createCall}\n      } catch (error) {\n        // Multiple full ActivityPods replicas may start against the same shared LDP dataset.\n        // The upstream special-endpoint mixin uses an exist-then-create sequence, so two\n        // replicas can both observe absence and race to create the same canonical endpoint.\n        // Only suppress that race if a fresh authoritative existence read proves another\n        // replica completed the exact resource creation. All other failures remain fatal.\n        ${PATCH_REVALIDATION_CONTRACT}\n        this.logger.info(\n          \`[ADSP-P2] Special endpoint already initialized by another replica: \${this.endpointUrl}\`\n        );\n      }`;
+  const replacement = `/* ${PATCH_MARKER} */\n      try {\n        ${createCall}\n      } catch (error) {\n        // Multiple full ActivityPods replicas may start against the same shared LDP dataset.\n        // The upstream special-endpoint mixin uses an exist-then-create sequence, so two\n        // replicas can both observe absence and race to create the same canonical endpoint.\n        // Suppress only SemApps' exact already-exists conflict for this URI, and only after\n        // a fresh authoritative existence read proves another replica completed the resource.\n        // Permission, transport, validation, timeout, and all other failures remain fatal.\n        ${PATCH_REVALIDATION_CONTRACT}\n        this.logger.info(\n          \`[ADSP-P2] Special endpoint already initialized by another replica: \${this.endpointUrl}\`\n        );\n      }`;
 
   const patchedSource = `${source.slice(0, createBounds.start)}${replacement}${source.slice(createBounds.end)}`;
   if (!isPatchedSpecialEndpointCandidate(patchedSource)) {
