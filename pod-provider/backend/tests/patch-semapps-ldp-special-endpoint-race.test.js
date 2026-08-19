@@ -1,7 +1,9 @@
 'use strict';
 
+const vm = require('vm');
 const {
   PATCH_MARKER,
+  assertParsableJavaScript,
   isSpecialEndpointCandidate,
   patchSpecialEndpointSource
 } = require('../scripts/patch-semapps-ldp-special-endpoint-race');
@@ -52,6 +54,8 @@ describe('SemApps special-endpoint horizontal startup patch', () => {
     expect(result.source).toContain('if (!adspP2EndpointExistsAfterCreateRace) throw error');
     expect(result.source).toContain("{ resourceUri: this.endpointUrl, webId: 'system' }");
     expect(result.source).toContain('Special endpoint already initialized by another replica');
+    expect(result.source).not.toMatch(/await\s+\/\* ADSP-P2_IDEMPOTENT_SPECIAL_ENDPOINT_STARTUP \*\/\s*try/u);
+    expect(() => new vm.Script(result.source)).not.toThrow();
   });
 
   test('is idempotent when postinstall runs more than once', () => {
@@ -59,11 +63,23 @@ describe('SemApps special-endpoint horizontal startup patch', () => {
     const twice = patchSpecialEndpointSource(once.source);
     expect(twice.changed).toBe(false);
     expect(twice.source).toBe(once.source);
+    expect(() => new vm.Script(twice.source)).not.toThrow();
   });
 
   test('fails closed when the upstream artifact drifts', () => {
     expect(() => patchSpecialEndpointSource('module.exports = {};')).toThrow(
       /no longer matches the expected v1\.1\.4 contract/u
     );
+  });
+
+  test('parser guard fails closed before an invalid dependency artifact can be written', () => {
+    expect(() => assertParsableJavaScript('async function broken() { await try {} }', 'broken.js')).toThrow(
+      /Refusing to write syntactically invalid patched broken\.js/u
+    );
+  });
+
+  test('fails closed if the reviewed create call is no longer directly awaited', () => {
+    const drifted = PINNED_SOURCE.replace("await this.broker.call(\n        'ldp.resource.create'", "this.broker.call(\n        'ldp.resource.create'");
+    expect(() => patchSpecialEndpointSource(drifted)).toThrow(/no longer directly awaited as reviewed/u);
   });
 });
