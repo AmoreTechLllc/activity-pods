@@ -6,6 +6,7 @@ on:
       - master
     paths:
       - '.github/workflows/adsp-p2-w3-activitypods-companion.yml'
+      - 'pod-provider/backend/services/activitypub-provisioning.js'
       - 'pod-provider/backend/scripts/adsp-p2-w3-remote-origin-fixture.js'
       - 'pod-provider/backend/scripts/adsp-p2-w3-loopback-bridge.js'
       - 'pod-provider/backend/tests/adsp-p2-w3-companion.test.js'
