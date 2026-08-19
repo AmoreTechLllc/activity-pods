@@ -48,8 +48,10 @@ function writeMeasuredWindow(runtimeDir, resultsDir, { replicas, sample, cpuScal
   for (const [index, service] of services.entries()) {
     const beforeCpu = 1000 * (index + 1);
     const cpuDelta = Math.round(1000 * cpuScale / replicas);
-    fs.writeFileSync(path.join(sampleDir, `${service}-before.txt`), snapshot(service, beforeCpu, 1000));
-    fs.writeFileSync(path.join(sampleDir, `${service}-after.txt`), snapshot(service, beforeCpu + cpuDelta, 1000));
+    const isBackend = service === 'backend' || service.startsWith('backend_p2_');
+    const memoryCurrent = isBackend ? Math.round(1000 / replicas) : 1000;
+    fs.writeFileSync(path.join(sampleDir, `${service}-before.txt`), snapshot(service, beforeCpu, memoryCurrent));
+    fs.writeFileSync(path.join(sampleDir, `${service}-after.txt`), snapshot(service, beforeCpu + cpuDelta, memoryCurrent));
   }
   fs.writeFileSync(path.join(sampleDir, 'redis-commandstats-before.txt'), commandstats(10, 20));
   fs.writeFileSync(path.join(sampleDir, 'redis-commandstats-after.txt'), commandstats(18, 35));
