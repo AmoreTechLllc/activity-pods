@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 
 const EXPECTED_PACKAGE = '@semapps/ldp';
 const EXPECTED_VERSION = '1.1.4';
@@ -69,6 +70,13 @@ function findCallBounds(source, actionName, fromIndex = 0) {
   const callStart = source.lastIndexOf('this.broker.call(', actionIndex);
   if (callStart === -1) throw new Error(`[ADSP-P2] ${actionName} is no longer invoked through this.broker.call`);
 
+  // The reviewed v1.1.4 contract awaits this broker call. Include the `await`
+  // in the replacement bounds; leaving it behind would produce `await try {}`.
+  const awaitStart = source.lastIndexOf('await ', callStart);
+  if (awaitStart === -1 || source.slice(awaitStart + 'await '.length, callStart).trim() !== '') {
+    throw new Error(`[ADSP-P2] ${actionName} call is no longer directly awaited as reviewed`);
+  }
+
   const openParen = source.indexOf('(', callStart);
   let depth = 1;
   let quote = null;
@@ -93,15 +101,28 @@ function findCallBounds(source, actionName, fromIndex = 0) {
         if (semicolon === -1 || semicolon - index > 12) {
           throw new Error(`[ADSP-P2] Could not locate the end of ${actionName} call`);
         }
-        return { start: callStart, end: semicolon + 1 };
+        return { start: awaitStart, end: semicolon + 1 };
       }
     }
   }
   throw new Error(`[ADSP-P2] Unterminated ${actionName} call`);
 }
 
+function assertParsableJavaScript(source, filename = 'special-endpoint.js') {
+  try {
+    new vm.Script(source, { filename });
+  } catch (error) {
+    const wrapped = new Error(`[ADSP-P2] Refusing to write syntactically invalid patched ${filename}: ${error.message}`);
+    wrapped.cause = error;
+    throw wrapped;
+  }
+}
+
 function patchSpecialEndpointSource(source) {
-  if (source.includes(PATCH_MARKER)) return { source, changed: false };
+  if (source.includes(PATCH_MARKER)) {
+    assertParsableJavaScript(source);
+    return { source, changed: false };
+  }
   if (!isSpecialEndpointCandidate(source)) {
     throw new Error('[ADSP-P2] SemApps special-endpoint artifact no longer matches the expected v1.1.4 contract');
   }
@@ -110,10 +131,9 @@ function patchSpecialEndpointSource(source) {
   const createCall = source.slice(createBounds.start, createBounds.end);
   const replacement = `/* ${PATCH_MARKER} */\n      try {\n        ${createCall}\n      } catch (error) {\n        // Multiple full ActivityPods replicas may start against the same shared LDP dataset.\n        // The upstream special-endpoint mixin uses an exist-then-create sequence, so two\n        // replicas can both observe absence and race to create the same canonical endpoint.\n        // Only suppress that race if a fresh authoritative existence read proves another\n        // replica completed the exact resource creation. All other failures remain fatal.\n        const adspP2EndpointExistsAfterCreateRace = await this.broker.call(\n          'ldp.resource.exist',\n          { resourceUri: this.endpointUrl, webId: 'system' },\n          { meta: { dataset: this.settings.settingsDataset } }\n        );\n        if (!adspP2EndpointExistsAfterCreateRace) throw error;\n        this.logger.info(\n          \`[ADSP-P2] Special endpoint already initialized by another replica: \${this.endpointUrl}\`\n        );\n      }`;
 
-  return {
-    source: `${source.slice(0, createBounds.start)}${replacement}${source.slice(createBounds.end)}`,
-    changed: true
-  };
+  const patchedSource = `${source.slice(0, createBounds.start)}${replacement}${source.slice(createBounds.end)}`;
+  assertParsableJavaScript(patchedSource);
+  return { source: patchedSource, changed: true };
 }
 
 function applyPatch() {
@@ -128,6 +148,8 @@ function applyPatch() {
   const file = locateSpecialEndpointSource(packageRoot);
   const original = fs.readFileSync(file, 'utf8');
   const result = patchSpecialEndpointSource(original);
+  // Validate again with the real filename immediately before the destructive write.
+  assertParsableJavaScript(result.source, file);
   if (result.changed) {
     fs.writeFileSync(file, result.source, 'utf8');
     process.stdout.write(
@@ -145,6 +167,7 @@ module.exports = {
   EXPECTED_PACKAGE,
   EXPECTED_VERSION,
   PATCH_MARKER,
+  assertParsableJavaScript,
   isSpecialEndpointCandidate,
   locateSpecialEndpointSource,
   patchSpecialEndpointSource,
