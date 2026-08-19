@@ -3,6 +3,7 @@
 const vm = require('vm');
 const {
   PATCH_MARKER,
+  PATCH_REVALIDATION_CONTRACT,
   assertParsableJavaScript,
   isPatchedSpecialEndpointCandidate,
   isSpecialEndpointCandidate,
@@ -50,11 +51,10 @@ describe('SemApps special-endpoint horizontal startup patch', () => {
     const result = patchSpecialEndpointSource(PINNED_SOURCE);
     expect(result.changed).toBe(true);
     expect(result.source).toContain(PATCH_MARKER);
+    expect(result.source).toContain(PATCH_REVALIDATION_CONTRACT);
     expect(isPatchedSpecialEndpointCandidate(result.source)).toBe(true);
     expect(result.source).toContain("'ldp.resource.create'");
     expect(result.source.match(/'ldp\.resource\.exist'/gu)).toHaveLength(2);
-    expect(result.source).toContain('if (!adspP2EndpointExistsAfterCreateRace) throw error');
-    expect(result.source).toContain("{ resourceUri: this.endpointUrl, webId: 'system' }");
     expect(result.source).toContain('Special endpoint already initialized by another replica');
     expect(result.source).not.toMatch(/await\s+\/\* ADSP-P2_IDEMPOTENT_SPECIAL_ENDPOINT_STARTUP \*\/\s*try/u);
     expect(() => new vm.Script(result.source)).not.toThrow();
@@ -85,20 +85,25 @@ describe('SemApps special-endpoint horizontal startup patch', () => {
     expect(() => patchSpecialEndpointSource(drifted)).toThrow(/no longer directly awaited as reviewed/u);
   });
 
-  test('fails closed when an existing marker remains but exact URI or dataset revalidation drifts', () => {
+  test('fails closed when an existing marker remains but exact post-race dataset revalidation drifts', () => {
     const patched = patchSpecialEndpointSource(PINNED_SOURCE).source;
-    const wrongDataset = patched.replace(
+    const wrongContract = PATCH_REVALIDATION_CONTRACT.replace(
       '{ meta: { dataset: this.settings.settingsDataset } }',
       "{ meta: { dataset: 'settings' } }"
     );
-    expect(isPatchedSpecialEndpointCandidate(wrongDataset)).toBe(false);
-    expect(() => patchSpecialEndpointSource(wrongDataset)).toThrow(/marker no longer matches the reviewed repair contract/u);
+    const drifted = patched.replace(PATCH_REVALIDATION_CONTRACT, wrongContract);
+    expect(isPatchedSpecialEndpointCandidate(drifted)).toBe(false);
+    expect(() => patchSpecialEndpointSource(drifted)).toThrow(/marker no longer matches the reviewed repair contract/u);
+  });
 
-    const wrongUri = patched.replace(
+  test('fails closed when an existing marker remains but exact post-race URI revalidation drifts', () => {
+    const patched = patchSpecialEndpointSource(PINNED_SOURCE).source;
+    const wrongContract = PATCH_REVALIDATION_CONTRACT.replace(
       "{ resourceUri: this.endpointUrl, webId: 'system' }",
       "{ resourceUri: this.settings.baseUrl, webId: 'system' }"
     );
-    expect(isPatchedSpecialEndpointCandidate(wrongUri)).toBe(false);
-    expect(() => patchSpecialEndpointSource(wrongUri)).toThrow(/marker no longer matches the reviewed repair contract/u);
+    const drifted = patched.replace(PATCH_REVALIDATION_CONTRACT, wrongContract);
+    expect(isPatchedSpecialEndpointCandidate(drifted)).toBe(false);
+    expect(() => patchSpecialEndpointSource(drifted)).toThrow(/marker no longer matches the reviewed repair contract/u);
   });
 });
