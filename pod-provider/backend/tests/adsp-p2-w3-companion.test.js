@@ -10,6 +10,7 @@ const {
   createW3RunnerBroker,
   validateNamespace,
   validateReplicaCount,
+  waitForExactRootEndpoints,
   writeCorrelationEvidence
 } = require('../scripts/adsp-p2-w3-remote-origin-fixture');
 const {
@@ -45,6 +46,33 @@ function request(url, options = {}) {
   });
 }
 
+function endpointSequenceBroker(sequence) {
+  let index = 0;
+  const count = jest.fn(() => {
+    const value = sequence[Math.min(index, sequence.length - 1)];
+    index += 1;
+    return value;
+  });
+  return {
+    broker: {
+      registry: {
+        getActionEndpoints: jest.fn(() => ({ count }))
+      }
+    },
+    count
+  };
+}
+
+function deterministicReadinessClock() {
+  let current = 0;
+  return {
+    now: () => current,
+    sleepFn: async ms => {
+      current += ms;
+    }
+  };
+}
+
 describe('ADSP P2 W3 ActivityPods companion', () => {
   test('requires an explicit safe namespace, exact topology, and P2 RDF wire serializer', () => {
     expect(validateNamespace('adsp-p2-w3-run-123')).toBe('adsp-p2-w3-run-123');
@@ -60,6 +88,47 @@ describe('ADSP P2 W3 ActivityPods companion', () => {
     expect(broker.options.registry.preferLocal).toBe(true);
     expect(broker.serializer).toBeInstanceOf(RdfJSONSerializer);
     expect(broker.options.nodeID).toMatch(/^adsp-p2-w3-remote-origin-p8testrun-[0-9]+$/u);
+  });
+
+  test('requires exact endpoint cardinality to remain stable before declaring replicas ready', async () => {
+    const { broker, count } = endpointSequenceBroker([0, 2, 1, 2, 2, 2]);
+    const clock = deterministicReadinessClock();
+
+    await expect(
+      waitForExactRootEndpoints(broker, 2, 100, {
+        stabilityMs: 20,
+        pollMs: 10,
+        ...clock
+      })
+    ).resolves.toBe(2);
+
+    // The first transient observation of two endpoints must not be accepted;
+    // readiness is reached only after the later exact topology stays stable.
+    expect(count.mock.calls.length).toBeGreaterThanOrEqual(6);
+  });
+
+  test('fails closed when the exact endpoint cardinality never remains stable', async () => {
+    const { broker } = endpointSequenceBroker([2, 1, 2, 1, 2, 1]);
+    const clock = deterministicReadinessClock();
+
+    await expect(
+      waitForExactRootEndpoints(broker, 2, 40, {
+        stabilityMs: 20,
+        pollMs: 10,
+        ...clock
+      })
+    ).rejects.toThrow(/stable for 20ms/u);
+  });
+
+  test('rejects invalid readiness timing and injected clock primitives', async () => {
+    const { broker } = endpointSequenceBroker([1]);
+    await expect(waitForExactRootEndpoints(broker, 1, 0)).rejects.toThrow(/timeout must be a positive integer/u);
+    await expect(
+      waitForExactRootEndpoints(broker, 1, 100, { stabilityMs: 0 })
+    ).rejects.toThrow(/stability window must be a positive integer/u);
+    await expect(
+      waitForExactRootEndpoints(broker, 1, 100, { now: null })
+    ).rejects.toThrow(/clock and sleeper must be functions/u);
   });
 
   test('writes request correlation separately from strict P0-compatible origin evidence', () => {
