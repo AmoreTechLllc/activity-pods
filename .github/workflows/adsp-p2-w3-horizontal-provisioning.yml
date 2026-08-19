@@ -6,11 +6,16 @@ on:
       - master
     paths:
       - '.github/workflows/adsp-p2-w3-horizontal-provisioning.yml'
+      - 'pod-provider/backend/package.json'
+      - 'pod-provider/backend/Dockerfile'
       - 'pod-provider/backend/services/activitypub-provisioning.js'
       - 'pod-provider/backend/scripts/adsp-p2-w3-horizontal-provisioning-proof.js'
       - 'pod-provider/backend/scripts/adsp-p2-w3-remote-origin-fixture.js'
       - 'pod-provider/backend/scripts/apdm-phase8-real-measure.js'
+      - 'pod-provider/backend/scripts/patch-semapps-ldp-special-endpoint-race.js'
       - 'pod-provider/backend/tests/adsp-p2-w3-horizontal-provisioning-proof.test.js'
+      - 'pod-provider/backend/tests/adsp-p2-w3-companion.test.js'
+      - 'pod-provider/backend/tests/patch-semapps-ldp-special-endpoint-race.test.js'
       - 'pod-provider/docker-compose-adsp-p2-horizontal.yml'
       - 'pod-provider/docker-compose-adsp-p2-w3-external.yml'
       - 'pod-provider/backend/moleculer.config.js'
@@ -58,7 +63,7 @@ jobs:
           sed -i 's#ssh://git@github.com/#https://github.com/#g; s#git+ssh://git@github.com/#git+https://github.com/#g; s#git@github.com:#https://github.com/#g' yarn.lock
           yarn install --frozen-lockfile
 
-      - name: Run provisioning proof unit tests
+      - name: Run provisioning and repair unit tests
         working-directory: pod-provider/backend
         run: |
           npm exec --yes \
@@ -67,7 +72,9 @@ jobs:
             --package=esbuild-jest@0.5.0 \
             -- \
             jest --testEnvironment=node --runInBand \
-              tests/adsp-p2-w3-horizontal-provisioning-proof.test.js
+              tests/adsp-p2-w3-horizontal-provisioning-proof.test.js \
+              tests/adsp-p2-w3-companion.test.js \
+              tests/patch-semapps-ldp-special-endpoint-race.test.js
 
       - name: Build production backend image once
         run: |
