@@ -9,6 +9,7 @@ const {
   expectedExecutors,
   findTraceMatches,
   percentile,
+  readJsonLines,
   signalBarrier,
   summarize,
   waitForBarrier,
@@ -48,6 +49,35 @@ describe('ADSP P2 horizontal Redis load evidence helpers', () => {
       expect(fs.existsSync(path.join(dir, 'go'))).toBe(true);
       expect(fs.readdirSync(dir).filter(name => name.endsWith('.tmp'))).toHaveLength(0);
       await expect(waitForBarrier(dir, 'missing', 25)).rejects.toThrow(/barrier missing/u);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('readJsonLines ignores only an actively incomplete trailing append', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-p2-jsonl-'));
+    try {
+      const trace = path.join(dir, 'trace.jsonl');
+      const committed = { requestId: 'req-committed', phase: 'APDM-P8-A' };
+      const pending = { requestId: 'req-pending', phase: 'APDM-P8-A' };
+      const pendingJson = JSON.stringify(pending);
+      fs.writeFileSync(trace, `${JSON.stringify(committed)}\n${pendingJson.slice(0, -1)}`);
+
+      expect(readJsonLines(trace)).toEqual([committed]);
+
+      fs.appendFileSync(trace, `${pendingJson.slice(-1)}\n`);
+      expect(readJsonLines(trace)).toEqual([committed, pending]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('readJsonLines fails closed on malformed committed records', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-p2-jsonl-'));
+    try {
+      const trace = path.join(dir, 'trace.jsonl');
+      fs.writeFileSync(trace, '{"requestId":"req-bad"\n');
+      expect(() => readJsonLines(trace)).toThrow(SyntaxError);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { buildResourceGuardrails } = require('./adsp-p2-horizontal-resource-guardrails');
 
 const CASE_PATTERN = /^(1|2|4)r-(10|100|200|1000)n-s([1-9][0-9]*)$/u;
 
@@ -239,13 +240,14 @@ function buildResourceSummary(runtimeDir, resultsDir) {
     .map(entry => entry.name)
     .sort();
   const windows = directories.map(name => summarizeWindow(runtimeDir, resultsDir, name));
-  return {
+  const summary = {
     version: 1,
     phase: 'ADSP-P2-A',
     fixture: 'tier1-horizontal-local-fanout-resources',
     windows,
     cases: summarizeCases(windows)
   };
+  return { ...summary, guardrails: buildResourceGuardrails(summary) };
 }
 
 function main(argv = process.argv.slice(2)) {
@@ -260,6 +262,7 @@ function main(argv = process.argv.slice(2)) {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+  if (process.env.ADSP_P2_EVIDENCE_MODE === 'true' && !summary.guardrails.passed) process.exitCode = 2;
 }
 
 if (require.main === module) {
