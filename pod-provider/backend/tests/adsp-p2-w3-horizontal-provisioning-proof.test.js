@@ -15,7 +15,7 @@ describe('ADSP P2 W3 horizontal provisioning proof', () => {
     }
   });
 
-  test('binds signup and actor bootstrap to the exact horizontal namespace and replica count', async () => {
+  test('binds signup and actor bootstrap to the exact horizontal namespace and replica count before and after provisioning', async () => {
     const calls = [];
     const broker = {
       start: jest.fn(async () => calls.push('start')),
@@ -64,10 +64,13 @@ describe('ADSP P2 W3 horizontal provisioning proof', () => {
       namespace: 'adsp-p2-w3-proof-2r',
       expectedReplicas: 2,
       observedReplicas: 2,
+      observedReplicasBeforeProvisioning: 2,
+      observedReplicasAfterBootstrap: 2,
       username: 'proofuser',
       webId: 'http://localhost:3000/proofuser',
       outbox: 'http://localhost:3000/proofuser/outbox'
     });
+    expect(waitForEndpointsFn).toHaveBeenCalledTimes(2);
     expect(broker.stop).toHaveBeenCalledTimes(1);
     expect(calls).toEqual([
       ['broker', 'redis://127.0.0.1:6379/12', 'p8proofrun-provision', 'adsp-p2-w3-proof-2r'],
@@ -76,8 +79,43 @@ describe('ADSP P2 W3 horizontal provisioning proof', () => {
       ['endpoints', 2, 1234],
       ['signup', 'http://localhost:3000', 'sender'],
       ['bootstrap', 'proofuser', 'outbox', 1234],
+      ['endpoints', 2, 1234],
       'stop'
     ]);
+  });
+
+  test('fails closed if topology collapses after actor bootstrap', async () => {
+    const broker = {
+      start: jest.fn(async () => undefined),
+      stop: jest.fn(async () => undefined),
+      waitForServices: jest.fn(async () => undefined)
+    };
+    const waitForEndpointsFn = jest
+      .fn()
+      .mockResolvedValueOnce(2)
+      .mockRejectedValueOnce(new Error('topology collapsed'));
+
+    await expect(
+      runHorizontalProvisioningProof({
+        namespace: 'adsp-p2-w3-proof-2r',
+        expectedReplicas: 2,
+        readyTimeoutMs: 100,
+        runId: 'collapse-run',
+        brokerFactory: () => broker,
+        waitForEndpointsFn,
+        signupFn: async () => ({
+          username: 'proofuser',
+          webId: 'http://localhost:3000/proofuser'
+        }),
+        bootstrapFn: async (_broker, actor) => {
+          actor.outbox = `${actor.webId}/outbox`;
+          return actor;
+        }
+      })
+    ).rejects.toThrow('topology collapsed');
+
+    expect(waitForEndpointsFn).toHaveBeenCalledTimes(2);
+    expect(broker.stop).toHaveBeenCalledTimes(1);
   });
 
   test('always stops the runner broker when signup fails', async () => {
