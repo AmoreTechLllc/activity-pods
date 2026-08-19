@@ -8,26 +8,31 @@ const {
 
 const PINNED_SOURCE = `
 module.exports = {
-  settings: { path: '/.well-known/solid', settingsDataset: 'settings' },
+  settings: {
+    baseUrl: null,
+    settingsDataset: null,
+    endpoint: { path: null, initialData: {} }
+  },
   async started() {
-    const resourceUri = urlJoin(this.settings.baseUrl, this.settings.path);
-    try {
-      const resourceExist = await this.broker.call(
-        'ldp.resource.exist',
-        { resourceUri },
-        { meta: { webId: 'system', dataset: this.settings.settingsDataset } }
+    this.endpointUrl = urlJoin(this.settings.baseUrl, this.settings.endpoint.path);
+    const endpointExist = await this.broker.call(
+      'ldp.resource.exist',
+      { resourceUri: this.endpointUrl, webId: 'system' },
+      { meta: { dataset: this.settings.settingsDataset } }
+    );
+    if (!endpointExist) {
+      await this.broker.call(
+        'ldp.resource.create',
+        {
+          resource: {
+            id: this.endpointUrl,
+            ...this.settings.endpoint.initialData
+          },
+          contentType: MIME_TYPES.JSON,
+          webId: 'system'
+        },
+        { meta: { dataset: this.settings.settingsDataset, skipEmitEvent: true, skipObjectsWatcher: true } }
       );
-      if (!resourceExist) {
-        const resource = await this.settings.get(this.broker);
-        await this.broker.call(
-          'ldp.resource.create',
-          { resource, resourceUri },
-          { meta: { webId: 'system', dataset: this.settings.settingsDataset } }
-        );
-      }
-    } catch (e) {
-      this.logger.error(e);
-      throw e;
     }
   }
 };
@@ -44,7 +49,8 @@ describe('SemApps special-endpoint horizontal startup patch', () => {
     expect(result.source).toContain(PATCH_MARKER);
     expect(result.source).toContain("'ldp.resource.create'");
     expect(result.source.match(/'ldp\.resource\.exist'/gu)).toHaveLength(2);
-    expect(result.source).toContain('if (!adspP2ResourceExistsAfterCreateRace) throw error');
+    expect(result.source).toContain('if (!adspP2EndpointExistsAfterCreateRace) throw error');
+    expect(result.source).toContain("{ resourceUri: this.endpointUrl, webId: 'system' }");
     expect(result.source).toContain('Special endpoint already initialized by another replica');
   });
 
