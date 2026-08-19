@@ -44,7 +44,11 @@ async function runHorizontalProvisioningProof({
   await broker.start();
   try {
     await broker.waitForServices(['auth', 'activitypub.outbox', 'activitypub.actor'], readyTimeoutMs);
-    const observedReplicas = await waitForEndpointsFn(broker, normalizedExpectedReplicas, readyTimeoutMs);
+    const observedReplicasBeforeProvisioning = await waitForEndpointsFn(
+      broker,
+      normalizedExpectedReplicas,
+      readyTimeoutMs
+    );
     const password = process.env.ADSP_P2_W3_SIGNUP_PASSWORD || `${crypto.randomBytes(24).toString('base64url')}A1!`;
     const actor = await signupFn({
       baseUrl,
@@ -58,12 +62,23 @@ async function runHorizontalProvisioningProof({
       throw new Error('Horizontal provisioning proof completed without a fully bootstrapped ActivityPub actor');
     }
 
+    // Re-prove the exact topology after the operation under test. A replica
+    // that advertises during startup, then dies while signup succeeds through
+    // a surviving peer, must not produce successful horizontal evidence.
+    const observedReplicasAfterBootstrap = await waitForEndpointsFn(
+      broker,
+      normalizedExpectedReplicas,
+      readyTimeoutMs
+    );
+
     return {
       schema: PROOF_SCHEMA,
       ok: true,
       namespace: normalizedNamespace,
       expectedReplicas: normalizedExpectedReplicas,
-      observedReplicas,
+      observedReplicas: observedReplicasAfterBootstrap,
+      observedReplicasBeforeProvisioning,
+      observedReplicasAfterBootstrap,
       username: actor.username,
       webId: actor.webId,
       outbox: actor.outbox
