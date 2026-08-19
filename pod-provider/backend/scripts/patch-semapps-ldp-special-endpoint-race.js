@@ -44,17 +44,33 @@ function isSpecialEndpointCandidate(source) {
   );
 }
 
+function isPatchedSpecialEndpointCandidate(source) {
+  return (
+    source.includes(PATCH_MARKER) &&
+    isSpecialEndpointCandidate(source) &&
+    source.includes('const adspP2EndpointExistsAfterCreateRace = await this.broker.call(') &&
+    source.includes("'ldp.resource.exist'") &&
+    source.includes("{ resourceUri: this.endpointUrl, webId: 'system' }") &&
+    source.includes('{ meta: { dataset: this.settings.settingsDataset } }') &&
+    source.includes('if (!adspP2EndpointExistsAfterCreateRace) throw error;')
+  );
+}
+
 function locateSpecialEndpointSource(packageRoot) {
   const preferred = path.join(packageRoot, 'mixins', 'special-endpoint.js');
   if (fs.existsSync(preferred)) {
     const preferredSource = fs.readFileSync(preferred, 'utf8');
-    if (preferredSource.includes(PATCH_MARKER) || isSpecialEndpointCandidate(preferredSource)) return preferred;
+    if (preferredSource.includes(PATCH_MARKER)) {
+      if (isPatchedSpecialEndpointCandidate(preferredSource)) return preferred;
+      throw new Error('[ADSP-P2] Existing special-endpoint patch marker no longer matches the reviewed repair contract');
+    }
+    if (isSpecialEndpointCandidate(preferredSource)) return preferred;
     throw new Error('[ADSP-P2] Pinned @semapps/ldp mixins/special-endpoint.js no longer matches the reviewed v1.1.4 contract');
   }
 
   const candidates = walkJavaScriptFiles(packageRoot).filter(file => {
     const source = fs.readFileSync(file, 'utf8');
-    return source.includes(PATCH_MARKER) || isSpecialEndpointCandidate(source);
+    return isPatchedSpecialEndpointCandidate(source) || (!source.includes(PATCH_MARKER) && isSpecialEndpointCandidate(source));
   });
   if (candidates.length !== 1) {
     throw new Error(
@@ -120,6 +136,9 @@ function assertParsableJavaScript(source, filename = 'special-endpoint.js') {
 
 function patchSpecialEndpointSource(source) {
   if (source.includes(PATCH_MARKER)) {
+    if (!isPatchedSpecialEndpointCandidate(source)) {
+      throw new Error('[ADSP-P2] Existing special-endpoint patch marker no longer matches the reviewed repair contract');
+    }
     assertParsableJavaScript(source);
     return { source, changed: false };
   }
@@ -132,6 +151,9 @@ function patchSpecialEndpointSource(source) {
   const replacement = `/* ${PATCH_MARKER} */\n      try {\n        ${createCall}\n      } catch (error) {\n        // Multiple full ActivityPods replicas may start against the same shared LDP dataset.\n        // The upstream special-endpoint mixin uses an exist-then-create sequence, so two\n        // replicas can both observe absence and race to create the same canonical endpoint.\n        // Only suppress that race if a fresh authoritative existence read proves another\n        // replica completed the exact resource creation. All other failures remain fatal.\n        const adspP2EndpointExistsAfterCreateRace = await this.broker.call(\n          'ldp.resource.exist',\n          { resourceUri: this.endpointUrl, webId: 'system' },\n          { meta: { dataset: this.settings.settingsDataset } }\n        );\n        if (!adspP2EndpointExistsAfterCreateRace) throw error;\n        this.logger.info(\n          \`[ADSP-P2] Special endpoint already initialized by another replica: \${this.endpointUrl}\`\n        );\n      }`;
 
   const patchedSource = `${source.slice(0, createBounds.start)}${replacement}${source.slice(createBounds.end)}`;
+  if (!isPatchedSpecialEndpointCandidate(patchedSource)) {
+    throw new Error('[ADSP-P2] Generated special-endpoint patch does not satisfy the reviewed repair contract');
+  }
   assertParsableJavaScript(patchedSource);
   return { source: patchedSource, changed: true };
 }
@@ -148,7 +170,11 @@ function applyPatch() {
   const file = locateSpecialEndpointSource(packageRoot);
   const original = fs.readFileSync(file, 'utf8');
   const result = patchSpecialEndpointSource(original);
-  // Validate again with the real filename immediately before the destructive write.
+  // Validate both syntax and the semantic marker contract immediately before
+  // the destructive write/reuse of the installed dependency artifact.
+  if (!isPatchedSpecialEndpointCandidate(result.source)) {
+    throw new Error('[ADSP-P2] Refusing to use a patched special-endpoint artifact whose repair contract drifted');
+  }
   assertParsableJavaScript(result.source, file);
   if (result.changed) {
     fs.writeFileSync(file, result.source, 'utf8');
@@ -168,6 +194,7 @@ module.exports = {
   EXPECTED_VERSION,
   PATCH_MARKER,
   assertParsableJavaScript,
+  isPatchedSpecialEndpointCandidate,
   isSpecialEndpointCandidate,
   locateSpecialEndpointSource,
   patchSpecialEndpointSource,
