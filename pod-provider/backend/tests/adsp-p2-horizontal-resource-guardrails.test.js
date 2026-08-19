@@ -1,5 +1,9 @@
 'use strict';
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawnSync } = require('child_process');
 const {
   buildResourceGuardrails,
   compareResourceStep
@@ -123,5 +127,29 @@ describe('ADSP P2 normalized resource guardrails', () => {
     expect(step.redisCommandCallsRatio).toBeCloseTo(1.1);
     expect(step.redisCommandUsecRatio).toBeCloseTo(1.1);
     expect(step.passed).toBe(true);
+  });
+
+  test('CLI fails closed in evidence mode when a complete guardrail decision fails', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-p2-resource-guardrails-'));
+    try {
+      const input = path.join(root, 'resource-summary.json');
+      const output = path.join(root, 'guardrails.json');
+      fs.writeFileSync(input, JSON.stringify(resourceSummary({ 2: { cpuPerOutcome: 11.6 } })));
+      const script = path.resolve(__dirname, '../scripts/adsp-p2-horizontal-resource-guardrails.js');
+      const evidence = spawnSync(process.execPath, [script, input, output], {
+        env: { ...process.env, ADSP_P2_EVIDENCE_MODE: 'true' },
+        encoding: 'utf8'
+      });
+      expect(evidence.status).toBe(2);
+      expect(JSON.parse(fs.readFileSync(output, 'utf8')).passed).toBe(false);
+
+      const smoke = spawnSync(process.execPath, [script, input, output], {
+        env: { ...process.env, ADSP_P2_EVIDENCE_MODE: 'false' },
+        encoding: 'utf8'
+      });
+      expect(smoke.status).toBe(0);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
