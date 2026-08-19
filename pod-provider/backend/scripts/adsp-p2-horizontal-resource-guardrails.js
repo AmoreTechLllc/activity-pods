@@ -183,7 +183,7 @@ function main(argv = process.argv.slice(2)) {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, `${JSON.stringify(result, null, 2)}\n`, 'utf8');
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  if (process.env.ADSP_P2_EVIDENCE_MODE === 'true' && !result.complete) process.exitCode = 2;
+  if (process.env.ADSP_P2_EVIDENCE_MODE === 'true' && !result.passed) process.exitCode = 2;
 }
 
 if (require.main === module) {
