@@ -163,7 +163,7 @@ jobs:
               cat "$arm_dir/proof.stderr.log" >&2 || true
               exit "$status"
             fi
-            node -e "const v=require(process.argv[1]); if(v.schema!=='adsp.p2.w3.horizontal-provisioning.v1'||v.ok!==true||v.expectedReplicas!==Number(process.argv[2])||v.observedReplicas!==Number(process.argv[2])||!v.webId||!v.outbox) process.exit(1)" "$arm_dir/proof.json" "$replicas"
+            node -e "const v=require(process.argv[1]); const n=Number(process.argv[2]); if(v.schema!=='adsp.p2.w3.horizontal-provisioning.v1'||v.ok!==true||v.expectedReplicas!==n||v.observedReplicas!==n||v.observedReplicasBeforeProvisioning!==n||v.observedReplicasAfterBootstrap!==n||!v.webId||!v.outbox) process.exit(1)" "$arm_dir/proof.json" "$replicas"
           done
 
       - name: Upload horizontal provisioning evidence
