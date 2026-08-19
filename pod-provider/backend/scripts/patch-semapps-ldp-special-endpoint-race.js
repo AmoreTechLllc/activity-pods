@@ -1,0 +1,143 @@
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
+const EXPECTED_PACKAGE = '@semapps/ldp';
+const EXPECTED_VERSION = '1.1.4';
+const PATCH_MARKER = 'ADSP-P2_IDEMPOTENT_SPECIAL_ENDPOINT_STARTUP';
+
+function findPackageRoot() {
+  let current = path.dirname(require.resolve(EXPECTED_PACKAGE));
+  while (current !== path.dirname(current)) {
+    const packageJsonPath = path.join(current, 'package.json');
+    if (fs.existsSync(packageJsonPath)) {
+      const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+      if (packageJson.name === EXPECTED_PACKAGE) return current;
+    }
+    current = path.dirname(current);
+  }
+  throw new Error(`[ADSP-P2] Could not locate ${EXPECTED_PACKAGE} package root`);
+}
+
+function walkJavaScriptFiles(directory) {
+  const files = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (entry.name === 'node_modules') continue;
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...walkJavaScriptFiles(entryPath));
+    else if (/\.(?:c?js|mjs)$/u.test(entry.name)) files.push(entryPath);
+  }
+  return files;
+}
+
+function isSpecialEndpointCandidate(source) {
+  return (
+    source.includes('ldp.resource.exist') &&
+    source.includes('ldp.resource.create') &&
+    source.includes('this.settings.path') &&
+    source.includes('this.settings.get') &&
+    source.includes('async started')
+  );
+}
+
+function locateSpecialEndpointSource(packageRoot) {
+  const candidates = walkJavaScriptFiles(packageRoot).filter(file => {
+    const source = fs.readFileSync(file, 'utf8');
+    return source.includes(PATCH_MARKER) || isSpecialEndpointCandidate(source);
+  });
+  if (candidates.length !== 1) {
+    throw new Error(
+      `[ADSP-P2] Expected exactly one ${EXPECTED_PACKAGE} special-endpoint artifact, found ${candidates.length}: ${candidates.join(', ')}`
+    );
+  }
+  return candidates[0];
+}
+
+function findCallBounds(source, actionName, fromIndex = 0) {
+  const actionIndex = source.indexOf(actionName, fromIndex);
+  if (actionIndex === -1) throw new Error(`[ADSP-P2] Could not locate ${actionName}`);
+  const callStart = source.lastIndexOf('this.broker.call(', actionIndex);
+  if (callStart === -1) throw new Error(`[ADSP-P2] ${actionName} is no longer invoked through this.broker.call`);
+
+  const openParen = source.indexOf('(', callStart);
+  let depth = 1;
+  let quote = null;
+  let escaped = false;
+  for (let index = openParen + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '\'' || char === '"' || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === '(') depth += 1;
+    else if (char === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        const semicolon = source.indexOf(';', index);
+        if (semicolon === -1 || semicolon - index > 12) {
+          throw new Error(`[ADSP-P2] Could not locate the end of ${actionName} call`);
+        }
+        return { start: callStart, end: semicolon + 1 };
+      }
+    }
+  }
+  throw new Error(`[ADSP-P2] Unterminated ${actionName} call`);
+}
+
+function patchSpecialEndpointSource(source) {
+  if (source.includes(PATCH_MARKER)) return { source, changed: false };
+  if (!isSpecialEndpointCandidate(source)) {
+    throw new Error('[ADSP-P2] SemApps special-endpoint artifact no longer matches the expected v1.1.4 contract');
+  }
+
+  const createBounds = findCallBounds(source, 'ldp.resource.create');
+  const createCall = source.slice(createBounds.start, createBounds.end);
+  const replacement = `/* ${PATCH_MARKER} */\n          try {\n            ${createCall}\n          } catch (error) {\n            // Multiple full ActivityPods replicas may start against the same shared LDP dataset.\n            // The upstream special-endpoint mixin uses an exist-then-create sequence, so two\n            // replicas can both observe absence and race to create the same canonical endpoint.\n            // Only suppress that race if a fresh authoritative existence read proves another\n            // replica completed the exact resource creation. All other failures remain fatal.\n            const adspP2ResourceExistsAfterCreateRace = await this.broker.call(\n              'ldp.resource.exist',\n              { resourceUri },\n              { meta: { webId: 'system', dataset: this.settings.settingsDataset } }\n            );\n            if (!adspP2ResourceExistsAfterCreateRace) throw error;\n            this.logger.info(\n              \`[ADSP-P2] Special endpoint already initialized by another replica: \${resourceUri}\`\n            );\n          }`;
+
+  return {
+    source: `${source.slice(0, createBounds.start)}${replacement}${source.slice(createBounds.end)}`,
+    changed: true
+  };
+}
+
+function applyPatch() {
+  const packageRoot = findPackageRoot();
+  const packageJson = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
+  if (packageJson.version !== EXPECTED_VERSION) {
+    throw new Error(
+      `[ADSP-P2] Refusing to patch ${EXPECTED_PACKAGE}@${packageJson.version}; expected exactly ${EXPECTED_VERSION}`
+    );
+  }
+
+  const file = locateSpecialEndpointSource(packageRoot);
+  const original = fs.readFileSync(file, 'utf8');
+  const result = patchSpecialEndpointSource(original);
+  if (result.changed) {
+    fs.writeFileSync(file, result.source, 'utf8');
+    process.stdout.write(
+      `[ADSP-P2] Patched ${path.relative(packageRoot, file)} so concurrent special-endpoint startup is idempotent\n`
+    );
+  } else {
+    process.stdout.write(`[ADSP-P2] ${path.relative(packageRoot, file)} already patched\n`);
+  }
+  return { packageRoot, file, changed: result.changed };
+}
+
+if (require.main === module) applyPatch();
+
+module.exports = {
+  EXPECTED_PACKAGE,
+  EXPECTED_VERSION,
+  PATCH_MARKER,
+  isSpecialEndpointCandidate,
+  locateSpecialEndpointSource,
+  patchSpecialEndpointSource,
+  applyPatch
+};
