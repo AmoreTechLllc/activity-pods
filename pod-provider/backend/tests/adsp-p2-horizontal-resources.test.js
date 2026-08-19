@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const {
+  buildResourceSummary,
   deltaRedisCommandstats,
   parseContainerSnapshot,
   parseRedisCommandstats,
@@ -34,6 +35,33 @@ function commandstats(calls, usec, failed = 0) {
 
 function redisMemory(used) {
   return `used_memory:${used}\nused_memory_rss:${used + 100}\nused_memory_peak:${used + 200}\n`;
+}
+
+function writeMeasuredWindow(runtimeDir, resultsDir, { replicas, sample, cpuScale = 1 }) {
+  const caseName = `${replicas}r-10n-s${sample}`;
+  const sampleDir = path.join(runtimeDir, caseName);
+  fs.mkdirSync(sampleDir, { recursive: true });
+  const services = ['backend'];
+  if (replicas >= 2) services.push('backend_p2_2');
+  if (replicas >= 4) services.push('backend_p2_3', 'backend_p2_4');
+  services.push('fuseki_test', 'redis');
+  for (const [index, service] of services.entries()) {
+    const beforeCpu = 1000 * (index + 1);
+    const cpuDelta = Math.round(1000 * cpuScale / replicas);
+    fs.writeFileSync(path.join(sampleDir, `${service}-before.txt`), snapshot(service, beforeCpu, 1000));
+    fs.writeFileSync(path.join(sampleDir, `${service}-after.txt`), snapshot(service, beforeCpu + cpuDelta, 1000));
+  }
+  fs.writeFileSync(path.join(sampleDir, 'redis-commandstats-before.txt'), commandstats(10, 20));
+  fs.writeFileSync(path.join(sampleDir, 'redis-commandstats-after.txt'), commandstats(18, 35));
+  fs.writeFileSync(path.join(sampleDir, 'redis-memory-before.txt'), redisMemory(1000));
+  fs.writeFileSync(path.join(sampleDir, 'redis-memory-after.txt'), redisMemory(1200));
+  fs.writeFileSync(path.join(resultsDir, `${caseName}.json`), JSON.stringify({
+    successfulOutcomes: 8,
+    requestCount: 8,
+    failedOutcomes: 0,
+    throughputPerSecond: replicas,
+    completedMs: { p95: 100 / replicas, p99: 120 / replicas }
+  }));
 }
 
 describe('ADSP P2 horizontal resource evidence', () => {
@@ -114,6 +142,26 @@ describe('ADSP P2 horizontal resource evidence', () => {
       expect(result.redisCommandCalls).toBe(8);
       expect(result.redisCommandUsec).toBe(15);
       expect(result.redisUsedMemoryDeltaBytes).toBe(200);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('embeds a complete normalized guardrail decision in the existing resource summary', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-p2-resource-summary-'));
+    try {
+      const runtimeDir = path.join(root, 'runtime');
+      const resultsDir = path.join(root, 'results');
+      fs.mkdirSync(runtimeDir, { recursive: true });
+      fs.mkdirSync(resultsDir, { recursive: true });
+      for (const replicas of [1, 2, 4]) {
+        for (let sample = 1; sample <= 5; sample += 1) writeMeasuredWindow(runtimeDir, resultsDir, { replicas, sample });
+      }
+      const summary = buildResourceSummary(runtimeDir, resultsDir);
+      expect(summary.guardrails.complete).toBe(true);
+      expect(summary.guardrails.passed).toBe(true);
+      expect(summary.guardrails.cases['4r-10n'].samples).toBe(5);
+      expect(summary.guardrails.scale['10n'].oneToTwo.guards.redisErrorsZero).toBe(true);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
