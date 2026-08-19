@@ -1,0 +1,208 @@
+name: APDM Phase 11 durable controller
+
+on:
+  pull_request_target:
+    types: [reopened]
+  workflow_run:
+    workflows: ['APDM Phase 11 query attribution']
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  kickoff:
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.number == 78 &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'agent/apdm-phase11-query-attribution'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      CHILD_WORKFLOW: apdm-phase11-query-attribution.yml
+    steps:
+      - name: Resolve immutable evidence ref
+        id: ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid source SHA' >&2; exit 1; }
+          evidence_branch="evidence/apdm-phase11-${SOURCE_SHA}"
+          evidence_ref="refs/heads/${evidence_branch}"
+          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${evidence_branch}" --jq '.object.sha' 2>/dev/null || true)"
+          if [[ -n "${existing_sha}" ]]; then
+            [[ "${existing_sha}" == "${SOURCE_SHA}" ]] || { echo 'Evidence ref moved' >&2; exit 1; }
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="${evidence_ref}" -f sha="${SOURCE_SHA}" >/dev/null
+          fi
+          echo "branch=${evidence_branch}" >> "$GITHUB_OUTPUT"
+
+      - name: Start or resume exact-SHA Phase 11 campaign
+        shell: bash
+        env:
+          EVIDENCE_BRANCH: ${{ steps.ref.outputs.branch }}
+        run: |
+          set -euo pipefail
+          runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${CHILD_WORKFLOW}/runs?branch=${EVIDENCE_BRANCH}&event=workflow_dispatch&head_sha=${SOURCE_SHA}&per_page=20")"
+          run_id="$(jq -r '.workflow_runs | sort_by(.created_at) | reverse | .[0].id // empty' <<<"${runs}")"
+
+          if [[ -z "${run_id}" ]]; then
+            response="$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' --method POST \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${CHILD_WORKFLOW}/dispatches" \
+              -f ref="${EVIDENCE_BRANCH}")"
+            run_id="$(jq -r '.workflow_run_id // empty' <<<"${response}")"
+            if [[ ! "${run_id}" =~ ^[0-9]+$ ]]; then
+              for _ in $(seq 1 30); do
+                sleep 2
+                runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${CHILD_WORKFLOW}/runs?branch=${EVIDENCE_BRANCH}&event=workflow_dispatch&head_sha=${SOURCE_SHA}&per_page=20")"
+                run_id="$(jq -r '.workflow_runs | sort_by(.created_at) | reverse | .[0].id // empty' <<<"${runs}")"
+                [[ "${run_id}" =~ ^[0-9]+$ ]] && break
+              done
+            fi
+            [[ "${run_id}" =~ ^[0-9]+$ ]] || { echo 'Unable to discover dispatched Phase 11 run' >&2; exit 1; }
+            action='started attempt 1'
+          else
+            run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"
+            run_sha="$(jq -r '.head_sha' <<<"${run}")"
+            run_status="$(jq -r '.status' <<<"${run}")"
+            run_attempt="$(jq -r '.run_attempt' <<<"${run}")"
+            conclusion="$(jq -r '.conclusion // empty' <<<"${run}")"
+            [[ "${run_sha}" == "${SOURCE_SHA}" ]] || { echo 'Existing run SHA mismatch' >&2; exit 1; }
+            if [[ "${run_status}" != 'completed' ]]; then
+              action="found existing ${run_status} attempt ${run_attempt}"
+            elif [[ "${run_attempt}" == '1' && "${conclusion}" == 'success' ]]; then
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/rerun" >/dev/null
+              action='resumed with attempt 2'
+            elif [[ "${run_attempt}" == '2' && "${conclusion}" == 'success' ]]; then
+              action='found completed paired campaign'
+            else
+              action="found non-resumable attempt ${run_attempt} conclusion ${conclusion}"
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+                -f body="APDM Phase 11 durable controller: ${action}. Exact source \`${SOURCE_SHA}\`, evidence ref \`${EVIDENCE_BRANCH}\`, run \`${run_id}\`." >/dev/null
+              exit 1
+            fi
+          fi
+
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="APDM Phase 11 durable controller: ${action}. Exact source \`${SOURCE_SHA}\`, immutable evidence ref \`${EVIDENCE_BRANCH}\`, run \`${run_id}\`. Other development can continue without moving or cancelling this evidence ref." >/dev/null
+
+  advance:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      startsWith(github.event.workflow_run.head_branch, 'evidence/apdm-phase11-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      EVIDENCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      PR_NUMBER: '78'
+    steps:
+      - name: Validate exact child identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${EVIDENCE_BRANCH}" == "evidence/apdm-phase11-${SOURCE_SHA}" ]] || exit 1
+          ref_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${EVIDENCE_BRANCH}" --jq '.object.sha')"
+          [[ "${ref_sha}" == "${SOURCE_SHA}" ]] || { echo 'Immutable evidence ref moved' >&2; exit 1; }
+          if [[ "${RUN_CONCLUSION}" != 'success' ]]; then
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              -f body="APDM Phase 11 attempt ${RUN_ATTEMPT} FAILED at exact source \`${SOURCE_SHA}\`, run \`${RUN_ID}\`. Failure is preserved; no partial evidence will be reused." >/dev/null
+            exit 1
+          fi
+
+      - name: Start opposite order after attempt 1
+        if: env.RUN_ATTEMPT == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/rerun" >/dev/null
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="APDM Phase 11 attempt 1 PASSED at exact source \`${SOURCE_SHA}\`, run \`${RUN_ID}\`. Started attempt 2 on the same run/ref for the opposite arm order." >/dev/null
+
+      - name: Validate paired artifacts after attempt 2
+        if: env.RUN_ATTEMPT == '2'
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifacts="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100")"
+          for attempt in 1 2; do
+            name="apdm-p11-attribution-${RUN_ID}-${attempt}"
+            artifact_id="$(jq -r --arg name "${name}" '.artifacts[] | select(.name == $name and .expired == false) | .id' <<<"${artifacts}" | head -n1)"
+            [[ "${artifact_id}" =~ ^[0-9]+$ ]] || { echo "Missing ${name}" >&2; exit 1; }
+            mkdir -p "evidence/${attempt}"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "evidence/${attempt}.zip"
+            unzip -q "evidence/${attempt}.zip" -d "evidence/${attempt}"
+          done
+
+          for attempt in 1 2; do
+            env_file="$(find "evidence/${attempt}" -name apdm-p11-environment-validation.json -print -quit)"
+            query_file="$(find "evidence/${attempt}" -name apdm-p11-query-summary.json -print -quit)"
+            overhead_file="$(find "evidence/${attempt}" -name apdm-p11-overhead.json -print -quit)"
+            [[ -n "${env_file}" && -n "${query_file}" && -n "${overhead_file}" ]] || { echo 'Incomplete artifact set' >&2; exit 1; }
+            node - "${SOURCE_SHA}" "${RUN_ID}" "${attempt}" "${env_file}" "${query_file}" "${overhead_file}" <<'NODE'
+          const fs = require('fs');
+          const [sourceSha, runId, attemptText, envPath, queryPath, overheadPath] = process.argv.slice(2);
+          const attempt = Number(attemptText);
+          const expectedOrder = attempt === 1 ? 'control-first' : 'attributed-first';
+          const env = JSON.parse(fs.readFileSync(envPath, 'utf8'));
+          const query = JSON.parse(fs.readFileSync(queryPath, 'utf8'));
+          const overhead = JSON.parse(fs.readFileSync(overheadPath, 'utf8'));
+          const failures = [];
+          if (env.passed !== true) failures.push('environment validation failed');
+          for (const arm of ['control', 'attributed']) {
+            const item = env[arm];
+            if (!item) { failures.push(`missing ${arm} provenance`); continue; }
+            if (item.commitSha !== sourceSha) failures.push(`${arm} SHA mismatch`);
+            if (String(item.workflowRunId) !== String(runId)) failures.push(`${arm} run ID mismatch`);
+            if (Number(item.runAttempt) !== attempt) failures.push(`${arm} run attempt mismatch`);
+            if (item.armOrder !== expectedOrder) failures.push(`${arm} arm order mismatch`);
+            if (item.phase10MemoEnabled !== true) failures.push(`${arm} Phase 10 benchmark memo mismatch`);
+            if (item.concurrency !== 4) failures.push(`${arm} concurrency mismatch`);
+          }
+          if (query.completenessGate?.passed !== true) failures.push('query completeness gate failed');
+          const required = [1, 10, 100, 200, 1000];
+          const counts = query.counts || [];
+          if (JSON.stringify(counts.map(x => x.recipientCount)) !== JSON.stringify(required)) failures.push('recipient matrix mismatch');
+          for (const c of counts) {
+            if (c.samples < 3) failures.push(`N=${c.recipientCount} undersampled`);
+            if (c.unattributedQueryCallsMedian !== 0) failures.push(`N=${c.recipientCount} unattributed calls`);
+          }
+          if (overhead.gate?.passed !== true) failures.push('overhead gate failed');
+          const n = overhead.cases?.['1000'] || overhead.cases?.[1000];
+          if (!n) failures.push('missing N=1000 overhead');
+          else {
+            if (Math.abs(n.elapsedMs.deltaPercent) > 10) failures.push('N=1000 elapsed drift');
+            if (Math.abs(n.cpuMs.deltaPercent) > 15) failures.push('N=1000 CPU drift');
+            if (Math.abs(n.actionCount.deltaPercent) > 0.01) failures.push('N=1000 action count changed');
+            if (Math.abs(n.fusekiRequestCount.deltaPercent) > 0.01) failures.push('N=1000 Fuseki count changed');
+          }
+          if (failures.length) { console.error(failures.join('\n')); process.exit(1); }
+          NODE
+          done
+
+          ref_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${EVIDENCE_BRANCH}" --jq '.object.sha')"
+          [[ "${ref_sha}" == "${SOURCE_SHA}" ]] || exit 1
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="APDM Phase 11 paired evidence PASSED at exact source \`${SOURCE_SHA}\`, run \`${RUN_ID}\`, attempts 1 and 2 with opposite arm order. Immutable evidence ref: \`${EVIDENCE_BRANCH}\`." >/dev/null
+
+      - name: Reject attempts beyond the authoritative pair
+        if: env.RUN_ATTEMPT != '1' && env.RUN_ATTEMPT != '2'
+        run: exit 1
