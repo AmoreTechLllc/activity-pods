@@ -39,6 +39,16 @@ jobs:
         with:
           node-version: '22.12.0'
 
+      - name: Prepare ephemeral external-authority credential
+        run: |
+          set -euo pipefail
+          token="$(openssl rand -hex 32)"
+          echo "::add-mask::${token}"
+          {
+            echo "SIDECAR_TOKEN=${token}"
+            echo "ACTIVITYPODS_TOKEN=${token}"
+          } >> "$GITHUB_ENV"
+
       - name: Install backend dependencies
         working-directory: pod-provider/backend
         run: |
@@ -79,7 +89,7 @@ jobs:
           wait_http() {
             local port="$1"
             for attempt in $(seq 1 180); do
-              if curl -sS --max-time 2 -o /dev/null "http://127.0.0.1:${port}/"; then return 0; fi
+              if curl -fsS --max-time 2 -o /dev/null "http://127.0.0.1:${port}/"; then return 0; fi
               sleep 1
             done
             return 1
