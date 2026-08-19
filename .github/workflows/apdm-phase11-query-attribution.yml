@@ -1,0 +1,307 @@
+name: APDM Phase 11 query attribution
+
+on:
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: Measured samples per recipient count
+        required: false
+        default: '3'
+      warmups:
+        description: Warmup roots per recipient count
+        required: false
+        default: '1'
+  push:
+    branches:
+      - agent/apdm-phase11-query-attribution
+    paths:
+      - '.github/workflows/apdm-phase11-query-attribution.yml'
+      - 'pod-provider/backend/config/config.js'
+      - 'pod-provider/backend/docs/apdm-phase11-query-attribution.md'
+      - 'pod-provider/backend/lib/apdm-phase8-tier1-instrumentation.js'
+      - 'pod-provider/backend/lib/apdm-phase11-query-attribution.js'
+      - 'pod-provider/backend/middlewares/apdm-local-delivery-dataset-exist-memo.js'
+      - 'pod-provider/backend/moleculer.config.js'
+      - 'pod-provider/backend/scripts/apdm-phase11-runtime-validate.js'
+      - 'pod-provider/backend/scripts/apdm-phase11-summarize.js'
+      - 'pod-provider/backend/scripts/apdm-phase11-overhead-compare.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-real-measure.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-summarize.js'
+      - 'pod-provider/backend/scripts/apdm-phase8-warm-restart-ready.js'
+      - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-delivery.js'
+      - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-delivery-phase9.js'
+      - 'pod-provider/backend/tests/apdm-phase11-query-attribution.test.js'
+      - 'pod-provider/backend/tests/apdm-phase11-query-shape-ast.test.js'
+      - 'pod-provider/backend/tests/apdm-phase11-runtime-validate.test.js'
+      - 'pod-provider/backend/tests/apdm-phase11-summarize.test.js'
+      - 'pod-provider/backend/tests/apdm-phase11-overhead-compare.test.js'
+      - 'pod-provider/docker-compose-phase8.yml'
+      - 'pod-provider/docker/backend.dockerfile'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apdm-phase11-attribution-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  attribute-paired:
+    name: attribution OFF ON evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        working-directory: pod-provider
+    env:
+      APDM_P8_SAMPLES: "${{ github.event.inputs.samples || '3' }}"
+      APDM_P8_WARMUPS: "${{ github.event.inputs.warmups || '1' }}"
+      APDM_P8_PROVISION_CONCURRENCY: '4'
+      APDM_P9_CONCURRENCY: '4'
+      APDM_P10_DATASET_EXIST_MEMO_ENABLED: 'true'
+      APDM_P10_ARM: 'on'
+      APDM_P11_MAX_KEYS: '4096'
+      APDM_P11_MAX_CONTEXTS: '65536'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Prepare measurement directory
+        run: |
+          rm -rf measurements
+          mkdir -p measurements/control measurements/attributed
+
+      - name: Build benchmark backend image once
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml build backend; then
+              exit 0
+            fi
+            if [[ "${attempt}" -eq 3 ]]; then
+              echo 'Backend image build failed after 3 attempts' >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+
+      - name: Measure attribution control and enabled arms on one runner
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          reset_arm_storage() {
+            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v || true
+            sudo rm -rf data/fuseki_test data/redis_test
+            mkdir -p data/fuseki_test data/redis_test
+          }
+
+          record_provenance() {
+            local arm="$1"
+            local attribution="$2"
+            export APDM_P11_ARM="${arm}"
+            export APDM_P11_ENABLED="${attribution}"
+            export BACKEND_IMAGE_ID="$(docker image inspect apdm-phase8-backend:local --format '{{.Id}}')"
+            export FUSEKI_IMAGE_ID="$(docker inspect "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q fuseki_test)" --format '{{.Image}}')"
+            export REDIS_IMAGE_ID="$(docker inspect "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q redis)" --format '{{.Image}}')"
+            export MAILCATCHER_IMAGE_ID="$(docker inspect "$(docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml ps -q mailcatcher)" --format '{{.Image}}')"
+            node - <<'NODE' > "measurements/apdm-p11-environment-${APDM_P11_ARM}.json"
+          const os = require('os');
+          const cpus = os.cpus();
+          process.stdout.write(`${JSON.stringify({
+            phase: 'APDM-P11-A',
+            arm: process.env.APDM_P11_ARM,
+            armOrder: process.env.APDM_P11_ARM_ORDER,
+            attributionEnabled: process.env.APDM_P11_ENABLED === 'true',
+            phase10MemoEnabled: process.env.APDM_P10_DATASET_EXIST_MEMO_ENABLED === 'true',
+            commitSha: process.env.GITHUB_SHA,
+            workflowRunId: process.env.GITHUB_RUN_ID,
+            runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            concurrency: Number(process.env.APDM_P9_CONCURRENCY),
+            maxAttributionKeys: Number(process.env.APDM_P11_MAX_KEYS),
+            maxLineageContexts: Number(process.env.APDM_P11_MAX_CONTEXTS),
+            runnerOs: process.env.RUNNER_OS,
+            runnerArch: process.env.RUNNER_ARCH,
+            imageOs: process.env.ImageOS || 'unknown',
+            imageVersion: process.env.ImageVersion || 'unknown',
+            hostNode: process.version,
+            hostCpuModel: cpus[0] && cpus[0].model,
+            hostCpuCount: cpus.length,
+            hostTotalMemoryBytes: os.totalmem(),
+            backendImageId: process.env.BACKEND_IMAGE_ID,
+            fusekiImageId: process.env.FUSEKI_IMAGE_ID,
+            redisImageId: process.env.REDIS_IMAGE_ID,
+            mailcatcherImageId: process.env.MAILCATCHER_IMAGE_ID
+          }, null, 2)}\n`);
+          NODE
+          }
+
+          run_arm() {
+            local arm="$1"
+            local attribution="$2"
+            export APDM_P11_ARM="${arm}"
+            export APDM_P11_ENABLED="${attribution}"
+            export APDM_P8_RUN_ID="p11-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${arm}"
+            rm -f "measurements/apdm-p11-runtime-${arm}.jsonl"
+
+            reset_arm_storage
+            docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d fuseki_test redis mailcatcher
+            FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=60 ./scripts/fuseki-bootstrap.sh
+            record_provenance "${arm}" "${attribution}"
+
+            APDM_P8_ENABLED=false APDM_P8_COUNT=0 APDM_P11_ENABLED=false \
+              docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d --no-deps backend
+
+            local ready=false
+            for attempt in $(seq 1 120); do
+              if curl -sS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then ready=true; break; fi
+              sleep 1
+            done
+            [[ "${ready}" == true ]] || { echo "Backend not reachable for arm=${arm} provisioning" >&2; exit 1; }
+
+            APDM_P11_ENABLED=false docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+              node scripts/apdm-phase8-real-measure.js provision /app/backend/measurements/apdm-p8-actors.json 1000 \
+              2>&1 | tee "measurements/apdm-p11-provision-${arm}.log"
+
+            for count in 1 10 100 200 1000; do
+              export APDM_P8_ENABLED=true
+              export APDM_P8_COUNT="${count}"
+              rm -f "measurements/apdm-p11-${count}.jsonl"
+              docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml up -d --force-recreate --no-deps backend
+
+              ready=false
+              for attempt in $(seq 1 120); do
+                if curl -sS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then ready=true; break; fi
+                sleep 1
+              done
+              [[ "${ready}" == true ]] || { echo "Backend not reachable for arm=${arm} N=${count}" >&2; exit 1; }
+
+              docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+                node scripts/apdm-phase11-runtime-validate.js "${attribution}" "${count}" \
+                | tee -a "measurements/apdm-p11-runtime-${arm}.jsonl"
+              docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+                node scripts/apdm-phase8-warm-restart-ready.js
+              docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml exec -T backend \
+                node scripts/apdm-phase8-real-measure.js measure /app/backend/measurements/apdm-p8-actors.json "${count}"
+            done
+
+            cat measurements/apdm-p8-1.jsonl measurements/apdm-p8-10.jsonl measurements/apdm-p8-100.jsonl \
+                measurements/apdm-p8-200.jsonl measurements/apdm-p8-1000.jsonl > "measurements/apdm-p11-${arm}-all.jsonl"
+            node backend/scripts/apdm-phase8-summarize.js \
+              "measurements/apdm-p11-${arm}-all.jsonl" "measurements/apdm-p11-${arm}-summary.json"
+
+            cp "measurements/apdm-p11-provision-${arm}.log" "measurements/apdm-p11-runtime-${arm}.jsonl" "measurements/${arm}/"
+            cp measurements/apdm-p8-1.jsonl measurements/apdm-p8-10.jsonl measurements/apdm-p8-100.jsonl \
+               measurements/apdm-p8-200.jsonl measurements/apdm-p8-1000.jsonl "measurements/${arm}/"
+            cp "measurements/apdm-p11-${arm}-all.jsonl" "measurements/apdm-p11-${arm}-summary.json" \
+               "measurements/apdm-p11-environment-${arm}.json" "measurements/${arm}/"
+            if [[ "${attribution}" == true ]]; then
+              cp measurements/apdm-p11-1.jsonl measurements/apdm-p11-10.jsonl measurements/apdm-p11-100.jsonl \
+                 measurements/apdm-p11-200.jsonl measurements/apdm-p11-1000.jsonl "measurements/${arm}/"
+            fi
+            reset_arm_storage
+          }
+
+          if (( GITHUB_RUN_ATTEMPT % 2 == 1 )); then
+            export APDM_P11_ARM_ORDER='control-first'
+            run_arm control false
+            run_arm attributed true
+          else
+            export APDM_P11_ARM_ORDER='attributed-first'
+            run_arm attributed true
+            run_arm control false
+          fi
+
+      - name: Validate exact paired provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('fs');
+          const control = JSON.parse(fs.readFileSync('measurements/control/apdm-p11-environment-control.json'));
+          const attributed = JSON.parse(fs.readFileSync('measurements/attributed/apdm-p11-environment-attributed.json'));
+          const equalKeys = ['commitSha','armOrder','concurrency','maxAttributionKeys','maxLineageContexts','runnerOs','runnerArch','imageOs','imageVersion','hostNode','hostCpuModel','hostCpuCount','hostTotalMemoryBytes','backendImageId','fusekiImageId','redisImageId','mailcatcherImageId'];
+          const failures = equalKeys.filter(key => control[key] !== attributed[key]).map(key => `${key} differs`);
+          if (control.phase10MemoEnabled !== true || attributed.phase10MemoEnabled !== true) failures.push('Phase 10 memo must be true in both Phase 11 arms');
+          if (control.attributionEnabled !== false || attributed.attributionEnabled !== true) failures.push('attribution arm booleans are invalid');
+          if (control.concurrency !== 4) failures.push('local delivery concurrency must be 4');
+          if (control.maxAttributionKeys !== 4096) failures.push('Phase 11 attribution-key bound must be exactly 4096');
+          if (control.maxLineageContexts !== 65536) failures.push('Phase 11 lineage-context bound must be exactly 65536');
+          if (!['control-first','attributed-first'].includes(control.armOrder)) failures.push('arm order is missing or invalid');
+          const expectedOrder = Number(control.runAttempt) % 2 === 1 ? 'control-first' : 'attributed-first';
+          if (control.armOrder !== expectedOrder) failures.push(`arm order ${control.armOrder} does not match run attempt ${control.runAttempt}`);
+          const result = { phase: 'APDM-P11-A', passed: failures.length === 0, failures, control, attributed };
+          fs.writeFileSync('measurements/apdm-p11-environment-validation.json', `${JSON.stringify(result, null, 2)}\n`);
+          if (failures.length) throw new Error(failures.join('; '));
+          NODE
+
+      - name: Validate and summarize privacy-safe query attribution
+        run: |
+          node backend/scripts/apdm-phase11-summarize.js \
+            measurements/apdm-p11-query-summary.json \
+            measurements/attributed/apdm-p8-1.jsonl measurements/attributed/apdm-p11-1.jsonl \
+            measurements/attributed/apdm-p8-10.jsonl measurements/attributed/apdm-p11-10.jsonl \
+            measurements/attributed/apdm-p8-100.jsonl measurements/attributed/apdm-p11-100.jsonl \
+            measurements/attributed/apdm-p8-200.jsonl measurements/attributed/apdm-p11-200.jsonl \
+            measurements/attributed/apdm-p8-1000.jsonl measurements/attributed/apdm-p11-1000.jsonl
+
+      - name: Quantify attribution overhead for this arm order
+        run: |
+          node backend/scripts/apdm-phase11-overhead-compare.js \
+            measurements/control/apdm-p11-control-summary.json \
+            measurements/attributed/apdm-p11-attributed-summary.json \
+            measurements/apdm-p11-overhead.json measurements/apdm-p11-overhead.md
+          cat measurements/apdm-p11-overhead.md >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '> This attempt is only one arm order. Authoritative overhead acceptance requires a successful rerun of this exact workflow/SHA with the opposite run-attempt parity.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish top N=1000 attribution to job summary
+        run: |
+          node - <<'NODE' >> "$GITHUB_STEP_SUMMARY"
+          const fs = require('fs');
+          const summary = JSON.parse(fs.readFileSync('measurements/apdm-p11-query-summary.json'));
+          const environment = JSON.parse(fs.readFileSync('measurements/apdm-p11-environment-validation.json'));
+          const n1000 = summary.counts.find(value => value.recipientCount === 1000);
+          console.log(`\nArm order: **${environment.control.armOrder}** (attempt ${environment.control.runAttempt})\n`);
+          console.log('## N=1000 privacy-safe query attribution\n');
+          console.log(`Total triplestore.query median: **${n1000.totalQueryCallsMedian}**`);
+          console.log(`Unattributed median: **${n1000.unattributedQueryCallsMedian}**`);
+          console.log(`Retained lineage contexts median: **${n1000.lineageContextCountMedian}**\n`);
+          console.log('| caller | op | shape | median count | median duration ms |');
+          console.log('|---|---|---|---:|---:|');
+          for (const item of summary.n1000TopByDuration.slice(0, 15)) {
+            console.log(`| ${item.caller} | ${item.operation} | ${item.shapeHash.slice(0, 12)} | ${item.medianCountPerSample} | ${item.medianDurationMsPerSample.toFixed(2)} |`);
+          }
+          NODE
+
+      - name: Upload paired Phase 11 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apdm-p11-attribution-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            pod-provider/measurements/control/
+            pod-provider/measurements/attributed/
+            pod-provider/measurements/apdm-p11-environment-validation.json
+            pod-provider/measurements/apdm-p11-query-summary.json
+            pod-provider/measurements/apdm-p11-overhead.json
+            pod-provider/measurements/apdm-p11-overhead.md
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml logs --no-color --tail=400 backend fuseki_test redis || true
+
+      - name: Stop isolated stack
+        if: always()
+        run: |
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v || true
+          sudo rm -rf data/fuseki_test data/redis_test
