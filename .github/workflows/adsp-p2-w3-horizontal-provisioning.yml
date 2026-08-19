@@ -7,7 +7,7 @@ on:
     paths:
       - '.github/workflows/adsp-p2-w3-horizontal-provisioning.yml'
       - 'pod-provider/backend/package.json'
-      - 'pod-provider/backend/Dockerfile'
+      - 'pod-provider/docker/backend.dockerfile'
       - 'pod-provider/backend/services/activitypub-provisioning.js'
       - 'pod-provider/backend/scripts/adsp-p2-w3-horizontal-provisioning-proof.js'
       - 'pod-provider/backend/scripts/adsp-p2-w3-remote-origin-fixture.js'
