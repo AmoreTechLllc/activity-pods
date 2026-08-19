@@ -21,6 +21,8 @@ const DEFAULT_BASE_URL = 'http://localhost:3000';
 const DEFAULT_TRANSPORTER_URL = 'redis://127.0.0.1:6379/12';
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_EVIDENCE_TIMEOUT_MS = 120_000;
+const DEFAULT_ENDPOINT_STABILITY_MS = 2_000;
+const DEFAULT_ENDPOINT_POLL_MS = 100;
 const CORRELATION_SCHEMA = 'adsp.p2.w3.origin-correlation.v1';
 const ROOT_ACTION = 'activitypub.outbox.post';
 const W3_REPLICA_COUNTS = new Set([1, 2, 4]);
@@ -69,14 +71,46 @@ function endpointCount(broker, actionName = ROOT_ACTION) {
   return broker.registry.getActionEndpoints(actionName)?.count?.() ?? 0;
 }
 
-async function waitForExactRootEndpoints(broker, expectedReplicas, timeoutMs) {
+async function waitForExactRootEndpoints(
+  broker,
+  expectedReplicas,
+  timeoutMs,
+  {
+    stabilityMs = DEFAULT_ENDPOINT_STABILITY_MS,
+    pollMs = DEFAULT_ENDPOINT_POLL_MS,
+    now = () => Date.now(),
+    sleepFn = sleep
+  } = {}
+) {
   const expected = validateReplicaCount(expectedReplicas);
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (endpointCount(broker) === expected) return expected;
-    await sleep(100);
+  const timeout = positiveInteger(timeoutMs, undefined, 'endpoint readiness timeout');
+  const stability = positiveInteger(stabilityMs, DEFAULT_ENDPOINT_STABILITY_MS, 'endpoint stability window');
+  const poll = positiveInteger(pollMs, DEFAULT_ENDPOINT_POLL_MS, 'endpoint readiness poll interval');
+  if (typeof now !== 'function' || typeof sleepFn !== 'function') {
+    throw new Error('endpoint readiness clock and sleeper must be functions');
   }
-  throw new Error(`Expected exactly ${expected} ${ROOT_ACTION} endpoints, observed ${endpointCount(broker)}`);
+
+  const deadline = now() + timeout;
+  let stableSince = null;
+  let observed = endpointCount(broker);
+  while (now() < deadline) {
+    observed = endpointCount(broker);
+    if (observed === expected) {
+      const current = now();
+      if (stableSince === null) stableSince = current;
+      if (current - stableSince >= stability) return expected;
+    } else {
+      // Endpoint advertisement can precede completion of all service started()
+      // hooks. Reset the window on any topology wobble so a pod-cell that
+      // advertises briefly and then dies cannot satisfy W3 readiness.
+      stableSince = null;
+    }
+    await sleepFn(Math.min(poll, Math.max(1, deadline - now())));
+  }
+  observed = endpointCount(broker);
+  throw new Error(
+    `Expected exactly ${expected} ${ROOT_ACTION} endpoints stable for ${stability}ms, observed ${observed}`
+  );
 }
 
 function writeCorrelationEvidence(filePath, evidence) {
@@ -202,6 +236,7 @@ if (require.main === module) {
 
 module.exports = {
   CORRELATION_SCHEMA,
+  DEFAULT_ENDPOINT_STABILITY_MS,
   ROOT_ACTION,
   createW3RunnerBroker,
   endpointCount,
