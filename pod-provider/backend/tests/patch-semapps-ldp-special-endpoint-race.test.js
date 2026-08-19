@@ -47,12 +47,16 @@ describe('SemApps special-endpoint horizontal startup patch', () => {
     expect(isSpecialEndpointCandidate(PINNED_SOURCE)).toBe(true);
   });
 
-  test('turns only the create race into a revalidated idempotent success', () => {
+  test('suppresses only the exact already-exists create race after authoritative revalidation', () => {
     const result = patchSpecialEndpointSource(PINNED_SOURCE);
     expect(result.changed).toBe(true);
     expect(result.source).toContain(PATCH_MARKER);
     expect(result.source).toContain(PATCH_REVALIDATION_CONTRACT);
     expect(isPatchedSpecialEndpointCandidate(result.source)).toBe(true);
+    expect(result.source).toContain("error.code === 400");
+    expect(result.source).toContain("error.type === 'BAD_REQUEST'");
+    expect(result.source).toContain('error.message === `A resource already exist with URI ${this.endpointUrl}`');
+    expect(result.source).toContain('if (!adspP2IsCreateConflict) throw error;');
     expect(result.source).toContain("'ldp.resource.create'");
     expect(result.source.match(/'ldp\.resource\.exist'/gu)).toHaveLength(2);
     expect(result.source).toContain('Special endpoint already initialized by another replica');
@@ -83,6 +87,17 @@ describe('SemApps special-endpoint horizontal startup patch', () => {
   test('fails closed if the reviewed create call is no longer directly awaited', () => {
     const drifted = PINNED_SOURCE.replace("await this.broker.call(\n        'ldp.resource.create'", "this.broker.call(\n        'ldp.resource.create'");
     expect(() => patchSpecialEndpointSource(drifted)).toThrow(/no longer directly awaited as reviewed/u);
+  });
+
+  test('fails closed when an existing marker broadens conflict classification', () => {
+    const patched = patchSpecialEndpointSource(PINNED_SOURCE).source;
+    const broadContract = PATCH_REVALIDATION_CONTRACT.replace(
+      "error.type === 'BAD_REQUEST' &&\n          error.message === `A resource already exist with URI ${this.endpointUrl}`;",
+      "error.type === 'BAD_REQUEST';"
+    );
+    const drifted = patched.replace(PATCH_REVALIDATION_CONTRACT, broadContract);
+    expect(isPatchedSpecialEndpointCandidate(drifted)).toBe(false);
+    expect(() => patchSpecialEndpointSource(drifted)).toThrow(/marker no longer matches the reviewed repair contract/u);
   });
 
   test('fails closed when an existing marker remains but exact post-race dataset revalidation drifts', () => {
