@@ -32,6 +32,7 @@ async function runHorizontalProvisioningProof({
   readyTimeoutMs = positiveInteger(process.env.ADSP_P2_W3_READY_TIMEOUT_MS, DEFAULT_READY_TIMEOUT_MS, 'ready timeout'),
   runId = process.env.ADSP_P2_W3_RUN_ID || `${Date.now()}`,
   brokerFactory = createW3RunnerBroker,
+  waitForEndpointsFn = waitForExactRootEndpoints,
   signupFn = signupWithCandidateRetries,
   bootstrapFn = awaitActorBootstrap
 } = {}) {
@@ -43,7 +44,7 @@ async function runHorizontalProvisioningProof({
   await broker.start();
   try {
     await broker.waitForServices(['auth', 'activitypub.outbox', 'activitypub.actor'], readyTimeoutMs);
-    const observedReplicas = await waitForExactRootEndpoints(broker, normalizedExpectedReplicas, readyTimeoutMs);
+    const observedReplicas = await waitForEndpointsFn(broker, normalizedExpectedReplicas, readyTimeoutMs);
     const password = process.env.ADSP_P2_W3_SIGNUP_PASSWORD || `${crypto.randomBytes(24).toString('base64url')}A1!`;
     const actor = await signupFn({
       baseUrl,
