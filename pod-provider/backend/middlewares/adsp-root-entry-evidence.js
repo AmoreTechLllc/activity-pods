@@ -46,13 +46,16 @@ function AdspRootEntryEvidenceMiddleware(options = {}) {
 
   function record(phase, requestId, extra = {}) {
     const now = Date.now();
+    const observedAt = new Date(now).toISOString();
     appendJsonLine(outputPath, {
       version: 1,
       phase,
       action: actionName,
       requestId,
       nodeID,
-      observedAt: new Date(now).toISOString(),
+      enteredAt: observedAt,
+      enteredAtEpochMs: now,
+      observedAt,
       observedAtEpochMs: now,
       ...extra
     });
