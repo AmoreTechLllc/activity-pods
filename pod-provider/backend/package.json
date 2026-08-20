@@ -12,7 +12,7 @@
   "scripts": {
     "dev": "node scripts/run-moleculer-fabric.js --repl --hot",
     "start": "node scripts/run-moleculer-fabric.js",
-    "postinstall": "node scripts/patch-semapps-activitypub-local-delivery.js && node scripts/patch-semapps-activitypub-local-delivery-phase9.js && node scripts/patch-semapps-ldp-local-registry-bootstrap.js && node scripts/patch-semapps-ldp-special-endpoint-race.js",
+    "postinstall": "node scripts/patch-semapps-activitypub-local-delivery.js && node scripts/patch-semapps-activitypub-local-delivery-phase9.js && node scripts/patch-semapps-ldp-local-registry-bootstrap.js && node scripts/patch-semapps-ldp-special-endpoint-race.js && node scripts/patch-semapps-jsonld-distributed-context-cache.js",
     "test": "NODE_ENV=test node scripts/run-moleculer-fabric.js --repl --hot",
     "test:unit": "cd ../.. && node tests/node_modules/.bin/jest --testEnvironment=node --roots=pod-provider/backend/tests",
     "test:atproto:multibase": "node scripts/atproto-multibase-smoke.js",
@@ -90,7 +90,7 @@
     "ts-mls": "^1.6.2",
     "ulid": "^3.0.2",
     "unicode-confusables": "^0.1.1",
-    "url-join": "^4.0.1",
+    "url-join": "^4.7.7",
     "ws": "^8.17.0"
   },
   "engines": {
