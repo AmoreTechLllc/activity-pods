@@ -13,12 +13,36 @@ const {
   findRootEntries,
   readBarrierTimestamp,
   requestPayload,
-  waitForExactVictimRootEntry
+  semanticReadinessSummary,
+  waitForExactVictimRootEntry,
+  waitForNodeSemanticReadiness
 } = require('../scripts/adsp-p2-node-loss-load');
 
 function writeJsonLine(filePath, record) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, 'utf8');
+}
+
+function healthySemanticProbe(nodeID = 'adsp-p2-pod-cell-4') {
+  return {
+    nodeID,
+    observedAt: new Date().toISOString(),
+    ontologies: { ok: true, count: 21, hasActivityStreamsOntology: true },
+    context: { ok: true, includesActivityStreamsContextUri: true },
+    localContext: { ok: true },
+    activityStreamsCache: {
+      ok: true,
+      present: true,
+      requiredTypeCount: 58,
+      containsAllRequiredTypes: true
+    },
+    expandActivityStreamsTypes: {
+      ok: true,
+      expandsAllRequiredTypes: true,
+      expandsToActivityStreamsNote: true,
+      expandsToActivityStreamsArticle: true
+    }
+  };
 }
 
 describe('ADSP P2 node-loss load driver', () => {
@@ -48,6 +72,52 @@ describe('ADSP P2 node-loss load driver', () => {
     expect(() => faultBurstNodeAssignments(3, 'adsp-p2-pod-cell-4')).toThrow(/at least 4 requests/u);
     expect(() => faultBurstNodeAssignments(8, 'unknown-node')).toThrow(/not one of the configured Pod cells/u);
     expect(() => faultBurstNodeAssignments(8, 'r4', ['r1', 'r2', 'r2', 'r4'])).toThrow(/exactly four unique/u);
+  });
+
+  test('waits through transient semantic startup and proves the exact victim is ready', async () => {
+    const probes = [
+      {
+        ...healthySemanticProbe(),
+        activityStreamsCache: { ok: true, present: true, requiredTypeCount: 58, containsAllRequiredTypes: false }
+      },
+      healthySemanticProbe()
+    ];
+    const probeFn = jest.fn(async () => probes.shift());
+    const result = await waitForNodeSemanticReadiness({}, 'adsp-p2-pod-cell-4', 100, {
+      pollMs: 1,
+      attemptTimeoutMs: 10,
+      probeFn
+    });
+    expect(result.ready).toBe(true);
+    expect(result.probe.nodeID).toBe('adsp-p2-pod-cell-4');
+    expect(probeFn).toHaveBeenCalledTimes(2);
+    expect(semanticReadinessSummary(result.probe)).toMatchObject({
+      nodeID: 'adsp-p2-pod-cell-4',
+      ontologyCount: 21,
+      hasActivityStreamsOntology: true,
+      cachedContextContainsAllRequiredTypes: true,
+      requiredTypeCount: 58,
+      expandsAllRequiredTypes: true,
+      expandsNote: true,
+      expandsArticle: true
+    });
+  });
+
+  test('fails closed when restarted victim semantic readiness never converges', async () => {
+    const unhealthy = {
+      ...healthySemanticProbe(),
+      expandActivityStreamsTypes: {
+        ok: false,
+        error: { message: 'Could not expand all types (Note)' }
+      }
+    };
+    await expect(
+      waitForNodeSemanticReadiness({}, 'adsp-p2-pod-cell-4', 15, {
+        pollMs: 1,
+        attemptTimeoutMs: 2,
+        probeFn: async () => unhealthy
+      })
+    ).rejects.toThrow(/Timed out waiting for semantic readiness on adsp-p2-pod-cell-4/u);
   });
 
   test('rejects duplicate authoritative identities', () => {
