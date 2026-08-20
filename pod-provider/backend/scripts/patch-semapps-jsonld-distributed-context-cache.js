@@ -17,7 +17,11 @@ const ACTION_CONTRACTS = [
   },
   {
     name: 'jsonld.context.getLocal',
-    signatures: ["ctx.call('ontologies.list')", 'preserveContextUri']
+    signatures: [
+      "ctx.call('ontologies.list')",
+      'Object.fromEntries',
+      "ctx.call('jsonld.context.parse'"
+    ]
   }
 ];
 
