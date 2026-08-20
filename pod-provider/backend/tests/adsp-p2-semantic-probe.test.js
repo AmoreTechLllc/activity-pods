@@ -2,11 +2,16 @@
 
 const {
   ACTIVITYSTREAMS_CONTEXT_URI,
+  ACTIVITYSTREAMS_NAMESPACE,
+  ACTIVITYSTREAMS_REQUIRED_TYPES,
   containsActivityStreamsUri,
+  containsActivityStreamsTerm,
   containsNoteTerm,
+  expectedExpandedTypes,
   summarizeOntologies,
   summarizeContext,
   summarizeCachedDocument,
+  summarizeExpandedTypes,
   semanticProbePasses
 } = require('../scripts/adsp-p2-semantic-probe');
 
@@ -17,9 +22,40 @@ describe('ADSP P2 semantic readiness probe', () => {
     expect(containsActivityStreamsUri({ '@context': ['https://example.test/context'] })).toBe(false);
   });
 
-  test('detects a Note term in an ActivityStreams context document', () => {
-    expect(containsNoteTerm({ '@context': { Note: 'as:Note' } })).toBe(true);
-    expect(containsNoteTerm({ '@context': { Create: 'as:Create' } })).toBe(false);
+  test('detects ActivityStreams terms generically, including Note and Article', () => {
+    const document = { '@context': { Note: 'as:Note', Article: 'as:Article' } };
+    expect(containsActivityStreamsTerm(document, 'Note')).toBe(true);
+    expect(containsActivityStreamsTerm(document, 'Article')).toBe(true);
+    expect(containsNoteTerm(document)).toBe(true);
+    expect(containsActivityStreamsTerm(document, 'Video')).toBe(false);
+  });
+
+  test('required semantic vocabulary includes content, actor, collection, and activity classes', () => {
+    expect(ACTIVITYSTREAMS_REQUIRED_TYPES).toEqual(expect.arrayContaining([
+      'Article',
+      'Audio',
+      'Document',
+      'Event',
+      'Image',
+      'Note',
+      'Page',
+      'Video',
+      'Person',
+      'Service',
+      'Collection',
+      'OrderedCollection',
+      'Create',
+      'Update',
+      'Delete',
+      'Announce',
+      'Like',
+      'Follow',
+      'Block',
+      'Flag',
+      'Move',
+      'Undo'
+    ]));
+    expect(expectedExpandedTypes()).toContain(`${ACTIVITYSTREAMS_NAMESPACE}Article`);
   });
 
   test('summarizes ontology state without dumping unrelated ontology bodies', () => {
@@ -27,7 +63,7 @@ describe('ADSP P2 semantic readiness probe', () => {
       { prefix: 'foaf', namespace: 'http://xmlns.com/foaf/0.1/' },
       {
         prefix: 'as',
-        namespace: 'https://www.w3.org/ns/activitystreams#',
+        namespace: ACTIVITYSTREAMS_NAMESPACE,
         jsonldContext: ACTIVITYSTREAMS_CONTEXT_URI,
         preserveContextUri: true,
         huge: { ignored: true }
@@ -37,38 +73,76 @@ describe('ADSP P2 semantic readiness probe', () => {
     expect(summary.hasActivityStreamsOntology).toBe(true);
     expect(summary.activityStreamsOntology).toEqual({
       prefix: 'as',
-      namespace: 'https://www.w3.org/ns/activitystreams#',
+      namespace: ACTIVITYSTREAMS_NAMESPACE,
       jsonldContext: ACTIVITYSTREAMS_CONTEXT_URI,
       preserveContextUri: true
     });
     expect(summary.activityStreamsOntology.huge).toBeUndefined();
   });
 
-  test('summarizes computed and cached context state', () => {
+  test('summarizes computed context state', () => {
     expect(summarizeContext([ACTIVITYSTREAMS_CONTEXT_URI])).toEqual({
       present: true,
       includesActivityStreamsContextUri: true,
       topLevelKind: 'array',
       topLevelLength: 1
     });
-    expect(summarizeCachedDocument({ '@context': { Note: 'as:Note' } })).toEqual({
-      present: true,
-      topLevelKind: 'object',
-      topLevelKeys: ['@context'],
-      hasContextKey: true,
-      containsNoteTerm: true
-    });
   });
 
-  test('passes only when every semantic layer required for Note expansion is present', () => {
+  test('cached ActivityStreams context must contain every required type', () => {
+    const completeContext = Object.fromEntries(ACTIVITYSTREAMS_REQUIRED_TYPES.map(type => [type, `as:${type}`]));
+    const healthy = summarizeCachedDocument({ '@context': completeContext });
+    expect(healthy.containsAllRequiredTypes).toBe(true);
+    expect(healthy.missingRequiredTypes).toEqual([]);
+    expect(healthy.containsNoteTerm).toBe(true);
+    expect(healthy.containsArticleTerm).toBe(true);
+
+    delete completeContext.Article;
+    const missingArticle = summarizeCachedDocument({ '@context': completeContext });
+    expect(missingArticle.containsAllRequiredTypes).toBe(false);
+    expect(missingArticle.missingRequiredTypes).toContain('Article');
+  });
+
+  test('expanded ActivityStreams types must exactly preserve every required class', () => {
+    const expanded = summarizeExpandedTypes(expectedExpandedTypes());
+    expect(expanded.expandsAllRequiredTypes).toBe(true);
+    expect(expanded.expandsToActivityStreamsNote).toBe(true);
+    expect(expanded.expandsToActivityStreamsArticle).toBe(true);
+
+    const wrong = expectedExpandedTypes();
+    wrong[ACTIVITYSTREAMS_REQUIRED_TYPES.indexOf('Article')] = 'https://example.test/Article';
+    const broken = summarizeExpandedTypes(wrong);
+    expect(broken.expandsAllRequiredTypes).toBe(false);
+    expect(broken.mismatches).toContain('Article');
+  });
+
+  test('passes only when every semantic layer and required ActivityStreams type is present', () => {
     const healthy = {
       ontologies: { ok: true, hasActivityStreamsOntology: true },
       context: { ok: true, includesActivityStreamsContextUri: true },
-      activityStreamsCache: { ok: true, present: true, containsNoteTerm: true },
-      expandNote: { ok: true, expandsToActivityStreamsNote: true }
+      localContext: { ok: true, includesActivityStreamsContextUri: false },
+      activityStreamsCache: {
+        ok: true,
+        present: true,
+        containsAllRequiredTypes: true,
+        containsNoteTerm: true,
+        containsArticleTerm: true
+      },
+      expandActivityStreamsTypes: {
+        ok: true,
+        expandsAllRequiredTypes: true,
+        expandsToActivityStreamsNote: true,
+        expandsToActivityStreamsArticle: true
+      }
     };
     expect(semanticProbePasses(healthy)).toBe(true);
-    expect(semanticProbePasses({ ...healthy, expandNote: { ok: false } })).toBe(false);
-    expect(semanticProbePasses({ ...healthy, activityStreamsCache: { ok: true, present: false, containsNoteTerm: false } })).toBe(false);
+    expect(semanticProbePasses({
+      ...healthy,
+      expandActivityStreamsTypes: { ...healthy.expandActivityStreamsTypes, expandsToActivityStreamsArticle: false }
+    })).toBe(false);
+    expect(semanticProbePasses({
+      ...healthy,
+      activityStreamsCache: { ...healthy.activityStreamsCache, containsAllRequiredTypes: false }
+    })).toBe(false);
   });
 });
