@@ -84,7 +84,7 @@ jobs:
           assert.equal(typeof load.waitForExactVictimRootEntry, 'function');
           assert.equal(typeof load.assertTargetedVictimRejected, 'function');
           assert.equal(typeof persistence.auditPersistence, 'function');
-          assert.equal(typeof redis.auditRedisCommandHealth, 'function');
+          assert.equal(typeof redis.auditRedisCommandstats, 'function');
           process.stdout.write('ADSP P2 production-image node-loss modules: OK\n');
           NODE
 
