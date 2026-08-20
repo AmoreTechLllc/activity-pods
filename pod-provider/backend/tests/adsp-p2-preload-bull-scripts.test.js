@@ -8,9 +8,12 @@ const {
   readBullScripts,
   resolveBullCommandsDir
 } = require('../scripts/adsp-p2-preload-bull-scripts');
+const preloadService = require('../services/adsp-p2-redis-script-preload.service');
 
 describe('ADSP P2 Bull Redis script preload', () => {
   let tempDir;
+  const originalEnabled = process.env.SEMAPPS_ADSP_PRELOAD_BULL_REDIS_SCRIPTS;
+  const originalQueueUrl = process.env.SEMAPPS_QUEUE_SERVICE_URL;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-p2-bull-scripts-'));
@@ -18,6 +21,10 @@ describe('ADSP P2 Bull Redis script preload', () => {
 
   afterEach(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
+    if (originalEnabled === undefined) delete process.env.SEMAPPS_ADSP_PRELOAD_BULL_REDIS_SCRIPTS;
+    else process.env.SEMAPPS_ADSP_PRELOAD_BULL_REDIS_SCRIPTS = originalEnabled;
+    if (originalQueueUrl === undefined) delete process.env.SEMAPPS_QUEUE_SERVICE_URL;
+    else process.env.SEMAPPS_QUEUE_SERVICE_URL = originalQueueUrl;
   });
 
   test('resolves the installed Bull command directory from package metadata', () => {
@@ -121,5 +128,19 @@ describe('ADSP P2 Bull Redis script preload', () => {
 
   test('requires an explicit Redis URL', async () => {
     await expect(preloadBullScripts({ redisUrl: '', commandsDir: tempDir })).rejects.toThrow(/requires a Redis URL/u);
+  });
+
+  test('lifecycle preload service is inert unless explicitly enabled', async () => {
+    delete process.env.SEMAPPS_ADSP_PRELOAD_BULL_REDIS_SCRIPTS;
+    expect(preloadService.name).toBe('adspP2RedisScriptPreload');
+    await expect(preloadService.started.call({ logger: { info: jest.fn() } })).resolves.toBeUndefined();
+  });
+
+  test('lifecycle preload service fails closed when enabled without queue Redis URL', async () => {
+    process.env.SEMAPPS_ADSP_PRELOAD_BULL_REDIS_SCRIPTS = 'true';
+    delete process.env.SEMAPPS_QUEUE_SERVICE_URL;
+    await expect(preloadService.started.call({ logger: { info: jest.fn() } })).rejects.toThrow(
+      /requires SEMAPPS_QUEUE_SERVICE_URL/u
+    );
   });
 });
