@@ -19,11 +19,13 @@ const SkipOrphanBlankNodesCleanupMiddleware = require('./middlewares/skip-orphan
 const ApdmLocalDeliveryDatasetExistMemoMiddleware = require('./middlewares/apdm-local-delivery-dataset-exist-memo');
 const AdspActionLocalityMiddleware = require('./middlewares/adsp-action-locality');
 const AdspRootEntryEvidenceMiddleware = require('./middlewares/adsp-root-entry-evidence');
+const AdspLocalOntologyRegistrationMiddleware = require('./middlewares/adsp-local-ontology-registration');
 const { createPhase8Tier1Instrumentation } = require('./lib/apdm-phase8-tier1-instrumentation');
 const CONFIG = require('./config/config');
 const errorHandler = require('./config/errorHandler');
 const {
   GROUP_POD_CELL,
+  MODE_DISTRIBUTED,
   createMoleculerFabricConfig
 } = require('./config/moleculer-fabric');
 
@@ -52,12 +54,24 @@ function createPodCellMiddlewares() {
     sparqlEndpoint: CONFIG.SPARQL_ENDPOINT
   });
 
-  // Keep the production Pod/SemApps cell middleware order exactly as before.
-  // Non-production P1 groups intentionally do not attach these middlewares:
-  // several of them have startup dependencies on LDP/WebACL/etc. that belong
-  // to the colocated Pod cell and must not force every independent broker to
-  // load the full production service graph.
-  const middlewares = [
+  // In a replicated Pod cell, SemApps' ontology registry is broker-local
+  // in-memory state. Service dependencies can be satisfied by sibling nodes
+  // before this broker's own ontology baseline has finished starting, so an
+  // early broker.call('ontologies.register', ...) can otherwise mutate a
+  // sibling and leave this cell semantically incomplete. Intercept only that
+  // mutation and hold it until the local baseline is initialized.
+  const localOntologyRegistration = AdspLocalOntologyRegistrationMiddleware({
+    enabled: fabric.mode === MODE_DISTRIBUTED
+  });
+
+  // Keep the production Pod/SemApps cell middleware order exactly as before,
+  // except for the distributed ontology-registration guard above. Non-production
+  // P1 groups intentionally do not attach these middlewares: several of them
+  // have startup dependencies on LDP/WebACL/etc. that belong to the colocated
+  // Pod cell and must not force every independent broker to load the full graph.
+  const middlewares = [];
+  if (localOntologyRegistration) middlewares.push(localOntologyRegistration);
+  middlewares.push(
     CacherMiddleware(cacherConfig),
     WebAclMiddleware({ baseUrl: CONFIG.BASE_URL, podProvider: true }),
     SkipOrphanBlankNodesCleanupMiddleware({ enabled: CONFIG.SKIP_ORPHAN_BLANK_NODE_CLEANUP }),
@@ -78,7 +92,7 @@ function createPodCellMiddlewares() {
     SearchConsentMiddleware(),
     TrustEvaluatorMiddleware(),
     AppControlMiddleware({ baseUrl: CONFIG.BASE_URL })
-  ];
+  );
 
   if (phase8Instrumentation.middleware) middlewares.push(phase8Instrumentation.middleware);
   return middlewares;
