@@ -57,6 +57,9 @@ function collectOutcomeExpectations(result) {
   if (targeted.length !== 1) {
     throw new Error(`Expected exactly one targeted ambiguous request outcome, observed ${targeted.length}`);
   }
+  if (targeted[0].callerOutcome !== 'rejected') {
+    throw new Error(`Targeted ambiguous request ${targetedAmbiguousRequestId} must be caller-rejected, observed ${targeted[0].callerOutcome}`);
+  }
   return expectations;
 }
 
