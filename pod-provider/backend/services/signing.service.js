@@ -20,6 +20,9 @@ const {
 // ============================================================================
 
 const RSA_KEY_TYPE = 'https://www.w3.org/ns/auth/rsa#RSAKey';
+const UNSAFE_URL_OR_HEADER_CHAR_RE = /[\u0000-\u0020\u007f"\\]/;
+const UNSAFE_REQUEST_TARGET_CHAR_RE = /[\u0000-\u001f\u007f]/;
+const CANONICAL_BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function toHttpDate(d = new Date()) {
   return d.toUTCString();
@@ -30,19 +33,20 @@ function assertHost(host) {
   if (host.includes('://')) return false;
   if (host.includes('/')) return false;
   if (/\s/.test(host)) return false;
+  if (UNSAFE_URL_OR_HEADER_CHAR_RE.test(host)) return false;
   return true;
 }
 
 function assertPath(path) {
-  return typeof path === 'string' && path.startsWith('/');
+  return typeof path === 'string' && path.startsWith('/') && !UNSAFE_REQUEST_TARGET_CHAR_RE.test(path);
+}
+
+function assertQuery(query) {
+  return typeof query === 'string' && !UNSAFE_REQUEST_TARGET_CHAR_RE.test(query);
 }
 
 function sha256Base64(buf) {
   return crypto.createHash('sha256').update(buf).digest('base64');
-}
-
-function digestHeaderFromBytes(buf) {
-  return `SHA-256=${sha256Base64(buf)}`;
 }
 
 function normalizeMethod(m) {
@@ -66,7 +70,7 @@ function getResourceId(resource) {
 }
 
 function isSafeHttpUrl(value) {
-  if (!value || typeof value !== 'string') return false;
+  if (!value || typeof value !== 'string' || UNSAFE_URL_OR_HEADER_CHAR_RE.test(value)) return false;
   try {
     const parsed = new URL(value);
     return (
@@ -239,18 +243,21 @@ module.exports = {
     },
     profiles: {
       ap_get_v1: {
+        method: 'GET',
         algorithm: 'rsa-sha256',
         signedHeaders: ['(request-target)', 'host', 'date'],
         requireDigest: false,
         signContentType: false
       },
       ap_post_v1: {
+        method: 'POST',
         algorithm: 'rsa-sha256',
         signedHeaders: ['(request-target)', 'host', 'date', 'digest'],
         requireDigest: true,
         signContentType: false
       },
       ap_post_v1_ct: {
+        method: 'POST',
         algorithm: 'rsa-sha256',
         signedHeaders: ['(request-target)', 'host', 'date', 'digest', 'content-type'],
         requireDigest: true,
@@ -353,7 +360,6 @@ module.exports = {
         }
 
         const accountAuthority = await this._resolveAtprotoAccountAuthority(ctx, canonicalAccountId);
-        const account = accountAuthority.account;
 
         const slug = accountUrl.pathname.split('/').filter(Boolean).pop() || 'account';
         const did = ctx.params.did || `did:plc:${slug}`;
@@ -368,6 +374,8 @@ module.exports = {
           webId,
           atprotoDid: did,
           atprotoHandle: handle,
+          atprotoSource: 'local',
+          atprotoManaged: true,
           atSigningKeyRef: commitKey.keyRef,
           atRotationKeyRef: rotationKey.keyRef,
           status: 'active'
@@ -388,7 +396,7 @@ module.exports = {
 
       async handler(ctx) {
         this._auth(ctx);
-        const { canonicalAccountId, did, unsignedCommitBytesBase64, rev } = ctx.params;
+        const { canonicalAccountId, did, unsignedCommitBytesBase64 } = ctx.params;
 
         let binding;
         try {
@@ -396,11 +404,18 @@ module.exports = {
         } catch (e) {
           throw new MoleculerError('IdentityBinding lookup failed', 500, 'KEY_UNAVAILABLE', { message: e?.message });
         }
-        if (!binding) throw new MoleculerError('IdentityBinding not found', 404, 'ACTOR_NOT_FOUND', { canonicalAccountId });
+        this._assertActiveManagedAtprotoBinding(binding, canonicalAccountId);
         if (!binding.atSigningKeyRef) {
           throw new MoleculerError('atSigningKeyRef not set — AT keys not yet provisioned', 422, 'KEY_UNAVAILABLE', { canonicalAccountId });
         }
+        if (!binding.atprotoDid || did !== binding.atprotoDid) {
+          throw new MoleculerError('Caller DID does not match bound DID', 400, 'INVALID_INPUT', {
+            supplied: did,
+            bound: binding.atprotoDid || null
+          });
+        }
 
+        const commitBytes = this._decodeCanonicalBase64(unsignedCommitBytesBase64, 'unsignedCommitBytesBase64');
         const accountAuthority = await this._resolveAtprotoAccountAuthority(ctx, canonicalAccountId);
         let keyPair;
         try {
@@ -417,15 +432,10 @@ module.exports = {
           throw new MoleculerError('AT private key not available', 500, 'KEY_UNAVAILABLE', { keyRef: binding.atSigningKeyRef });
         }
 
-        if (binding.atprotoDid && did !== binding.atprotoDid) {
-          throw new MoleculerError('Caller DID does not match bound DID', 400, 'INVALID_INPUT', { supplied: did, bound: binding.atprotoDid });
-        }
-
-        const resolvedDid = binding.atprotoDid || did;
+        const resolvedDid = binding.atprotoDid;
         const keyId = `${resolvedDid}#atproto`;
         let signatureBase64Url;
         try {
-          const commitBytes = Buffer.from(unsignedCommitBytesBase64, 'base64');
           signatureBase64Url = signSecp256k1(privateKeyPem, commitBytes);
         } catch (e) {
           throw new MoleculerError('Commit signing failed', 500, 'SIGNING_FAILED', { message: e?.message });
@@ -453,20 +463,21 @@ module.exports = {
         } catch (e) {
           throw new MoleculerError('IdentityBinding lookup failed', 500, 'KEY_UNAVAILABLE', { message: e?.message });
         }
-        if (!binding) throw new MoleculerError('IdentityBinding not found', 404, 'ACTOR_NOT_FOUND', { canonicalAccountId });
+        this._assertActiveManagedAtprotoBinding(binding, canonicalAccountId);
         if (!binding.atRotationKeyRef) {
           throw new MoleculerError('atRotationKeyRef not set — rotation key not yet provisioned', 422, 'KEY_UNAVAILABLE', { canonicalAccountId });
         }
-
-        if (binding.atprotoDid && did !== binding.atprotoDid) {
-          throw new MoleculerError('Caller DID does not match bound DID', 400, 'INVALID_INPUT', { supplied: did, bound: binding.atprotoDid });
+        if (!binding.atprotoDid || did !== binding.atprotoDid) {
+          throw new MoleculerError('Caller DID does not match bound DID', 400, 'INVALID_INPUT', {
+            supplied: did,
+            bound: binding.atprotoDid || null
+          });
+        }
+        if (!String(binding.atprotoDid).startsWith('did:plc:')) {
+          throw new MoleculerError('PLC signing is only allowed for did:plc', 400, 'INVALID_INPUT', { did: binding.atprotoDid });
         }
 
-        const resolvedDid = binding.atprotoDid || did;
-        if (!String(resolvedDid).startsWith('did:plc:')) {
-          throw new MoleculerError('PLC signing is only allowed for did:plc', 400, 'INVALID_INPUT', { did: resolvedDid });
-        }
-
+        const opBytes = this._decodeCanonicalBase64(operationBytesBase64, 'operationBytesBase64');
         const accountAuthority = await this._resolveAtprotoAccountAuthority(ctx, canonicalAccountId);
         let keyPair;
         try {
@@ -483,16 +494,21 @@ module.exports = {
           throw new MoleculerError('AT rotation private key not available', 500, 'KEY_UNAVAILABLE', { keyRef: binding.atRotationKeyRef });
         }
 
-        const keyId = `${resolvedDid}#atproto-rotation-key`;
+        const keyId = `${binding.atprotoDid}#atproto-rotation-key`;
         let signatureBase64Url;
         try {
-          const opBytes = Buffer.from(operationBytesBase64, 'base64');
           signatureBase64Url = signSecp256k1(privateKeyPem, opBytes);
         } catch (e) {
           throw new MoleculerError('PLC op signing failed', 500, 'SIGNING_FAILED', { message: e?.message });
         }
 
-        return { did: resolvedDid, keyId, signatureBase64Url, algorithm: 'k256', signedAt: new Date().toISOString() };
+        return {
+          did: binding.atprotoDid,
+          keyId,
+          signatureBase64Url,
+          algorithm: 'k256',
+          signedAt: new Date().toISOString()
+        };
       }
     },
 
@@ -513,7 +529,7 @@ module.exports = {
         } catch (e) {
           throw new MoleculerError('IdentityBinding lookup failed', 500, 'KEY_UNAVAILABLE', { message: e?.message });
         }
-        if (!binding) throw new MoleculerError('IdentityBinding not found', 404, 'ACTOR_NOT_FOUND', { canonicalAccountId });
+        this._assertActiveManagedAtprotoBinding(binding, canonicalAccountId);
 
         const keyRef = purpose === 'commit' ? binding.atSigningKeyRef : binding.atRotationKeyRef;
         if (!keyRef) {
@@ -551,11 +567,10 @@ module.exports = {
           }
         }
 
-        const resolvedDid = binding.atprotoDid || null;
         const keyFragment = purpose === 'commit' ? 'atproto' : 'atproto-rotation-key';
-        const keyId = resolvedDid ? `${resolvedDid}#${keyFragment}` : `#${keyFragment}`;
+        const keyId = `${binding.atprotoDid}#${keyFragment}`;
 
-        return { ...(resolvedDid ? { did: resolvedDid } : {}), keyId, publicKeyMultibase, algorithm: 'k256' };
+        return { did: binding.atprotoDid, keyId, publicKeyMultibase, algorithm: 'k256' };
       }
     },
 
@@ -604,6 +619,57 @@ module.exports = {
 
     _err(r, code, message, retryable) {
       return { requestId: r?.requestId, ok: false, error: { code, message, retryable } };
+    },
+
+    _assertActiveManagedAtprotoBinding(binding, canonicalAccountId) {
+      if (!binding) {
+        throw new MoleculerError('IdentityBinding not found', 404, 'ACTOR_NOT_FOUND', { canonicalAccountId });
+      }
+      if (binding.canonicalAccountId !== canonicalAccountId || binding.webId !== canonicalAccountId) {
+        throw new MoleculerError(
+          'IdentityBinding does not match the requested local account',
+          403,
+          'IDENTITY_BINDING_AUTHORITY_MISMATCH',
+          { canonicalAccountId }
+        );
+      }
+      if (binding.status !== 'active') {
+        throw new MoleculerError(
+          'IdentityBinding is not active',
+          403,
+          'IDENTITY_BINDING_INACTIVE',
+          { canonicalAccountId, status: binding.status || null }
+        );
+      }
+      if (binding.atprotoSource !== 'local' || binding.atprotoManaged !== true) {
+        throw new MoleculerError(
+          'IdentityBinding is not locally managed by ActivityPods',
+          403,
+          'IDENTITY_BINDING_NOT_MANAGED',
+          { canonicalAccountId }
+        );
+      }
+      if (!binding.atprotoDid || typeof binding.atprotoDid !== 'string') {
+        throw new MoleculerError('IdentityBinding does not have a bound ATProto DID', 422, 'KEY_UNAVAILABLE', {
+          canonicalAccountId
+        });
+      }
+    },
+
+    _decodeCanonicalBase64(value, fieldName) {
+      if (
+        typeof value !== 'string' ||
+        value.length === 0 ||
+        value.length % 4 !== 0 ||
+        !CANONICAL_BASE64_RE.test(value)
+      ) {
+        throw new MoleculerError(`${fieldName} must be canonical base64`, 400, 'INVALID_INPUT');
+      }
+      const decoded = Buffer.from(value, 'base64');
+      if (decoded.length === 0 || decoded.toString('base64') !== value) {
+        throw new MoleculerError(`${fieldName} must be canonical base64`, 400, 'INVALID_INPUT');
+      }
+      return decoded;
     },
 
     async _resolveAtprotoAccountAuthority(ctx, canonicalAccountId) {
@@ -717,10 +783,10 @@ module.exports = {
 
     _parseBodyBytes(r) {
       const body = r?.body;
-      if (!body) return null;
+      if (!body || body.encoding !== 'utf8') return null;
       const bytesStr = body?.bytes;
       if (typeof bytesStr !== 'string') return null;
-      return Buffer.from(bytesStr, body?.encoding === 'utf8' ? 'utf8' : 'utf8');
+      return Buffer.from(bytesStr, 'utf8');
     },
 
     _validateDateSkew(dateStr) {
@@ -740,8 +806,12 @@ module.exports = {
         const query = r?.target?.query || '';
         if (!assertHost(host)) return this._err(r, 'INVALID_INPUT', 'target.host invalid', false);
         if (!assertPath(path)) return this._err(r, 'INVALID_INPUT', 'target.path invalid', false);
-        if (!method || !['GET', 'POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
-          return this._err(r, 'INVALID_INPUT', 'method invalid', false);
+        if (!assertQuery(query)) return this._err(r, 'INVALID_INPUT', 'target.query invalid', false);
+        if (method !== profile.method || !['GET', 'POST'].includes(method)) {
+          return this._err(r, 'INVALID_INPUT', `method ${method || '(empty)'} is not allowed for profile ${profileName}`, false);
+        }
+        if (!isSafeHttpUrl(keyId)) {
+          return this._err(r, 'KEY_UNAVAILABLE', 'signing keyId is not safe for the Signature header', false);
         }
 
         let date = r?.headers?.date;
@@ -753,6 +823,9 @@ module.exports = {
         let digest = null;
         let bodySha256Base64 = null;
         if (profile.requireDigest) {
+          if (r?.body?.encoding !== 'utf8') {
+            return this._err(r, 'INVALID_INPUT', 'body.encoding must be utf8', false);
+          }
           const digestMode = r?.digest?.mode || 'server_compute';
           if (digestMode === 'server_compute') {
             const bodyBuf = this._parseBodyBytes(r);
@@ -768,6 +841,9 @@ module.exports = {
             const bodyBuf = this._parseBodyBytes(r);
             if (!providedDigest || !bodyBuf) {
               return this._err(r, 'INVALID_INPUT', 'digest.value and body.bytes required for caller_provided_strict', false);
+            }
+            if (bodyBuf.length > this.settings.limits.maxBodyBytes) {
+              return this._err(r, 'BODY_TOO_LARGE', `body exceeds ${this.settings.limits.maxBodyBytes} bytes`, false);
             }
             const computedHash = sha256Base64(bodyBuf);
             if (providedBodyHash && providedBodyHash !== computedHash) {
@@ -785,6 +861,9 @@ module.exports = {
         }
 
         const contentType = r?.headers?.contentType || 'application/activity+json';
+        if (profile.signContentType && (typeof contentType !== 'string' || UNSAFE_URL_OR_HEADER_CHAR_RE.test(contentType))) {
+          return this._err(r, 'INVALID_INPUT', 'content-type invalid', false);
+        }
         const requestTarget = buildRequestTarget(method, path, query);
         const signingString = buildSigningString({ requestTarget, host, date, digest, contentType }, profile.signedHeaders);
         const signature = signRsaSha256(privateKeyPem, signingString);
@@ -798,6 +877,7 @@ module.exports = {
 
         const outHeaders = { Date: date, Signature: signatureHeader };
         if (digest) outHeaders.Digest = digest;
+        if (profile.signContentType) outHeaders['Content-Type'] = contentType;
 
         return {
           requestId,
