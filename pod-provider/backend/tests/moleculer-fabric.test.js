@@ -1,5 +1,8 @@
 const {
+  DEFAULT_DISTRIBUTED_HEARTBEAT_INTERVAL,
+  DEFAULT_DISTRIBUTED_HEARTBEAT_TIMEOUT,
   createMoleculerFabricConfig,
+  resolveHeartbeatPolicy,
   resolveServicePatterns,
   validateRedisTransporterUrl
 } = require('../config/moleculer-fabric');
@@ -15,6 +18,8 @@ describe('ADSP P1 Moleculer fabric configuration', () => {
     expect(config.nodeID).toBe('pod-provider');
     expect(config.namespace).toBeUndefined();
     expect(config.transporter).toBeUndefined();
+    expect(config.heartbeatInterval).toBeUndefined();
+    expect(config.heartbeatTimeout).toBeUndefined();
     expect(config.registry).toEqual({ preferLocal: true });
     expect(config.serializer).toBeInstanceOf(RdfJSONSerializer);
     expect(config.serviceGroup).toBe('pod-cell');
@@ -94,6 +99,47 @@ describe('ADSP P1 Moleculer fabric configuration', () => {
     ).toThrow(/redis:\/\/ or rediss:\/\//);
   });
 
+  test('distributed mode uses a bounded heartbeat policy with recovery margin', () => {
+    const common = {
+      SEMAPPS_MOLECULER_MODE: 'distributed',
+      SEMAPPS_MOLECULER_NODE_ID: 'pod-provider-a',
+      SEMAPPS_MOLECULER_NAMESPACE: 'prod-fabric',
+      SEMAPPS_REDIS_TRANSPORTER_URL: 'redis://127.0.0.1:6379'
+    };
+    const config = createMoleculerFabricConfig(common);
+
+    expect(config.heartbeatInterval).toBe(DEFAULT_DISTRIBUTED_HEARTBEAT_INTERVAL);
+    expect(config.heartbeatTimeout).toBe(DEFAULT_DISTRIBUTED_HEARTBEAT_TIMEOUT);
+    expect(config.heartbeatInterval).toBe(5);
+    expect(config.heartbeatTimeout).toBe(10);
+
+    expect(
+      resolveHeartbeatPolicy('distributed', {
+        SEMAPPS_MOLECULER_HEARTBEAT_INTERVAL: '4',
+        SEMAPPS_MOLECULER_HEARTBEAT_TIMEOUT: '8'
+      })
+    ).toEqual({ heartbeatInterval: 4, heartbeatTimeout: 8 });
+  });
+
+  test('distributed heartbeat overrides fail closed before they can violate the recovery contract', () => {
+    const invalid = [
+      { SEMAPPS_MOLECULER_HEARTBEAT_INTERVAL: '0', SEMAPPS_MOLECULER_HEARTBEAT_TIMEOUT: '10' },
+      { SEMAPPS_MOLECULER_HEARTBEAT_INTERVAL: '5.5', SEMAPPS_MOLECULER_HEARTBEAT_TIMEOUT: '10' },
+      { SEMAPPS_MOLECULER_HEARTBEAT_INTERVAL: '10', SEMAPPS_MOLECULER_HEARTBEAT_TIMEOUT: '10' },
+      { SEMAPPS_MOLECULER_HEARTBEAT_INTERVAL: '6', SEMAPPS_MOLECULER_HEARTBEAT_TIMEOUT: '10' },
+      { SEMAPPS_MOLECULER_HEARTBEAT_INTERVAL: '5', SEMAPPS_MOLECULER_HEARTBEAT_TIMEOUT: '13' }
+    ];
+
+    for (const env of invalid) {
+      expect(() => resolveHeartbeatPolicy('distributed', env)).toThrow(/heartbeat/i);
+    }
+
+    expect(resolveHeartbeatPolicy('single', invalid[4])).toEqual({
+      heartbeatInterval: undefined,
+      heartbeatTimeout: undefined
+    });
+  });
+
   test('two distinct distributed node identities are accepted in the same namespace', () => {
     const common = {
       SEMAPPS_MOLECULER_MODE: 'distributed',
@@ -107,6 +153,10 @@ describe('ADSP P1 Moleculer fabric configuration', () => {
     expect(a.namespace).toBe(b.namespace);
     expect(a.registry.preferLocal).toBe(true);
     expect(b.registry.preferLocal).toBe(true);
+    expect(a.heartbeatInterval).toBe(5);
+    expect(a.heartbeatTimeout).toBe(10);
+    expect(b.heartbeatInterval).toBe(5);
+    expect(b.heartbeatTimeout).toBe(10);
   });
 
   test('invalid fabric identifiers and unknown service groups fail closed', () => {

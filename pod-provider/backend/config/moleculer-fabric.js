@@ -7,6 +7,16 @@ const MODE_DISTRIBUTED = 'distributed';
 const GROUP_POD_CELL = 'pod-cell';
 const GROUP_P1_PROBE = 'p1-probe';
 
+// Moleculer 0.14.34 defaults to a 10s heartbeat and 30s timeout, and checks
+// remote nodes only once per timeout. Because expiry is tested with `>` rather
+// than `>=`, those defaults can retain a dead endpoint for almost 60 seconds.
+// ADSP's frozen recovery ceiling is 30 seconds, so supported distributed cells
+// use a policy with substantial detection margin. Single-process mode preserves
+// upstream defaults because it does not require horizontal failure detection.
+const DEFAULT_DISTRIBUTED_HEARTBEAT_INTERVAL = 5;
+const DEFAULT_DISTRIBUTED_HEARTBEAT_TIMEOUT = 10;
+const MAX_DISTRIBUTED_HEARTBEAT_TIMEOUT = 12;
+
 const VALID_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const VALID_REDIS_PROTOCOLS = new Set(['redis:', 'rediss:']);
 
@@ -85,6 +95,47 @@ function resolveNamespace(mode, value) {
   return validateIdentifier(explicit, 'Moleculer namespace');
 }
 
+function parsePositiveIntegerSeconds(value, label, fallback) {
+  const explicit = optionalString(value);
+  if (!explicit) return fallback;
+  const parsed = Number(explicit);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive integer number of seconds`);
+  }
+  return parsed;
+}
+
+function resolveHeartbeatPolicy(mode, env) {
+  if (mode !== MODE_DISTRIBUTED) {
+    return { heartbeatInterval: undefined, heartbeatTimeout: undefined };
+  }
+
+  const heartbeatInterval = parsePositiveIntegerSeconds(
+    env.SEMAPPS_MOLECULER_HEARTBEAT_INTERVAL,
+    'SEMAPPS_MOLECULER_HEARTBEAT_INTERVAL',
+    DEFAULT_DISTRIBUTED_HEARTBEAT_INTERVAL
+  );
+  const heartbeatTimeout = parsePositiveIntegerSeconds(
+    env.SEMAPPS_MOLECULER_HEARTBEAT_TIMEOUT,
+    'SEMAPPS_MOLECULER_HEARTBEAT_TIMEOUT',
+    DEFAULT_DISTRIBUTED_HEARTBEAT_TIMEOUT
+  );
+
+  if (heartbeatTimeout <= heartbeatInterval) {
+    throw new Error('Distributed Moleculer heartbeat timeout must be greater than heartbeat interval');
+  }
+  if (heartbeatInterval * 2 > heartbeatTimeout) {
+    throw new Error('Distributed Moleculer heartbeat interval must be at most half of heartbeat timeout');
+  }
+  if (heartbeatTimeout > MAX_DISTRIBUTED_HEARTBEAT_TIMEOUT) {
+    throw new Error(
+      `Distributed Moleculer heartbeat timeout must be <= ${MAX_DISTRIBUTED_HEARTBEAT_TIMEOUT}s to preserve the frozen 30s recovery ceiling`
+    );
+  }
+
+  return { heartbeatInterval, heartbeatTimeout };
+}
+
 function resolveServicePatterns(group) {
   if (group === GROUP_POD_CELL) {
     return ['services/*.js', 'services/**/*.js'];
@@ -98,6 +149,7 @@ function createMoleculerFabricConfig(env = process.env) {
   const nodeID = resolveNodeId(mode, env.SEMAPPS_MOLECULER_NODE_ID);
   const namespace = resolveNamespace(mode, env.SEMAPPS_MOLECULER_NAMESPACE);
   const transporterUrl = validateRedisTransporterUrl(env.SEMAPPS_REDIS_TRANSPORTER_URL);
+  const heartbeat = resolveHeartbeatPolicy(mode, env);
 
   if (mode === MODE_DISTRIBUTED && !transporterUrl) {
     throw new Error('Distributed Moleculer mode requires SEMAPPS_REDIS_TRANSPORTER_URL in ADSP Phase 1');
@@ -109,6 +161,8 @@ function createMoleculerFabricConfig(env = process.env) {
     nodeID,
     namespace,
     transporter: transporterUrl,
+    heartbeatInterval: heartbeat.heartbeatInterval,
+    heartbeatTimeout: heartbeat.heartbeatTimeout,
     // Pin Moleculer's local-first routing contract explicitly. Tightly coupled
     // services that exist inside the same Pod/SemApps cell must never take a
     // remote hop merely because another cell advertises the same action.
@@ -124,11 +178,15 @@ function createMoleculerFabricConfig(env = process.env) {
 }
 
 module.exports = {
+  DEFAULT_DISTRIBUTED_HEARTBEAT_INTERVAL,
+  DEFAULT_DISTRIBUTED_HEARTBEAT_TIMEOUT,
+  MAX_DISTRIBUTED_HEARTBEAT_TIMEOUT,
   MODE_SINGLE,
   MODE_DISTRIBUTED,
   GROUP_POD_CELL,
   GROUP_P1_PROBE,
   createMoleculerFabricConfig,
+  resolveHeartbeatPolicy,
   resolveServicePatterns,
   validateRedisTransporterUrl
 };

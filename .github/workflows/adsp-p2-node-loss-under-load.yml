@@ -1,0 +1,438 @@
+name: ADSP P2 Node Loss Under Load
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/adsp-p2-node-loss-under-load.yml'
+      - 'pod-provider/backend/package.json'
+      - 'pod-provider/backend/moleculer.config.js'
+      - 'pod-provider/backend/config/moleculer-fabric.js'
+      - 'pod-provider/backend/middlewares/adsp-local-ontology-registration.js'
+      - 'pod-provider/backend/middlewares/adsp-root-entry-evidence.js'
+      - 'pod-provider/backend/scripts/adsp-p2-node-loss-load.js'
+      - 'pod-provider/backend/scripts/adsp-p2-node-loss-removal-clock.js'
+      - 'pod-provider/backend/scripts/adsp-p2-node-loss-persistence-audit.js'
+      - 'pod-provider/backend/scripts/adsp-p2-node-loss-redis-audit.js'
+      - 'pod-provider/backend/scripts/adsp-p2-preload-bull-scripts.js'
+      - 'pod-provider/backend/scripts/adsp-p2-semantic-probe.js'
+      - 'pod-provider/backend/services/adsp-p2-redis-script-preload.service.js'
+      - 'pod-provider/backend/scripts/patch-semapps-jsonld-distributed-context-cache.js'
+      - 'pod-provider/backend/scripts/patch-semapps-jsonld-distributed-locality.js'
+      - 'pod-provider/backend/scripts/patch-semapps-ldp-distributed-semantic-locality.js'
+      - 'pod-provider/backend/scripts/patch-semapps-ldp-local-registry-bootstrap.js'
+      - 'pod-provider/backend/scripts/patch-semapps-ontologies-distributed-cache.js'
+      - 'pod-provider/backend/tests/adsp-local-ontology-registration.test.js'
+      - 'pod-provider/backend/tests/adsp-root-entry-evidence.test.js'
+      - 'pod-provider/backend/tests/adsp-p2-node-loss-load.test.js'
+      - 'pod-provider/backend/tests/adsp-p2-node-loss-removal-clock.test.js'
+      - 'pod-provider/backend/tests/adsp-p2-node-loss-persistence-audit.test.js'
+      - 'pod-provider/backend/tests/adsp-p2-node-loss-redis-audit.test.js'
+      - 'pod-provider/backend/tests/adsp-p2-preload-bull-scripts.test.js'
+      - 'pod-provider/backend/tests/adsp-p2-semantic-probe.test.js'
+      - 'pod-provider/backend/tests/patch-semapps-jsonld-distributed-context-cache.test.js'
+      - 'pod-provider/backend/tests/patch-semapps-jsonld-distributed-locality.test.js'
+      - 'pod-provider/backend/tests/patch-semapps-ldp-distributed-semantic-locality.test.js'
+      - 'pod-provider/backend/tests/patch-semapps-ldp-local-registry-bootstrap.test.js'
+      - 'pod-provider/backend/tests/patch-semapps-ontologies-distributed-cache.test.js'
+      - 'pod-provider/docker-compose-adsp-p2-horizontal.yml'
+      - 'pod-provider/docker-compose-phase8.yml'
+      - 'pod-provider/docker-compose-test.yml'
+      - 'pod-provider/docker/backend.dockerfile'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adsp-p2-node-loss-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node-loss-under-load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        working-directory: pod-provider
+    env:
+      ADSP_P2_SOURCE_SHA: '${{ github.event.pull_request.head.sha || github.sha }}'
+      ADSP_P2_NAMESPACE: 'adsp-p2-loss-${{ github.run_id }}-${{ github.run_attempt }}'
+      ADSP_P2_REPLICAS: '4'
+      APDM_P8_COUNT: '10'
+      APDM_P8_ENABLED: 'true'
+      APDM_P9_CONCURRENCY: '4'
+      APDM_P10_DATASET_EXIST_MEMO_ENABLED: 'false'
+      ADSP_P2_ROOT_ENTRY_EVIDENCE_ENABLED: 'true'
+      ADSP_P2_VICTIM_HOLD_AFTER_ACTION: 'true'
+      ADSP_P2_VICTIM_HOLD_REQUEST_PREFIX: 'adsp-p2-loss-run-${{ github.run_id }}-${{ github.run_attempt }}-fault-1-'
+      ADSP_P2_FUSEKI_USER: 'admin'
+      ADSP_P2_FUSEKI_PASSWORD: 'admin'
+      REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED: 'false'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: '${{ github.event.pull_request.head.sha || github.sha }}'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+
+      - name: Prepare evidence directory
+        run: |
+          set -euo pipefail
+          sudo rm -rf measurements/adsp-p2-node-loss data/fuseki_test data/redis_test
+          mkdir -p measurements/adsp-p2-node-loss/barrier data/fuseki_test data/redis_test
+
+      - name: Build production backend image
+        run: |
+          set -euo pipefail
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            build backend
+
+      - name: Verify production-image node-loss modules
+        run: |
+          set -euo pipefail
+          docker run --rm -i apdm-phase8-backend:local node - <<'NODE'
+          const assert = require('node:assert/strict');
+          const localOntologyRegistration = require('./middlewares/adsp-local-ontology-registration');
+          const middleware = require('./middlewares/adsp-root-entry-evidence');
+          const load = require('./scripts/adsp-p2-node-loss-load');
+          const removalClock = require('./scripts/adsp-p2-node-loss-removal-clock');
+          const persistence = require('./scripts/adsp-p2-node-loss-persistence-audit');
+          const redis = require('./scripts/adsp-p2-node-loss-redis-audit');
+          const bullPreload = require('./scripts/adsp-p2-preload-bull-scripts');
+          const bullPreloadService = require('./services/adsp-p2-redis-script-preload.service');
+          const semanticProbe = require('./scripts/adsp-p2-semantic-probe');
+          const contextCachePatch = require('./scripts/patch-semapps-jsonld-distributed-context-cache');
+          const jsonldLocalityPatch = require('./scripts/patch-semapps-jsonld-distributed-locality');
+          const ldpLocalityPatch = require('./scripts/patch-semapps-ldp-distributed-semantic-locality');
+          const ontologyCachePatch = require('./scripts/patch-semapps-ontologies-distributed-cache');
+          const ldpBootstrapPatch = require('./scripts/patch-semapps-ldp-local-registry-bootstrap');
+          assert.equal(localOntologyRegistration({ enabled: false }), null);
+          assert.equal(typeof localOntologyRegistration.isLocalOntologyBaselineReady, 'function');
+          assert.equal(middleware({ enabled: false }), null);
+          assert.equal(load.EXPECTED_VICTIM_BOUNDARY, 'root-action-complete-response-held');
+          assert.equal(typeof load.waitForExactVictimRootEntry, 'function');
+          assert.equal(typeof load.assertTargetedVictimRejected, 'function');
+          assert.equal(typeof removalClock.runRemovalClock, 'function');
+          assert.equal(typeof persistence.auditPersistence, 'function');
+          assert.equal(typeof persistence.buildFusekiAuthorization, 'function');
+          assert.equal(typeof redis.auditRedisCommandstats, 'function');
+          assert.equal(typeof bullPreload.preloadBullScripts, 'function');
+          assert.equal(bullPreloadService.name, 'adspP2RedisScriptPreload');
+          assert.equal(typeof semanticProbe.runProbe, 'function');
+          const contextPatchResult = contextCachePatch.applyPatch();
+          assert.equal(contextPatchResult.results.length, 2);
+          assert.equal(contextPatchResult.results.every(result => result.changed === false), true);
+          const jsonldLocalityResult = jsonldLocalityPatch.applyPatch();
+          assert.equal(jsonldLocalityResult.results.length, 4);
+          assert.equal(jsonldLocalityResult.results.every(result => result.changed === false), true);
+          const ldpLocalityResult = ldpLocalityPatch.applyPatch();
+          assert.equal(ldpLocalityResult.changed, false);
+          const ontologyPatchResult = ontologyCachePatch.applyPatch();
+          assert.equal(ontologyPatchResult.results.length, 5);
+          assert.equal(ontologyPatchResult.results.every(result => result.changed === false), true);
+          const ldpPatchResult = ldpBootstrapPatch.applyPatch();
+          assert.equal(ldpPatchResult.changed, false);
+          process.stdout.write('ADSP P2 production-image node-loss modules: OK\n');
+          NODE
+
+      - name: Record exact environment
+        run: |
+          set -euo pipefail
+          export BACKEND_IMAGE_ID="$(docker image inspect apdm-phase8-backend:local --format '{{.Id}}')"
+          export CHECKOUT_SHA="$(git rev-parse HEAD)"
+          test "$CHECKOUT_SHA" = "$ADSP_P2_SOURCE_SHA"
+          node - <<'NODE' > measurements/adsp-p2-node-loss/environment.json
+          const os = require('node:os');
+          process.stdout.write(`${JSON.stringify({
+            version: 1,
+            phase: 'ADSP-P2-A',
+            fixture: 'horizontal-redis-node-loss-under-load',
+            sourceSha: process.env.ADSP_P2_SOURCE_SHA,
+            checkoutSha: process.env.CHECKOUT_SHA,
+            eventSha: process.env.GITHUB_SHA,
+            exactHeadCheckout: process.env.CHECKOUT_SHA === process.env.ADSP_P2_SOURCE_SHA,
+            workflowRunId: process.env.GITHUB_RUN_ID,
+            runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            eventName: process.env.GITHUB_EVENT_NAME,
+            backendImageId: process.env.BACKEND_IMAGE_ID,
+            hostCpuModel: os.cpus()[0]?.model || 'unknown',
+            hostCpuCount: os.cpus().length,
+            hostTotalMemoryBytes: os.totalmem(),
+            transporter: 'redis',
+            replicas: 4,
+            recipientCount: 10,
+            faultBurstRequests: 8,
+            recoveryRequests: 8,
+            rejoinRequests: 8,
+            offeredConcurrency: 8,
+            localDeliveryConcurrency: 4,
+            recoveryBoundMs: 30000,
+            recoveryBoundScope: 'pre-sigkill-endpoint-removal-plus-endpoint-rejoin-and-victim-semantic-readiness',
+            authoritativeEndpointRemovalClock: 'pre-sigkill-fault-start',
+            applicationLatencyIsDiagnosticOnly: true,
+            replayObservationMs: 8000,
+            victimNode: 'adsp-p2-pod-cell-4',
+            victimBoundary: 'root-action-complete-response-held',
+            activityPubRemoteDeliveryMode: 'native',
+            datasetExistMemoEnabled: false,
+            rootEntryEvidenceEnabled: true,
+            victimResponseHoldAfterRootAction: true,
+            victimHoldRequestPrefix: process.env.ADSP_P2_VICTIM_HOLD_REQUEST_PREFIX,
+            callerRetryEnabled: false,
+            fusekiPersistenceAuditAuthenticated: true,
+            redisStreamPayloadCompressionEnabled: false,
+            redisStartupStatsCapturedBeforeReset: true,
+            redisStatsResetAfterHarnessAndFourCellStartupBeforeFaultScenario: true,
+            distributedJsonldContextActionCachingEnabled: false,
+            distributedOntologyReadActionCachingEnabled: false,
+            distributedJsonldSemanticLocalityEnabled: true,
+            distributedLdpSemanticLocalityEnabled: true,
+            distributedLocalOntologyRegistrationBarrierEnabled: true,
+            bullRedisScriptsPreloadedBeforePodCellAdvertisement: true,
+            semanticProbeEnabled: true
+          }, null, 2)}\n`);
+          NODE
+          cat measurements/adsp-p2-node-loss/environment.json
+
+      - name: Provision canonical sender and recipients
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+          export APDM_P8_ENABLED=false ADSP_P2_ROOT_ENTRY_EVIDENCE_ENABLED=false ADSP_P2_REPLICAS=1
+          docker compose $files up -d fuseki_test redis mailcatcher
+          FUSEKI_URL=http://localhost:3040 AUTH_DATASET=settings WAIT_SECONDS=60 ./scripts/fuseki-bootstrap.sh
+          docker compose $files up -d --no-deps backend
+
+          ready=false
+          for attempt in $(seq 1 180); do
+            if curl -fsS --max-time 2 http://localhost:3000/ >/dev/null 2>&1; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+
+          docker compose $files exec -T backend \
+            node scripts/adsp-p2-provision.js \
+              /app/backend/measurements/adsp-p2-node-loss/actors.json 10
+          test -s measurements/adsp-p2-node-loss/actors.json
+          docker compose $files stop -t 30 backend
+
+      - name: Run four-cell SIGKILL recovery proof
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+          barrier_host='measurements/adsp-p2-node-loss/barrier'
+          barrier_container='/app/backend/measurements/adsp-p2-node-loss/barrier'
+          result_host='measurements/adsp-p2-node-loss/result.json'
+          log_host='measurements/adsp-p2-node-loss/load-driver.log'
+          removal_clock_result='measurements/adsp-p2-node-loss/removal-clock.json'
+          removal_clock_log='measurements/adsp-p2-node-loss/removal-clock.log'
+
+          wait_port() {
+            local port="$1"
+            local ready=false
+            for attempt in $(seq 1 180); do
+              if curl -fsS --max-time 2 "http://localhost:${port}/" >/dev/null 2>&1; then ready=true; break; fi
+              sleep 1
+            done
+            test "$ready" = true
+          }
+
+          wait_marker_or_driver() {
+            local marker="$1"
+            for attempt in $(seq 1 3600); do
+              if [[ -f "$marker" ]]; then return 0; fi
+              if ! kill -0 "$driver_pid" 2>/dev/null; then
+                wait "$driver_pid" || true
+                cat "$log_host"
+                echo "node-loss driver exited before marker $marker" >&2
+                return 1
+              fi
+              sleep 0.1
+            done
+            cat "$log_host"
+            echo "timed out waiting for marker $marker" >&2
+            return 1
+          }
+
+          wait_marker_or_clock() {
+            local marker="$1"
+            for attempt in $(seq 1 1800); do
+              if [[ -f "$marker" ]]; then return 0; fi
+              if ! kill -0 "$removal_clock_pid" 2>/dev/null; then
+                wait "$removal_clock_pid" || true
+                cat "$removal_clock_log"
+                echo "removal clock exited before marker $marker" >&2
+                return 1
+              fi
+              sleep 0.1
+            done
+            cat "$removal_clock_log"
+            echo "timed out waiting for removal clock marker $marker" >&2
+            return 1
+          }
+
+          write_epoch_marker() {
+            node - "$1" <<'NODE'
+          const fs = require('node:fs');
+          fs.writeFileSync(process.argv[2], `${Date.now()}\n`, 'utf8');
+          NODE
+          }
+
+          rm -f "$barrier_host"/* measurements/adsp-p2/root-entry-r*.jsonl measurements/adsp-p2/trace-10-r*.jsonl
+          export APDM_P8_ENABLED=true ADSP_P2_ROOT_ENTRY_EVIDENCE_ENABLED=true ADSP_P2_REPLICAS=4
+          docker compose $files up -d --no-deps backend backend_p2_2 backend_p2_3 backend_p2_4
+          for port in 3000 3102 3103 3104; do wait_port "$port"; done
+
+          docker compose $files run --rm -T --no-deps --entrypoint node \
+            -e ADSP_P2_BARRIER_DIR="$barrier_container" \
+            -e ADSP_P2_RECOVERY_BOUND_MS=30000 \
+            backend scripts/adsp-p2-node-loss-removal-clock.js \
+              /app/backend/measurements/adsp-p2-node-loss/removal-clock.json \
+              > "$removal_clock_log" 2>&1 &
+          removal_clock_pid=$!
+          wait_marker_or_clock "$barrier_host/removal-clock-ready"
+
+          trace_files='/app/backend/measurements/adsp-p2/trace-10-r1.jsonl,/app/backend/measurements/adsp-p2/trace-10-r2.jsonl,/app/backend/measurements/adsp-p2/trace-10-r3.jsonl,/app/backend/measurements/adsp-p2/trace-10-r4.jsonl'
+          root_files='/app/backend/measurements/adsp-p2/root-entry-r1.jsonl,/app/backend/measurements/adsp-p2/root-entry-r2.jsonl,/app/backend/measurements/adsp-p2/root-entry-r3.jsonl,/app/backend/measurements/adsp-p2/root-entry-r4.jsonl'
+
+          docker compose $files run --rm -T --no-deps --entrypoint node \
+            -e ADSP_P2_TRACE_FILES="$trace_files" \
+            -e ADSP_P2_ROOT_ENTRY_FILES="$root_files" \
+            -e ADSP_P2_BARRIER_DIR="$barrier_container" \
+            -e ADSP_P2_RUN_LABEL="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -e ADSP_P2_VICTIM_NODE='adsp-p2-pod-cell-4' \
+            -e ADSP_P2_FAULT_BURST_REQUESTS=8 \
+            -e ADSP_P2_RECOVERY_REQUESTS=8 \
+            -e ADSP_P2_REJOIN_REQUESTS=8 \
+            -e ADSP_P2_CONCURRENCY=8 \
+            -e ADSP_P2_RECOVERY_BOUND_MS=30000 \
+            -e ADSP_P2_REPLAY_OBSERVATION_MS=8000 \
+            backend scripts/adsp-p2-node-loss-load.js \
+              /app/backend/measurements/adsp-p2-node-loss/actors.json 10 \
+              /app/backend/measurements/adsp-p2-node-loss/result.json \
+              > "$log_host" 2>&1 &
+          driver_pid=$!
+
+          wait_marker_or_driver "$barrier_host/ready"
+          docker compose $files exec -T redis redis-cli INFO commandstats > measurements/adsp-p2-node-loss/redis-commandstats-startup.txt
+          docker compose $files exec -T redis redis-cli INFO errorstats > measurements/adsp-p2-node-loss/redis-errorstats-startup.txt
+          docker compose $files exec -T redis redis-cli CONFIG RESETSTAT >/dev/null
+          write_epoch_marker "$barrier_host/go"
+          wait_marker_or_driver "$barrier_host/victim-inflight"
+
+          write_epoch_marker "$barrier_host/fault-start"
+          docker compose $files kill -s SIGKILL backend_p2_4
+          write_epoch_marker "$barrier_host/victim-killed"
+
+          wait_marker_or_driver "$barrier_host/restart-victim"
+          write_epoch_marker "$barrier_host/victim-restarted"
+          docker compose $files up -d --no-deps backend_p2_4
+          wait_port 3104
+
+          wait "$driver_pid"
+          cat "$log_host"
+          test -s "$result_host"
+          wait "$removal_clock_pid"
+          cat "$removal_clock_log"
+          test -s "$removal_clock_result"
+
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const result = JSON.parse(fs.readFileSync('measurements/adsp-p2-node-loss/result.json', 'utf8'));
+          const clock = JSON.parse(fs.readFileSync('measurements/adsp-p2-node-loss/removal-clock.json', 'utf8'));
+          if (!result.complete || !result.passed) throw new Error('node-loss result is not complete/pass');
+          if (!clock.complete || !clock.passed) throw new Error('authoritative endpoint-removal clock is not complete/pass');
+          if (clock.clockScope !== 'pre-sigkill-fault-start-to-moleculer-endpoint-removal') throw new Error('unexpected endpoint-removal clock scope');
+          if (clock.baselineEndpointCount !== 4 || clock.convergedEndpointCount !== 3) throw new Error('endpoint-removal clock topology mismatch');
+          if (clock.endpointRemovalMs > 30000) throw new Error('authoritative endpoint removal exceeded 30s bound');
+          if (!result.correctness?.targetedVictimBoundaryProvenBeforeKill) throw new Error('victim held-response boundary proof missing');
+          if (result.correctness?.targetedVictimBoundary !== 'root-action-complete-response-held') throw new Error('unexpected victim fault boundary');
+          if (!result.correctness?.targetedVictimCallerRejectedExactlyOnce) throw new Error('victim caller rejection proof missing');
+          if (!result.correctness?.victimSemanticReadinessProvenBeforeRejoinWave) throw new Error('victim semantic readiness proof missing');
+          if (!result.correctness?.victimSemanticReadinessWithinRecoveryBound) throw new Error('victim semantic readiness exceeded recovery bound');
+          if (result.victimRootEntry?.boundary !== 'root-action-complete-response-held') throw new Error('victim result boundary mismatch');
+          if (result.victimRootEntry?.callerOutcome !== 'rejected') throw new Error('victim caller outcome was not rejected');
+          if (result.rejoin?.endpointRejoinMs > 30000) throw new Error('endpoint rejoin exceeded 30s bound');
+          if (result.rejoin?.semanticRejoinMs > 30000) throw new Error('victim semantic rejoin exceeded 30s bound');
+          NODE
+
+      - name: Audit authoritative sender persistence
+        run: |
+          set -euo pipefail
+          ADSP_P2_FUSEKI_BASE=http://127.0.0.1:3040/ \
+            node backend/scripts/adsp-p2-node-loss-persistence-audit.js \
+              measurements/adsp-p2-node-loss/actors.json \
+              measurements/adsp-p2-node-loss/result.json \
+              measurements/adsp-p2-node-loss/persistence-audit.json
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const audit = JSON.parse(fs.readFileSync('measurements/adsp-p2-node-loss/persistence-audit.json', 'utf8'));
+          if (!audit.complete || !audit.passed) throw new Error('persistence audit is not complete/pass');
+          if (!audit.authenticatedQuery) throw new Error('persistence audit was not authenticated');
+          if (audit.targetedAmbiguousCallerOutcome !== 'rejected') throw new Error('targeted ambiguous caller outcome mismatch');
+          if (!audit.targetedAmbiguousCommitPersistedExactlyOnce) throw new Error('targeted ambiguous commit was not persisted exactly once');
+          if (audit.duplicatePersistedMutationCount !== 0) throw new Error('duplicate authoritative persistence observed');
+          NODE
+
+      - name: Audit Redis command health
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+          docker compose $files exec -T redis redis-cli INFO commandstats > measurements/adsp-p2-node-loss/redis-commandstats.txt
+          node backend/scripts/adsp-p2-node-loss-redis-audit.js \
+            measurements/adsp-p2-node-loss/redis-commandstats.txt \
+            measurements/adsp-p2-node-loss/redis-audit.json
+
+      - name: Probe per-node semantic readiness
+        if: always()
+        run: |
+          set +e
+          if [[ ! -s measurements/adsp-p2-node-loss/actors.json ]]; then
+            echo 'Semantic probe skipped: canonical provisioning did not complete.'
+            exit 0
+          fi
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+          docker compose $files run --rm -T --no-deps --entrypoint node \
+            -e ADSP_P2_NAMESPACE="$ADSP_P2_NAMESPACE" \
+            backend scripts/adsp-p2-semantic-probe.js \
+              /app/backend/measurements/adsp-p2-node-loss/semantic-probe.json \
+              > measurements/adsp-p2-node-loss/semantic-probe.log 2>&1
+          probe_status=$?
+          cat measurements/adsp-p2-node-loss/semantic-probe.log
+          exit "$probe_status"
+
+      - name: Capture final topology and dependency evidence
+        if: always()
+        run: |
+          set +e
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+          docker compose $files ps -a > measurements/adsp-p2-node-loss/compose-ps.txt 2>&1
+          docker compose $files logs --no-color backend backend_p2_2 backend_p2_3 backend_p2_4 > measurements/adsp-p2-node-loss/backend.log 2>&1
+          docker compose $files exec -T redis redis-cli INFO commandstats > measurements/adsp-p2-node-loss/redis-commandstats-final.txt 2>&1
+          docker compose $files exec -T redis redis-cli INFO errorstats > measurements/adsp-p2-node-loss/redis-errorstats.txt 2>&1
+          cp measurements/adsp-p2/root-entry-r*.jsonl measurements/adsp-p2-node-loss/ 2>/dev/null || true
+          cp measurements/adsp-p2/trace-10-r*.jsonl measurements/adsp-p2-node-loss/ 2>/dev/null || true
+
+      - name: Upload node-loss evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adsp-p2-node-loss-${{ github.run_id }}-${{ github.run_attempt }}
+          path: pod-provider/measurements/adsp-p2-node-loss
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose \
+            -f docker-compose-test.yml \
+            -f docker-compose-phase8.yml \
+            -f docker-compose-adsp-p2-horizontal.yml \
+            down -v || true
