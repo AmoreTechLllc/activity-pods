@@ -73,7 +73,7 @@ jobs:
       - name: Verify production-image node-loss modules
         run: |
           set -euo pipefail
-          docker run --rm apdm-phase8-backend:local node - <<'NODE'
+          docker run --rm -i apdm-phase8-backend:local node - <<'NODE'
           const assert = require('node:assert/strict');
           const middleware = require('./middlewares/adsp-root-entry-evidence');
           const load = require('./scripts/adsp-p2-node-loss-load');
