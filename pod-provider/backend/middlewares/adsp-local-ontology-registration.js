@@ -30,11 +30,25 @@ function AdspLocalOntologyRegistrationMiddleware({
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('ADSP ontology registration timeout must be positive');
   if (!Number.isFinite(pollMs) || pollMs <= 0) throw new Error('ADSP ontology registration poll interval must be positive');
 
+  // Moleculer broker-method wrapper hooks do not bind `this` to the broker.
+  // Capture the authoritative local broker through the documented middleware
+  // lifecycle hook instead, then close over it from the broker.call wrapper.
+  let broker;
+
   return {
+    created(localBroker) {
+      if (!localBroker || typeof localBroker.getLocalService !== 'function') {
+        throw new Error('[ADSP-P2] Local ontology registration middleware requires a Moleculer broker');
+      }
+      broker = localBroker;
+    },
+
     call(next) {
-      const broker = this;
       return async (actionName, params, opts) => {
         if (actionName !== 'ontologies.register') return next(actionName, params, opts);
+        if (!broker) {
+          throw new Error('[ADSP-P2] Local ontology registration middleware broker is not initialized');
+        }
 
         const deadline = Date.now() + timeoutMs;
         let local;
