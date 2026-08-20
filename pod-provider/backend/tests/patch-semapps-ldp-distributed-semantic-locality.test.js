@@ -39,6 +39,24 @@ describe('ADSP P2 distributed LDP semantic locality patch', () => {
     expect(second.source).toBe(first.source);
   });
 
+  test('recognizes a markerless artifact that already contains the distributed rewrite', () => {
+    const first = patchRegisterSource(fixture());
+    const markerless = first.source.replace(`// ${PATCH_MARKER}`, '');
+    const second = patchRegisterSource(markerless);
+    expect(second.changed).toBe(false);
+    expect(second.source).toBe(markerless);
+  });
+
+  test('still fails closed on partial or structurally drifted rewrites', () => {
+    const first = patchRegisterSource(fixture());
+    const markerlessPartial = first.source
+      .replace(`// ${PATCH_MARKER}`, '')
+      .replace("this.broker.getLocalService('jsonld.parser')", "this.broker.getLocalService('jsonld.context')");
+    expect(() => patchRegisterSource(markerlessPartial)).toThrow(
+      /ldp\.registry\.register no longer matches the pinned SemApps contract/u
+    );
+  });
+
   test('fails closed on structural drift', () => {
     expect(() => patchRegisterSource('const Schema = {};')).toThrow(
       /ldp\.registry\.register no longer matches the pinned SemApps contract/u
