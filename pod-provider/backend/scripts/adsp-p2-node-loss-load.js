@@ -18,12 +18,23 @@ const {
   waitForBarrier,
   waitForUniqueTrace
 } = require('./adsp-p2-horizontal-load');
+const {
+  ACTIVITYSTREAMS_CONTEXT_URI,
+  ACTIVITYSTREAMS_REQUIRED_TYPES,
+  semanticProbePasses,
+  summarizeCachedDocument,
+  summarizeContext,
+  summarizeExpandedTypes,
+  summarizeOntologies
+} = require('./adsp-p2-semantic-probe');
 
 const DEFAULT_TRANSPORTER_URL = 'redis://redis:6379/12';
 const DEFAULT_READY_TIMEOUT_MS = 120000;
 const DEFAULT_TRACE_TIMEOUT_MS = 900000;
 const DEFAULT_RECOVERY_BOUND_MS = 30000;
 const DEFAULT_REPLAY_OBSERVATION_MS = 8000;
+const DEFAULT_SEMANTIC_POLL_MS = 50;
+const DEFAULT_SEMANTIC_ATTEMPT_TIMEOUT_MS = 1000;
 const ROOT_ACTION = 'activitypub.outbox.post';
 const DEFAULT_VICTIM_NODE = 'adsp-p2-pod-cell-4';
 const DEFAULT_POD_CELL_NODES = Object.freeze([
@@ -207,6 +218,96 @@ function readBarrierTimestamp(barrierDir, name) {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`Barrier ${name} did not contain an epoch timestamp`);
   return parsed;
+}
+
+function semanticErrorRecord(error) {
+  return {
+    name: error?.name || null,
+    type: error?.type || null,
+    code: error?.code || null,
+    message: error?.message || String(error)
+  };
+}
+
+async function pinnedSemanticCall(broker, nodeID, actionName, params, timeoutMs) {
+  try {
+    const value = await broker.call(actionName, params || {}, { nodeID, timeout: timeoutMs });
+    return { ok: true, value };
+  } catch (error) {
+    return { ok: false, error: semanticErrorRecord(error) };
+  }
+}
+
+async function probeNodeSemanticReadiness(broker, nodeID, timeoutMs) {
+  const ontologyCall = await pinnedSemanticCall(broker, nodeID, 'ontologies.list', {}, timeoutMs);
+  const contextCall = await pinnedSemanticCall(broker, nodeID, 'jsonld.context.get', {}, timeoutMs);
+  const localContextCall = await pinnedSemanticCall(broker, nodeID, 'jsonld.context.getLocal', {}, timeoutMs);
+  const cacheCall = await pinnedSemanticCall(
+    broker,
+    nodeID,
+    'jsonld.document-loader.getCache',
+    { uri: ACTIVITYSTREAMS_CONTEXT_URI },
+    timeoutMs
+  );
+  const expandCall = await pinnedSemanticCall(
+    broker,
+    nodeID,
+    'jsonld.parser.expandTypes',
+    { types: ACTIVITYSTREAMS_REQUIRED_TYPES },
+    timeoutMs
+  );
+
+  return {
+    nodeID,
+    observedAt: new Date().toISOString(),
+    ontologies: ontologyCall.ok ? { ok: true, ...summarizeOntologies(ontologyCall.value) } : ontologyCall,
+    context: contextCall.ok ? { ok: true, ...summarizeContext(contextCall.value) } : contextCall,
+    localContext: localContextCall.ok ? { ok: true, ...summarizeContext(localContextCall.value) } : localContextCall,
+    activityStreamsCache: cacheCall.ok ? { ok: true, ...summarizeCachedDocument(cacheCall.value) } : cacheCall,
+    expandActivityStreamsTypes: expandCall.ok ? summarizeExpandedTypes(expandCall.value) : expandCall
+  };
+}
+
+function semanticReadinessSummary(node) {
+  return {
+    nodeID: node?.nodeID || null,
+    observedAt: node?.observedAt || null,
+    ontologyCount: Number(node?.ontologies?.count || 0),
+    hasActivityStreamsOntology: node?.ontologies?.hasActivityStreamsOntology === true,
+    contextIncludesActivityStreams: node?.context?.includesActivityStreamsContextUri === true,
+    cachedContextContainsAllRequiredTypes: node?.activityStreamsCache?.containsAllRequiredTypes === true,
+    requiredTypeCount: Number(node?.activityStreamsCache?.requiredTypeCount || ACTIVITYSTREAMS_REQUIRED_TYPES.length),
+    expandsAllRequiredTypes: node?.expandActivityStreamsTypes?.expandsAllRequiredTypes === true,
+    expandsNote: node?.expandActivityStreamsTypes?.expandsToActivityStreamsNote === true,
+    expandsArticle: node?.expandActivityStreamsTypes?.expandsToActivityStreamsArticle === true
+  };
+}
+
+async function waitForNodeSemanticReadiness(
+  broker,
+  nodeID,
+  timeoutMs,
+  { pollMs = DEFAULT_SEMANTIC_POLL_MS, attemptTimeoutMs = DEFAULT_SEMANTIC_ATTEMPT_TIMEOUT_MS, probeFn = probeNodeSemanticReadiness } = {}
+) {
+  const startedAtEpochMs = Date.now();
+  const deadline = startedAtEpochMs + timeoutMs;
+  let lastProbe = null;
+  while (Date.now() < deadline) {
+    const remainingMs = Math.max(1, deadline - Date.now());
+    lastProbe = await probeFn(broker, nodeID, Math.min(attemptTimeoutMs, remainingMs));
+    if (semanticProbePasses(lastProbe)) {
+      return {
+        ready: true,
+        elapsedMs: Date.now() - startedAtEpochMs,
+        probe: lastProbe
+      };
+    }
+    const remainingAfterProbeMs = deadline - Date.now();
+    if (remainingAfterProbeMs > 0) await sleep(Math.min(pollMs, remainingAfterProbeMs));
+  }
+  throw new Error(
+    `Timed out waiting for semantic readiness on ${nodeID} after ${timeoutMs}ms; lastProbe=${JSON.stringify(semanticReadinessSummary(lastProbe))}`
+  );
 }
 
 async function runAcceptedWave({ broker, manifest, recipients, traceFiles, count, concurrency, timeoutMs, runLabel, phase, expectedExecutors }) {
@@ -439,6 +540,18 @@ async function main(argv = process.argv.slice(2)) {
     await waitForBarrier(barrierDir, 'victim-restarted', readyTimeoutMs);
     const restartEpochMs = readBarrierTimestamp(barrierDir, 'victim-restarted');
     const endpointRejoinMs = await waitForEndpointCount(broker, 4, recoveryBoundMs);
+    const elapsedBeforeSemanticMs = Math.max(0, Date.now() - restartEpochMs);
+    const semanticBudgetMs = recoveryBoundMs - elapsedBeforeSemanticMs;
+    if (semanticBudgetMs <= 0) {
+      throw new Error(
+        `Victim endpoint rejoined but left no time inside the ${recoveryBoundMs}ms recovery bound for semantic readiness`
+      );
+    }
+    const semanticReadiness = await waitForNodeSemanticReadiness(broker, victimNode, semanticBudgetMs);
+    const semanticRejoinMs = Date.now() - restartEpochMs;
+    if (semanticRejoinMs > recoveryBoundMs) {
+      throw new Error(`Victim semantic readiness exceeded recovery bound: ${semanticRejoinMs}ms > ${recoveryBoundMs}ms`);
+    }
 
     const rejoin = await runAcceptedWave({
       broker,
@@ -514,6 +627,8 @@ async function main(argv = process.argv.slice(2)) {
         boundMs: recoveryBoundMs,
         restartEpochMs,
         endpointRejoinMs,
+        semanticRejoinMs,
+        semanticReadiness: semanticReadinessSummary(semanticReadiness.probe),
         applicationRejoinMs,
         applicationLatencyIsDiagnosticOnly: true,
         ...rejoin
@@ -524,6 +639,8 @@ async function main(argv = process.argv.slice(2)) {
         targetedVictimCallerRejectedExactlyOnce: true,
         faultBurstVictimExclusiveByConstruction: faultNodeAssignments.slice(1).every(nodeID => nodeID !== victimNode),
         faultBurstCoveredAllFourCells: new Set(faultNodeAssignments).size === DEFAULT_POD_CELL_NODES.length,
+        victimSemanticReadinessProvenBeforeRejoinWave: semanticProbePasses(semanticReadiness.probe),
+        victimSemanticReadinessWithinRecoveryBound: semanticRejoinMs <= recoveryBoundMs,
         acceptedActivityIdsUnique: true,
         acceptedRequestIdsUnique: true,
         duplicateCompletedTraceForRejectedRequest: false,
@@ -542,6 +659,7 @@ async function main(argv = process.argv.slice(2)) {
       endpointRemovalMs,
       applicationRecoveryMs,
       endpointRejoinMs,
+      semanticRejoinMs,
       applicationRejoinMs,
       faultAccepted: fault.accepted.length,
       faultRejected: fault.rejected.length
@@ -570,11 +688,15 @@ module.exports = {
   faultBurstNodeAssignments,
   findRootEntries,
   observeRejectedTraceCardinality,
+  pinnedSemanticCall,
+  probeNodeSemanticReadiness,
   readBarrierTimestamp,
   requestPayload,
   rootEntryFilesFromEnv,
   runAcceptedWave,
+  semanticReadinessSummary,
   submitRequest,
   waitForEndpointCount,
-  waitForExactVictimRootEntry
+  waitForExactVictimRootEntry,
+  waitForNodeSemanticReadiness
 };
