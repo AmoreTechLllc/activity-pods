@@ -31,9 +31,27 @@ function expectMoleculerError(fn, { code, type, message }) {
 function atprotoActionService() {
   return {
     _auth: jest.fn(),
+    _assertActiveManagedAtprotoBinding(binding, canonicalAccountId) {
+      return signingService.methods._assertActiveManagedAtprotoBinding.call(this, binding, canonicalAccountId);
+    },
+    _decodeCanonicalBase64(value, fieldName) {
+      return signingService.methods._decodeCanonicalBase64.call(this, value, fieldName);
+    },
     _resolveAtprotoAccountAuthority(ctx, canonicalAccountId) {
       return signingService.methods._resolveAtprotoAccountAuthority.call(this, ctx, canonicalAccountId);
     }
+  };
+}
+
+function activeManagedBinding(canonicalAccountId, fields = {}) {
+  return {
+    canonicalAccountId,
+    webId: canonicalAccountId,
+    status: 'active',
+    atprotoSource: 'local',
+    atprotoManaged: true,
+    atprotoDid: 'did:plc:alice',
+    ...fields
   };
 }
 
@@ -43,6 +61,18 @@ function generateSecp256k1PemPair() {
     publicKeyEncoding: { type: 'spki', format: 'pem' },
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
   });
+}
+
+function httpSigningService() {
+  return {
+    settings: {
+      limits: { maxBodyBytes: 1024, maxClockSkewSeconds: 300 },
+      profiles: signingService.settings.profiles
+    },
+    _err: signingService.methods._err,
+    _parseBodyBytes: signingService.methods._parseBodyBytes,
+    _validateDateSkew: signingService.methods._validateDateSkew
+  };
 }
 
 describe('signing internal authentication hardening', () => {
@@ -103,6 +133,106 @@ describe('signing internal authentication hardening', () => {
   });
 });
 
+describe('ActivityPub signing capability boundary', () => {
+  let privateKey;
+
+  beforeAll(() => {
+    ({ privateKey } = crypto.generateKeyPairSync('rsa', {
+      modulusLength: 1024,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+    }));
+  });
+
+  test('does not allow a digest-less GET profile to sign mutating HTTP methods', async () => {
+    const result = await signingService.methods._signOne.call(
+      httpSigningService(),
+      {},
+      'https://pods.example/alice',
+      'https://pods.example/alice#main-key',
+      privateKey,
+      {
+        requestId: 'delete-oracle',
+        method: 'DELETE',
+        profile: 'ap_get_v1',
+        target: { host: 'remote.example', path: '/objects/123' }
+      }
+    );
+
+    expect(result).toEqual({
+      requestId: 'delete-oracle',
+      ok: false,
+      error: {
+        code: 'INVALID_INPUT',
+        message: 'method DELETE is not allowed for profile ap_get_v1',
+        retryable: false
+      }
+    });
+  });
+
+  test('requires POST profiles to sign only POST requests', async () => {
+    const result = await signingService.methods._signOne.call(
+      httpSigningService(),
+      {},
+      'https://pods.example/alice',
+      'https://pods.example/alice#main-key',
+      privateKey,
+      {
+        requestId: 'profile-confusion',
+        method: 'GET',
+        profile: 'ap_post_v1',
+        target: { host: 'remote.example', path: '/inbox' },
+        body: { bytes: '{}', encoding: 'utf8' }
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatchObject({ code: 'INVALID_INPUT', retryable: false });
+  });
+
+  test('rejects unsupported body encodings instead of silently reinterpreting bytes', async () => {
+    const result = await signingService.methods._signOne.call(
+      httpSigningService(),
+      {},
+      'https://pods.example/alice',
+      'https://pods.example/alice#main-key',
+      privateKey,
+      {
+        requestId: 'encoding-confusion',
+        method: 'POST',
+        profile: 'ap_post_v1',
+        target: { host: 'remote.example', path: '/inbox' },
+        body: { bytes: 'e30=', encoding: 'base64' }
+      }
+    );
+
+    expect(result).toEqual({
+      requestId: 'encoding-confusion',
+      ok: false,
+      error: { code: 'INVALID_INPUT', message: 'body.encoding must be utf8', retryable: false }
+    });
+  });
+
+  test('rejects unsafe key identifiers before constructing a Signature header', async () => {
+    const result = await signingService.methods._signOne.call(
+      httpSigningService(),
+      {},
+      'https://pods.example/alice',
+      'https://pods.example/alice#main-key",algorithm="none',
+      privateKey,
+      {
+        requestId: 'keyid-injection',
+        method: 'GET',
+        profile: 'ap_get_v1',
+        target: { host: 'remote.example', path: '/actor' }
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatchObject({ code: 'KEY_UNAVAILABLE', retryable: false });
+  });
+});
+
 describe('signing HTTP date replay protection', () => {
   const now = Date.parse('Mon, 17 Aug 2026 20:00:00 GMT');
 
@@ -116,17 +246,11 @@ describe('signing HTTP date replay protection', () => {
   });
 
   test('service boundary rejects malformed caller Date before signing', async () => {
-    const { privateKey } = crypto.generateKeyPairSync('rsa', {
+    const { privateKey: datePrivateKey } = crypto.generateKeyPairSync('rsa', {
       modulusLength: 1024,
       publicKeyEncoding: { type: 'spki', format: 'pem' },
       privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
     });
-    const service = {
-      settings: { limits: { maxBodyBytes: 1024, maxClockSkewSeconds: 300 }, profiles: signingService.settings.profiles },
-      _err: signingService.methods._err,
-      _parseBodyBytes: signingService.methods._parseBodyBytes,
-      _validateDateSkew: signingService.methods._validateDateSkew
-    };
     const request = {
       requestId: 'date-negative',
       method: 'GET',
@@ -136,11 +260,11 @@ describe('signing HTTP date replay protection', () => {
     };
 
     await expect(signingService.methods._signOne.call(
-      service,
+      httpSigningService(),
       {},
       'https://pods.example/alice',
       'https://pods.example/alice#main-key',
-      privateKey,
+      datePrivateKey,
       request
     )).resolves.toEqual({
       requestId: 'date-negative',
@@ -219,6 +343,13 @@ describe('ATProto provisioning authority binding', () => {
       { webId: canonicalAccountId },
       { meta: { requestId: 'req-1', dataset: 'alice-dataset', webId: canonicalAccountId } }
     );
+    expect(ctx.call).toHaveBeenNthCalledWith(4, 'identitybindings.upsert', expect.objectContaining({
+      canonicalAccountId,
+      webId: canonicalAccountId,
+      atprotoSource: 'local',
+      atprotoManaged: true,
+      status: 'active'
+    }));
   });
 
   test('uses the authoritative local account dataset for commit-key reads', async () => {
@@ -233,7 +364,7 @@ describe('ATProto provisioning authority binding', () => {
       },
       meta: { requestId: 'commit-read' },
       call: jest.fn()
-        .mockResolvedValueOnce({ canonicalAccountId, atprotoDid: 'did:plc:alice', atSigningKeyRef: 'commit-key' })
+        .mockResolvedValueOnce(activeManagedBinding(canonicalAccountId, { atSigningKeyRef: 'commit-key' }))
         .mockResolvedValueOnce({ webId: canonicalAccountId, username: 'alice-dataset' })
         .mockResolvedValueOnce({ privateKeyPem: privateKey })
     };
@@ -257,7 +388,7 @@ describe('ATProto provisioning authority binding', () => {
       },
       meta: { requestId: 'plc-read' },
       call: jest.fn()
-        .mockResolvedValueOnce({ canonicalAccountId, atprotoDid: 'did:plc:alice', atRotationKeyRef: 'rotation-key' })
+        .mockResolvedValueOnce(activeManagedBinding(canonicalAccountId, { atRotationKeyRef: 'rotation-key' }))
         .mockResolvedValueOnce({ webId: canonicalAccountId, username: 'alice-dataset' })
         .mockResolvedValueOnce({ privateKeyPem: privateKey })
     };
@@ -276,7 +407,7 @@ describe('ATProto provisioning authority binding', () => {
       params: { canonicalAccountId, purpose: 'commit' },
       meta: { requestId: 'public-read' },
       call: jest.fn()
-        .mockResolvedValueOnce({ canonicalAccountId, atprotoDid: 'did:plc:alice', atSigningKeyRef: 'commit-key' })
+        .mockResolvedValueOnce(activeManagedBinding(canonicalAccountId, { atSigningKeyRef: 'commit-key' }))
         .mockResolvedValueOnce({ webId: canonicalAccountId, username: 'alice-dataset' })
         .mockResolvedValueOnce({ publicKeyMultibase: 'zExamplePublicKey' })
     };
@@ -287,5 +418,51 @@ describe('ATProto provisioning authority binding', () => {
     expect(ctx.call).toHaveBeenNthCalledWith(3, 'keys.getAtprotoKeyPair', { keyRef: 'commit-key' }, {
       meta: { requestId: 'public-read', dataset: 'alice-dataset', webId: canonicalAccountId }
     });
+  });
+
+  test.each([
+    ['inactive', activeManagedBinding('https://pods.example/alice', { status: 'disabled', atSigningKeyRef: 'commit-key' }), 'IDENTITY_BINDING_INACTIVE'],
+    ['external', activeManagedBinding('https://pods.example/alice', { atprotoSource: 'external', atSigningKeyRef: 'commit-key' }), 'IDENTITY_BINDING_NOT_MANAGED'],
+    ['unmanaged', activeManagedBinding('https://pods.example/alice', { atprotoManaged: false, atSigningKeyRef: 'commit-key' }), 'IDENTITY_BINDING_NOT_MANAGED']
+  ])('rejects %s bindings before reading private key material', async (_name, binding, expectedType) => {
+    const canonicalAccountId = 'https://pods.example/alice';
+    const ctx = {
+      params: {
+        canonicalAccountId,
+        did: 'did:plc:alice',
+        unsignedCommitBytesBase64: Buffer.from('commit').toString('base64'),
+        rev: '3k-test'
+      },
+      meta: {},
+      call: jest.fn().mockResolvedValueOnce(binding)
+    };
+    const service = atprotoActionService();
+
+    await expect(signingService.actions.signAtprotoCommit.handler.call(service, ctx)).rejects.toMatchObject({
+      code: 403,
+      type: expectedType
+    });
+    expect(ctx.call).toHaveBeenCalledTimes(1);
+  });
+
+  test('rejects malformed base64 before touching AT private key material', async () => {
+    const canonicalAccountId = 'https://pods.example/alice';
+    const ctx = {
+      params: {
+        canonicalAccountId,
+        did: 'did:plc:alice',
+        unsignedCommitBytesBase64: 'not base64!!!',
+        rev: '3k-test'
+      },
+      meta: {},
+      call: jest.fn().mockResolvedValueOnce(activeManagedBinding(canonicalAccountId, { atSigningKeyRef: 'commit-key' }))
+    };
+    const service = atprotoActionService();
+
+    await expect(signingService.actions.signAtprotoCommit.handler.call(service, ctx)).rejects.toMatchObject({
+      code: 400,
+      type: 'INVALID_INPUT'
+    });
+    expect(ctx.call).toHaveBeenCalledTimes(1);
   });
 });
