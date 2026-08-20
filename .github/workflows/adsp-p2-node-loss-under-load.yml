@@ -335,6 +335,10 @@ jobs:
         if: always()
         run: |
           set +e
+          if [[ ! -s measurements/adsp-p2-node-loss/actors.json ]]; then
+            echo 'Semantic probe skipped: canonical provisioning did not complete.'
+            exit 0
+          fi
           files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
           docker compose $files run --rm -T --no-deps --entrypoint node \
             -e ADSP_P2_NAMESPACE="$ADSP_P2_NAMESPACE" \
