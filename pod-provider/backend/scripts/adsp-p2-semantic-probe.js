@@ -11,6 +11,7 @@ const {
 
 const DEFAULT_TRANSPORTER_URL = 'redis://redis:6379/12';
 const DEFAULT_TIMEOUT_MS = 30000;
+const DEFAULT_STOP_TIMEOUT_MS = 5000;
 const ACTIVITYSTREAMS_CONTEXT_URI = 'https://www.w3.org/ns/activitystreams';
 const ACTIVITYSTREAMS_NAMESPACE = 'https://www.w3.org/ns/activitystreams#';
 const ACTIVITYSTREAMS_REQUIRED_TYPES = [
@@ -294,6 +295,23 @@ async function startBrokerWithin(broker, timeoutMs) {
   }
 }
 
+async function stopBrokerWithin(broker, timeoutMs = DEFAULT_STOP_TIMEOUT_MS) {
+  let timer;
+  try {
+    await Promise.race([
+      broker.stop(),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Timed out stopping semantic-probe broker after ${timeoutMs}ms`)),
+          timeoutMs
+        );
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function runProbe({ namespace, transporterUrl, timeoutMs = DEFAULT_TIMEOUT_MS, nodes = EXPECTED_NODES }) {
   const broker = new ServiceBroker({
     nodeID: `adsp-p2-semantic-probe-${process.pid}-${Date.now()}`,
@@ -329,9 +347,9 @@ async function runProbe({ namespace, transporterUrl, timeoutMs = DEFAULT_TIMEOUT
   } finally {
     if (startAttempted) {
       try {
-        await broker.stop();
+        await stopBrokerWithin(broker);
       } catch {
-        // The primary probe/start error remains authoritative.
+        // The primary probe/start error remains authoritative, and cleanup is bounded.
       }
     }
   }
@@ -362,6 +380,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  DEFAULT_STOP_TIMEOUT_MS,
   ACTIVITYSTREAMS_CONTEXT_URI,
   ACTIVITYSTREAMS_NAMESPACE,
   ACTIVITYSTREAMS_REQUIRED_TYPES,
@@ -377,5 +396,6 @@ module.exports = {
   summarizeExpandedTypes,
   semanticProbePasses,
   startBrokerWithin,
+  stopBrokerWithin,
   runProbe
 };
