@@ -9,7 +9,7 @@ const ACTION_NAME = 'ldp.registry.register';
 const PATCH_MARKER = 'ADSP-P2_LOCAL_LDP_REGISTRY_BOOTSTRAP';
 const LOCAL_READY_TIMEOUT_MS = 30000;
 const LOCAL_READY_POLL_MS = 25;
-const ONTOLOGY_PENDING_PATTERN = /Could not expand (?:all types|predicate)/u;
+const ONTOLOGY_PENDING_PATTERN = /(?:Could not expand (?:all types|predicate)|No registered ontology found for resourceType)/u;
 
 function findPackageRoot() {
   let current = path.dirname(require.resolve(EXPECTED_PACKAGE));
