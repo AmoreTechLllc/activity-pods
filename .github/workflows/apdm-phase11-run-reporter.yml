@@ -12,6 +12,8 @@ on:
       - master
     paths:
       - '.github/workflows/apdm-phase11-run-reporter.yml'
+  issue_comment:
+    types: [created]
 
 permissions:
   actions: read
@@ -46,7 +48,11 @@ jobs:
           fi
 
   backfill-frozen-head:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'issue_comment' && github.event.issue.number == 78 && github.event.comment.body == '/apdm-phase11-backfill')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
