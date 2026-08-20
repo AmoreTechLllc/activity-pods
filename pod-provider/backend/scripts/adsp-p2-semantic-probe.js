@@ -182,6 +182,23 @@ function semanticProbePasses(node) {
   );
 }
 
+async function startBrokerWithin(broker, timeoutMs) {
+  let timer;
+  try {
+    await Promise.race([
+      broker.start(),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Timed out starting semantic-probe broker after ${timeoutMs}ms`)),
+          timeoutMs
+        );
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function runProbe({ namespace, transporterUrl, timeoutMs = DEFAULT_TIMEOUT_MS, nodes = EXPECTED_NODES }) {
   const broker = new ServiceBroker({
     nodeID: `adsp-p2-semantic-probe-${process.pid}-${Date.now()}`,
@@ -196,8 +213,10 @@ async function runProbe({ namespace, transporterUrl, timeoutMs = DEFAULT_TIMEOUT
     registry: { preferLocal: true }
   });
 
-  await broker.start();
+  let startAttempted = false;
   try {
+    startAttempted = true;
+    await startBrokerWithin(broker, timeoutMs);
     for (const actionName of REQUIRED_ACTIONS) {
       await waitForExactActionNodes(broker, actionName, nodes, timeoutMs);
     }
@@ -212,7 +231,13 @@ async function runProbe({ namespace, transporterUrl, timeoutMs = DEFAULT_TIMEOUT
       nodes: nodeResults
     };
   } finally {
-    await broker.stop();
+    if (startAttempted) {
+      try {
+        await broker.stop();
+      } catch {
+        // The primary probe/start error remains authoritative.
+      }
+    }
   }
 }
 
@@ -250,5 +275,6 @@ module.exports = {
   summarizeContext,
   summarizeCachedDocument,
   semanticProbePasses,
+  startBrokerWithin,
   runProbe
 };
