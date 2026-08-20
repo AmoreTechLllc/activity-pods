@@ -10,14 +10,24 @@ function appendJsonLine(outputPath, record) {
   fs.appendFileSync(outputPath, `${JSON.stringify(record)}\n`, 'utf8');
 }
 
+function reportEvidenceError(callback, error) {
+  try {
+    callback(error);
+  } catch (_ignored) {
+    // Evidence callbacks cannot become an application failure source.
+  }
+}
+
 /**
  * Evidence-only middleware used by ADSP fault-injection fixtures.
  *
- * When enabled it records the exact moment a selected local action has entered
- * a concrete broker process. Writes are deliberately best-effort: evidence
- * instrumentation must never alter ActivityPods request success/failure
- * semantics. Production is unaffected unless the explicit evidence flag and
- * output path are both supplied.
+ * Normal evidence mode records root entry and never changes request semantics.
+ * A dedicated fault lane may additionally select one request prefix for an
+ * intentional post-action response hold: the real action is awaited first,
+ * then a marker is written and the middleware never returns. SIGKILL at that
+ * marker deterministically reproduces the commit-complete / response-unknown
+ * ambiguity without changing production behavior. Both modes are disabled by
+ * default and require explicit evidence configuration.
  */
 function AdspRootEntryEvidenceMiddleware(options = {}) {
   if (options.enabled !== true) return null;
@@ -27,7 +37,26 @@ function AdspRootEntryEvidenceMiddleware(options = {}) {
 
   const actionName = options.actionName || DEFAULT_ACTION;
   const nodeID = options.nodeID || process.env.SEMAPPS_MOLECULER_NODE_ID || null;
+  const holdAfterAction = options.holdAfterAction === true;
+  const holdRequestPrefix = String(options.holdRequestPrefix || '');
+  if (holdAfterAction && !holdRequestPrefix) {
+    throw new Error('ADSP root response hold requires a non-empty holdRequestPrefix');
+  }
   const onEvidenceError = typeof options.onEvidenceError === 'function' ? options.onEvidenceError : () => {};
+
+  function record(phase, requestId, extra = {}) {
+    const now = Date.now();
+    appendJsonLine(outputPath, {
+      version: 1,
+      phase,
+      action: actionName,
+      requestId,
+      nodeID,
+      observedAt: new Date(now).toISOString(),
+      observedAtEpochMs: now,
+      ...extra
+    });
+  }
 
   return {
     name: 'AdspRootEntryEvidenceMiddleware',
@@ -35,22 +64,29 @@ function AdspRootEntryEvidenceMiddleware(options = {}) {
       if (action?.name !== actionName) return next;
 
       return async function adspRootEntryEvidenceAction(ctx) {
-        try {
-          appendJsonLine(outputPath, {
-            version: 1,
-            phase: 'ADSP-P2-ROOT-ENTRY',
-            action: actionName,
-            requestId: (ctx && (ctx.requestID || ctx.id)) || null,
-            nodeID,
-            enteredAt: new Date().toISOString(),
-            enteredAtEpochMs: Date.now()
-          });
-        } catch (error) {
+        const requestId = (ctx && (ctx.requestID || ctx.id)) || null;
+        const shouldHold = holdAfterAction && typeof requestId === 'string' && requestId.startsWith(holdRequestPrefix);
+
+        if (shouldHold) {
+          const result = await next(ctx);
           try {
-            onEvidenceError(error);
-          } catch (_ignored) {
-            // Evidence reporting cannot become an application failure source.
+            record('ADSP-P2-ROOT-ENTRY', requestId, {
+              boundary: 'root-action-complete-response-held'
+            });
+          } catch (error) {
+            reportEvidenceError(onEvidenceError, error);
           }
+          // The dedicated fault workflow kills this process after observing the
+          // marker. Do not add a timer or synthetic error: either SIGKILL occurs
+          // at the proven ambiguous boundary or the evidence lane times out.
+          await new Promise(() => {});
+          return result;
+        }
+
+        try {
+          record('ADSP-P2-ROOT-ENTRY', requestId, { boundary: 'root-action-entry' });
+        } catch (error) {
+          reportEvidenceError(onEvidenceError, error);
         }
         return next(ctx);
       };
