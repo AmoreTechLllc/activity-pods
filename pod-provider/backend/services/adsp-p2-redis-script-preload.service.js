@@ -3,7 +3,7 @@
 const { preloadBullScripts } = require('../scripts/adsp-p2-preload-bull-scripts');
 
 module.exports = {
-  name: 'adsp-p2-redis-script-preload',
+  name: 'adspP2RedisScriptPreload',
 
   async started() {
     if (process.env.SEMAPPS_ADSP_PRELOAD_BULL_REDIS_SCRIPTS !== 'true') return;
