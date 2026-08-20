@@ -1,0 +1,94 @@
+name: APDM Phase 11 exact dispatcher
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.issue.number == 78 &&
+      github.event.comment.user.login == github.repository_owner &&
+      github.event.comment.body == '/apdm-phase11-start'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EXPECTED_SHA: 8da194836d41aa618b40e21c9e6ca28f6a5e00d7
+      EXPECTED_BRANCH: agent/apdm-phase11-query-attribution
+      WORKFLOW_FILE: apdm-phase11-query-attribution.yml
+    steps:
+      - name: Verify frozen PR head and dispatch exact Phase 11 run
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pr="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/78")"
+          current_sha="$(jq -r '.head.sha' <<<"${pr}")"
+          current_branch="$(jq -r '.head.ref' <<<"${pr}")"
+          [[ "${current_sha}" == "${EXPECTED_SHA}" ]] || {
+            echo "PR #78 head moved: ${current_sha} != ${EXPECTED_SHA}" >&2
+            exit 1
+          }
+          [[ "${current_branch}" == "${EXPECTED_BRANCH}" ]] || {
+            echo "PR #78 branch moved: ${current_branch} != ${EXPECTED_BRANCH}" >&2
+            exit 1
+          }
+
+          find_exact_run() {
+            gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_FILE}/runs?branch=${EXPECTED_BRANCH}&event=workflow_dispatch&per_page=100" \
+              --jq ".workflow_runs | map(select(.head_sha == \"${EXPECTED_SHA}\" and .head_branch == \"${EXPECTED_BRANCH}\")) | sort_by(.created_at) | reverse | .[0].id // empty"
+          }
+
+          run_id="$(find_exact_run)"
+          if [[ "${run_id}" =~ ^[0-9]+$ ]]; then
+            run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"
+            status="$(jq -r '.status' <<<"${run}")"
+            attempt="$(jq -r '.run_attempt' <<<"${run}")"
+            conclusion="$(jq -r '.conclusion // "pending"' <<<"${run}")"
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/78/comments" \
+              -f body="APDM Phase 11 exact dispatcher: existing run \`${run_id}\`, exact source \`${EXPECTED_SHA}\`, attempt \`${attempt}\`, status \`${status}\`, conclusion \`${conclusion}\`. No duplicate dispatch was created." >/dev/null
+            exit 0
+          fi
+
+          dispatch_started_at="$(date -u +%s)"
+          jq -n --arg ref "${EXPECTED_BRANCH}" '{ref:$ref,inputs:{samples:"3",warmups:"1"}}' | \
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_FILE}/dispatches" --input - >/dev/null
+
+          run_id=''
+          for _ in $(seq 1 120); do
+            candidate="$(find_exact_run)"
+            if [[ "${candidate}" =~ ^[0-9]+$ ]]; then
+              run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate}")"
+              created_at="$(jq -r '.created_at' <<<"${run}")"
+              created_epoch="$(date -u -d "${created_at}" +%s)"
+              if (( created_epoch >= dispatch_started_at - 5 )); then
+                run_id="${candidate}"
+                break
+              fi
+            fi
+            sleep 5
+          done
+
+          [[ "${run_id}" =~ ^[0-9]+$ ]] || {
+            echo "Dispatch accepted but exact Phase 11 run did not become discoverable" >&2
+            exit 1
+          }
+
+          run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"
+          run_sha="$(jq -r '.head_sha' <<<"${run}")"
+          run_branch="$(jq -r '.head_branch' <<<"${run}")"
+          run_attempt="$(jq -r '.run_attempt' <<<"${run}")"
+          run_status="$(jq -r '.status' <<<"${run}")"
+          [[ "${run_sha}" == "${EXPECTED_SHA}" ]] || exit 1
+          [[ "${run_branch}" == "${EXPECTED_BRANCH}" ]] || exit 1
+          [[ "${run_attempt}" == '1' ]] || exit 1
+
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/78/comments" \
+            -f body="APDM Phase 11 exact dispatcher: started run \`${run_id}\` at exact frozen source \`${run_sha}\`, attempt \`1\`, status \`${run_status}\`. The evidence branch was not modified." >/dev/null
