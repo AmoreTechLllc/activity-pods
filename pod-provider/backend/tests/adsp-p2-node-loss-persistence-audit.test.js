@@ -20,6 +20,13 @@ function fakeResponse(count, ok = true, status = 200) {
   };
 }
 
+function countForExactMarker(counts, query) {
+  for (const [requestId, count] of counts.entries()) {
+    if (query.includes(JSON.stringify(`ADSP P2 node-loss ${requestId}`))) return count;
+  }
+  throw new Error(`No synthetic persistence count matched query: ${query}`);
+}
+
 describe('ADSP P2 node-loss persistence audit', () => {
   const result = {
     victimRootEntry: { requestId: 'fault-rejected' },
@@ -74,10 +81,8 @@ describe('ADSP P2 node-loss persistence audit', () => {
       ['fault-rejected-other', 0]
     ]);
     const fetchImpl = jest.fn(async (_url, options) => {
-      const body = new URLSearchParams(options.body);
-      const query = body.get('query');
-      const requestId = [...counts.keys()].find(id => query.includes(id));
-      return fakeResponse(counts.get(requestId));
+      const query = new URLSearchParams(options.body).get('query');
+      return fakeResponse(countForExactMarker(counts, query));
     });
 
     const audit = await auditPersistence({ result, dataset: 'alice', fetchImpl });
@@ -101,8 +106,7 @@ describe('ADSP P2 node-loss persistence audit', () => {
     ]);
     const fetchImpl = jest.fn(async (_url, options) => {
       const query = new URLSearchParams(options.body).get('query');
-      const requestId = [...counts.keys()].find(id => query.includes(id));
-      return fakeResponse(counts.get(requestId));
+      return fakeResponse(countForExactMarker(counts, query));
     });
 
     const audit = await auditPersistence({ result, dataset: 'alice', fetchImpl });
