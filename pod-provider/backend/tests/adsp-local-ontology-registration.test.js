@@ -14,6 +14,12 @@ function createService({ configured = ['rdfs', 'semapps'], present = ['rdfs', 's
   };
 }
 
+function wireMiddleware(options, broker, next = jest.fn()) {
+  const middleware = AdspLocalOntologyRegistrationMiddleware(options);
+  middleware.created(broker);
+  return { middleware, wrapped: middleware.call(next), next };
+}
+
 describe('ADSP distributed local ontology registration middleware', () => {
   test('is absent when disabled', () => {
     expect(AdspLocalOntologyRegistrationMiddleware({ enabled: false })).toBeNull();
@@ -27,11 +33,10 @@ describe('ADSP distributed local ontology registration middleware', () => {
     expect(isLocalOntologyBaselineReady(ready)).toBe(true);
   });
 
-  test('passes unrelated broker calls through unchanged', async () => {
+  test('captures the broker through the documented middleware lifecycle', async () => {
     const next = jest.fn(async (...args) => args);
     const broker = { getLocalService: jest.fn() };
-    const middleware = AdspLocalOntologyRegistrationMiddleware({ enabled: true });
-    const wrapped = middleware.call.call(broker, next);
+    const { wrapped } = wireMiddleware({ enabled: true }, broker, next);
 
     await expect(wrapped('activitypub.outbox.post', { value: 1 }, { timeout: 50 })).resolves.toEqual([
       'activitypub.outbox.post',
@@ -41,13 +46,25 @@ describe('ADSP distributed local ontology registration middleware', () => {
     expect(broker.getLocalService).not.toHaveBeenCalled();
   });
 
+  test('fails closed if an ontology mutation somehow runs before broker creation', async () => {
+    const middleware = AdspLocalOntologyRegistrationMiddleware({ enabled: true });
+    const wrapped = middleware.call(jest.fn());
+    await expect(wrapped('ontologies.register', { prefix: 'as' })).rejects.toThrow(
+      /middleware broker is not initialized/u
+    );
+  });
+
+  test('rejects an invalid broker at middleware creation', () => {
+    const middleware = AdspLocalOntologyRegistrationMiddleware({ enabled: true });
+    expect(() => middleware.created({})).toThrow(/requires a Moleculer broker/u);
+  });
+
   test('routes ontology registration directly to the ready local service', async () => {
     const register = jest.fn(async (params, opts) => ({ params, opts }));
     const service = createService({ register });
     const next = jest.fn();
     const broker = { getLocalService: jest.fn(() => service) };
-    const middleware = AdspLocalOntologyRegistrationMiddleware({ enabled: true });
-    const wrapped = middleware.call.call(broker, next);
+    const { wrapped } = wireMiddleware({ enabled: true }, broker, next);
 
     const result = await wrapped(
       'ontologies.register',
@@ -65,8 +82,7 @@ describe('ADSP distributed local ontology registration middleware', () => {
     const register = jest.fn(async params => params);
     const service = createService({ present: [], register });
     const broker = { getLocalService: jest.fn(() => service) };
-    const middleware = AdspLocalOntologyRegistrationMiddleware({ enabled: true, timeoutMs: 200, pollMs: 1 });
-    const wrapped = middleware.call.call(broker, jest.fn());
+    const { wrapped } = wireMiddleware({ enabled: true, timeoutMs: 200, pollMs: 1 }, broker);
 
     setTimeout(() => {
       service.ontologies.rdfs = { prefix: 'rdfs' };
@@ -80,8 +96,7 @@ describe('ADSP distributed local ontology registration middleware', () => {
   test('fails closed when the local baseline never becomes ready', async () => {
     const service = createService({ present: [] });
     const broker = { getLocalService: jest.fn(() => service) };
-    const middleware = AdspLocalOntologyRegistrationMiddleware({ enabled: true, timeoutMs: 5, pollMs: 1 });
-    const wrapped = middleware.call.call(broker, jest.fn());
+    const { wrapped } = wireMiddleware({ enabled: true, timeoutMs: 5, pollMs: 1 }, broker);
 
     await expect(wrapped('ontologies.register', { prefix: 'as' })).rejects.toThrow(
       /Local ontologies baseline did not become ready/u
