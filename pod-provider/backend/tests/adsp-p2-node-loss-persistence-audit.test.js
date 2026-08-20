@@ -2,6 +2,7 @@
 
 const {
   auditPersistence,
+  buildFusekiAuthorization,
   buildMarkerQuery,
   collectOutcomeExpectations,
   datasetQueryUrl
@@ -79,6 +80,41 @@ describe('ADSP P2 node-loss persistence audit', () => {
     expect(() => datasetQueryUrl('http://fuseki_test:3030/', '../admin')).toThrow(/Unsafe Fuseki dataset identifier/u);
   });
 
+  test('builds basic authorization only from a complete safe credential pair', () => {
+    expect(buildFusekiAuthorization()).toBeNull();
+    expect(buildFusekiAuthorization('admin', 'admin')).toBe(`Basic ${Buffer.from('admin:admin').toString('base64')}`);
+    expect(() => buildFusekiAuthorization('admin', undefined)).toThrow(/both username and password/u);
+    expect(() => buildFusekiAuthorization(undefined, 'admin')).toThrow(/both username and password/u);
+    expect(() => buildFusekiAuthorization('bad:user', 'admin')).toThrow(/Unsafe Fuseki audit username/u);
+    expect(() => buildFusekiAuthorization('admin', 'bad\npassword')).toThrow(/Unsafe Fuseki audit password/u);
+  });
+
+  test('authenticates direct authoritative queries without putting credentials in URL or body', async () => {
+    const fetchImpl = jest.fn(async (url, options) => {
+      expect(url).toBe('http://fuseki_test:3030/alice/query');
+      expect(url).not.toContain('sensitive-password');
+      expect(options.body).not.toContain('sensitive-password');
+      expect(options.headers.authorization).toBe(`Basic ${Buffer.from('admin:sensitive-password').toString('base64')}`);
+      return fakeResponse(1);
+    });
+
+    const audit = await auditPersistence({
+      result: {
+        victimRootEntry: { requestId: 'victim' },
+        faultBurst: { accepted: [], rejected: [{ requestId: 'victim' }] },
+        recovery: { results: [] },
+        rejoin: { results: [] }
+      },
+      dataset: 'alice',
+      fusekiUser: 'admin',
+      fusekiPassword: 'sensitive-password',
+      fetchImpl
+    });
+    expect(audit.authenticatedQuery).toBe(true);
+    expect(audit.fusekiBase).toBe('http://fuseki_test:3030/');
+    expect(JSON.stringify(audit)).not.toContain('sensitive-password');
+  });
+
   test('requires accepted and targeted ambiguous mutations exactly once', async () => {
     const counts = new Map([
       ['fault-accepted', 1],
@@ -94,6 +130,7 @@ describe('ADSP P2 node-loss persistence audit', () => {
 
     const audit = await auditPersistence({ result, dataset: 'alice', fetchImpl });
     expect(audit.passed).toBe(true);
+    expect(audit.authenticatedQuery).toBe(false);
     expect(audit.requestCount).toBe(5);
     expect(audit.targetedAmbiguousRequestId).toBe('fault-rejected');
     expect(audit.targetedAmbiguousCallerOutcome).toBe('rejected');
