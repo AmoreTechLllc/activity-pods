@@ -6,22 +6,26 @@ on:
       - '.github/workflows/adsp-p2-node-loss-under-load.yml'
       - 'pod-provider/backend/package.json'
       - 'pod-provider/backend/moleculer.config.js'
+      - 'pod-provider/backend/middlewares/adsp-local-ontology-registration.js'
       - 'pod-provider/backend/middlewares/adsp-root-entry-evidence.js'
       - 'pod-provider/backend/scripts/adsp-p2-node-loss-load.js'
       - 'pod-provider/backend/scripts/adsp-p2-node-loss-persistence-audit.js'
       - 'pod-provider/backend/scripts/adsp-p2-node-loss-redis-audit.js'
       - 'pod-provider/backend/scripts/adsp-p2-semantic-probe.js'
-      - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-ontology-bootstrap.js'
       - 'pod-provider/backend/scripts/patch-semapps-jsonld-distributed-context-cache.js'
+      - 'pod-provider/backend/scripts/patch-semapps-jsonld-distributed-locality.js'
+      - 'pod-provider/backend/scripts/patch-semapps-ldp-distributed-semantic-locality.js'
       - 'pod-provider/backend/scripts/patch-semapps-ldp-local-registry-bootstrap.js'
       - 'pod-provider/backend/scripts/patch-semapps-ontologies-distributed-cache.js'
+      - 'pod-provider/backend/tests/adsp-local-ontology-registration.test.js'
       - 'pod-provider/backend/tests/adsp-root-entry-evidence.test.js'
       - 'pod-provider/backend/tests/adsp-p2-node-loss-load.test.js'
       - 'pod-provider/backend/tests/adsp-p2-node-loss-persistence-audit.test.js'
       - 'pod-provider/backend/tests/adsp-p2-node-loss-redis-audit.test.js'
       - 'pod-provider/backend/tests/adsp-p2-semantic-probe.test.js'
-      - 'pod-provider/backend/tests/patch-semapps-activitypub-local-ontology-bootstrap.test.js'
       - 'pod-provider/backend/tests/patch-semapps-jsonld-distributed-context-cache.test.js'
+      - 'pod-provider/backend/tests/patch-semapps-jsonld-distributed-locality.test.js'
+      - 'pod-provider/backend/tests/patch-semapps-ldp-distributed-semantic-locality.test.js'
       - 'pod-provider/backend/tests/patch-semapps-ldp-local-registry-bootstrap.test.js'
       - 'pod-provider/backend/tests/patch-semapps-ontologies-distributed-cache.test.js'
       - 'pod-provider/docker-compose-adsp-p2-horizontal.yml'
@@ -86,15 +90,19 @@ jobs:
           set -euo pipefail
           docker run --rm -i apdm-phase8-backend:local node - <<'NODE'
           const assert = require('node:assert/strict');
+          const localOntologyRegistration = require('./middlewares/adsp-local-ontology-registration');
           const middleware = require('./middlewares/adsp-root-entry-evidence');
           const load = require('./scripts/adsp-p2-node-loss-load');
           const persistence = require('./scripts/adsp-p2-node-loss-persistence-audit');
           const redis = require('./scripts/adsp-p2-node-loss-redis-audit');
           const semanticProbe = require('./scripts/adsp-p2-semantic-probe');
           const contextCachePatch = require('./scripts/patch-semapps-jsonld-distributed-context-cache');
+          const jsonldLocalityPatch = require('./scripts/patch-semapps-jsonld-distributed-locality');
+          const ldpLocalityPatch = require('./scripts/patch-semapps-ldp-distributed-semantic-locality');
           const ontologyCachePatch = require('./scripts/patch-semapps-ontologies-distributed-cache');
-          const activityPubOntologyPatch = require('./scripts/patch-semapps-activitypub-local-ontology-bootstrap');
           const ldpBootstrapPatch = require('./scripts/patch-semapps-ldp-local-registry-bootstrap');
+          assert.equal(localOntologyRegistration({ enabled: false }), null);
+          assert.equal(typeof localOntologyRegistration.isLocalOntologyBaselineReady, 'function');
           assert.equal(middleware({ enabled: false }), null);
           assert.equal(load.EXPECTED_VICTIM_BOUNDARY, 'root-action-complete-response-held');
           assert.equal(typeof load.waitForExactVictimRootEntry, 'function');
@@ -105,11 +113,14 @@ jobs:
           const contextPatchResult = contextCachePatch.applyPatch();
           assert.equal(contextPatchResult.results.length, 2);
           assert.equal(contextPatchResult.results.every(result => result.changed === false), true);
+          const jsonldLocalityResult = jsonldLocalityPatch.applyPatch();
+          assert.equal(jsonldLocalityResult.results.length, 4);
+          assert.equal(jsonldLocalityResult.results.every(result => result.changed === false), true);
+          const ldpLocalityResult = ldpLocalityPatch.applyPatch();
+          assert.equal(ldpLocalityResult.changed, false);
           const ontologyPatchResult = ontologyCachePatch.applyPatch();
           assert.equal(ontologyPatchResult.results.length, 5);
           assert.equal(ontologyPatchResult.results.every(result => result.changed === false), true);
-          const activityPubPatchResult = activityPubOntologyPatch.applyPatch();
-          assert.equal(activityPubPatchResult.changed, false);
           const ldpPatchResult = ldpBootstrapPatch.applyPatch();
           assert.equal(ldpPatchResult.changed, false);
           process.stdout.write('ADSP P2 production-image node-loss modules: OK\n');
@@ -163,7 +174,9 @@ jobs:
             redisStatsResetAfterHarnessAndFourCellStartupBeforeFaultScenario: true,
             distributedJsonldContextActionCachingEnabled: false,
             distributedOntologyReadActionCachingEnabled: false,
-            localActivityPubOntologyBootstrapEnabled: true,
+            distributedJsonldSemanticLocalityEnabled: true,
+            distributedLdpSemanticLocalityEnabled: true,
+            distributedLocalOntologyRegistrationBarrierEnabled: true,
             semanticProbeEnabled: true
           }, null, 2)}\n`);
           NODE
