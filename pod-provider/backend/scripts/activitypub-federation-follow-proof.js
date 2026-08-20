@@ -13,6 +13,12 @@ const DEFAULT_TRANSPORTER_URL = 'redis://127.0.0.1:6379/12';
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.handoff-queued';
 
+function normalizeEntityId(value) {
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value.id || value['@id'] || null;
+  return null;
+}
+
 function validateRemoteActorUri(value) {
   if (typeof value !== 'string' || value.trim() !== value || value.length === 0) {
     throw new Error('remote actor URI must be a non-empty, whitespace-free HTTP(S) URL');
@@ -55,8 +61,8 @@ function createExternalHandoffLatch(broker, senderRef, remoteActorUri, timeoutMs
       [REMOTE_DELIVERY_PLANNED_EVENT]: {
         handler(ctx) {
           const activity = ctx?.params?.activity;
-          if (!senderRef.value || activity?.actor !== senderRef.value || activity?.type !== 'Follow') return;
-          const objectId = typeof activity.object === 'string' ? activity.object : activity.object?.id;
+          if (!senderRef.value || normalizeEntityId(activity?.actor) !== senderRef.value || activity?.type !== 'Follow') return;
+          const objectId = normalizeEntityId(activity?.object);
           if (objectId !== remoteActorUri) return;
           if (timer) clearTimeout(timer);
           resolvePromise(ctx.params);
@@ -128,7 +134,12 @@ async function run({ remoteActorUri, mode, runId }) {
       ? await Promise.all([postPromise, latch.promise])
       : [await postPromise, null];
 
-    if (!postResult || typeof postResult.id !== 'string' || postResult.actor !== sender.webId) {
+    if (
+      !postResult ||
+      typeof postResult.id !== 'string' ||
+      normalizeEntityId(postResult.actor) !== sender.webId ||
+      normalizeEntityId(postResult.object) !== normalizedRemoteActorUri
+    ) {
       throw new Error('ActivityPods outbox did not persist the expected Follow activity');
     }
 
@@ -150,8 +161,8 @@ async function run({ remoteActorUri, mode, runId }) {
       senderUsername: sender.username,
       senderOutbox: sender.outbox,
       remoteActorUri: normalizedRemoteActorUri,
-      durableHandoffQueued: mode === 'external' ? true : false,
-      nativeRemotePostSuppressed: mode === 'external' ? true : false
+      durableHandoffQueued: mode === 'external',
+      nativeRemotePostSuppressed: mode === 'external'
     };
   } finally {
     latch.cancel();
@@ -176,4 +187,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createRunnerBroker, run, validateRemoteActorUri };
+module.exports = { createRunnerBroker, normalizeEntityId, run, validateRemoteActorUri };
