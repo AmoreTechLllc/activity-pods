@@ -24,6 +24,8 @@ ADD backend/scripts/patch-semapps-ldp-special-endpoint-race.js /app/backend/scri
 ADD backend/scripts/patch-semapps-jsonld-distributed-context-cache.js /app/backend/scripts/patch-semapps-jsonld-distributed-context-cache.js
 ADD backend/scripts/patch-semapps-ontologies-distributed-cache.js /app/backend/scripts/patch-semapps-ontologies-distributed-cache.js
 ADD backend/scripts/patch-semapps-activitypub-local-ontology-bootstrap.js /app/backend/scripts/patch-semapps-activitypub-local-ontology-bootstrap.js
+ADD backend/scripts/patch-semapps-jsonld-distributed-locality.js /app/backend/scripts/patch-semapps-jsonld-distributed-locality.js
+ADD backend/scripts/patch-semapps-ldp-distributed-semantic-locality.js /app/backend/scripts/patch-semapps-ldp-distributed-semantic-locality.js
 RUN yarn install && yarn cache clean
 
 ADD backend /app/backend
