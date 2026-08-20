@@ -12,7 +12,8 @@ const {
   summarizeContext,
   summarizeCachedDocument,
   summarizeExpandedTypes,
-  semanticProbePasses
+  semanticProbePasses,
+  stopBrokerWithin
 } = require('../scripts/adsp-p2-semantic-probe');
 
 describe('ADSP P2 semantic readiness probe', () => {
@@ -144,5 +145,13 @@ describe('ADSP P2 semantic readiness probe', () => {
       ...healthy,
       activityStreamsCache: { ...healthy.activityStreamsCache, containsAllRequiredTypes: false }
     })).toBe(false);
+  });
+
+  test('bounds broker cleanup when stop never resolves', async () => {
+    const broker = { stop: jest.fn(() => new Promise(() => {})) };
+    await expect(stopBrokerWithin(broker, 10)).rejects.toThrow(
+      /Timed out stopping semantic-probe broker after 10ms/u
+    );
+    expect(broker.stop).toHaveBeenCalledTimes(1);
   });
 });
