@@ -39,6 +39,8 @@ jobs:
       APDM_P9_CONCURRENCY: '4'
       APDM_P10_DATASET_EXIST_MEMO_ENABLED: 'false'
       ADSP_P2_ROOT_ENTRY_EVIDENCE_ENABLED: 'true'
+      ADSP_P2_VICTIM_HOLD_AFTER_ACTION: 'true'
+      ADSP_P2_VICTIM_HOLD_REQUEST_PREFIX: 'adsp-p2-loss-run-${{ github.run_id }}-${{ github.run_attempt }}-fault-1-'
       REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED: 'false'
 
     steps:
@@ -105,6 +107,8 @@ jobs:
             activityPubRemoteDeliveryMode: 'native',
             datasetExistMemoEnabled: false,
             rootEntryEvidenceEnabled: true,
+            victimResponseHoldAfterRootAction: true,
+            victimHoldRequestPrefix: process.env.ADSP_P2_VICTIM_HOLD_REQUEST_PREFIX,
             callerRetryEnabled: false,
             redisStreamPayloadCompressionEnabled: false
           }, null, 2)}\n`);
