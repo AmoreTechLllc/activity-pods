@@ -3,6 +3,11 @@ name: APDM Phase 11 exact dispatcher
 on:
   issue_comment:
     types: [created]
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/apdm-phase11-exact-dispatch.yml'
 
 permissions:
   actions: write
@@ -13,9 +18,11 @@ permissions:
 jobs:
   dispatch:
     if: >-
-      github.event.issue.number == 78 &&
-      github.event.comment.user.login == github.repository_owner &&
-      github.event.comment.body == '/apdm-phase11-start'
+      github.event_name == 'push' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.number == 78 &&
+       github.event.comment.user.login == github.repository_owner &&
+       github.event.comment.body == '/apdm-phase11-start')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -28,18 +35,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           pr="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/78")"
           current_sha="$(jq -r '.head.sha' <<<"${pr}")"
           current_branch="$(jq -r '.head.ref' <<<"${pr}")"
-          [[ "${current_sha}" == "${EXPECTED_SHA}" ]] || {
-            echo "PR #78 head moved: ${current_sha} != ${EXPECTED_SHA}" >&2
-            exit 1
-          }
-          [[ "${current_branch}" == "${EXPECTED_BRANCH}" ]] || {
-            echo "PR #78 branch moved: ${current_branch} != ${EXPECTED_BRANCH}" >&2
-            exit 1
-          }
+          [[ "${current_sha}" == "${EXPECTED_SHA}" ]] || { echo "PR #78 head moved: ${current_sha} != ${EXPECTED_SHA}" >&2; exit 1; }
+          [[ "${current_branch}" == "${EXPECTED_BRANCH}" ]] || { echo "PR #78 branch moved: ${current_branch} != ${EXPECTED_BRANCH}" >&2; exit 1; }
 
           find_exact_run() {
             gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_FILE}/runs?branch=${EXPECTED_BRANCH}&event=workflow_dispatch&per_page=100" \
@@ -68,19 +68,12 @@ jobs:
               run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate}")"
               created_at="$(jq -r '.created_at' <<<"${run}")"
               created_epoch="$(date -u -d "${created_at}" +%s)"
-              if (( created_epoch >= dispatch_started_at - 5 )); then
-                run_id="${candidate}"
-                break
-              fi
+              if (( created_epoch >= dispatch_started_at - 5 )); then run_id="${candidate}"; break; fi
             fi
             sleep 5
           done
 
-          [[ "${run_id}" =~ ^[0-9]+$ ]] || {
-            echo "Dispatch accepted but exact Phase 11 run did not become discoverable" >&2
-            exit 1
-          }
-
+          [[ "${run_id}" =~ ^[0-9]+$ ]] || { echo "Dispatch accepted but exact Phase 11 run did not become discoverable" >&2; exit 1; }
           run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"
           run_sha="$(jq -r '.head_sha' <<<"${run}")"
           run_branch="$(jq -r '.head_branch' <<<"${run}")"
@@ -89,6 +82,5 @@ jobs:
           [[ "${run_sha}" == "${EXPECTED_SHA}" ]] || exit 1
           [[ "${run_branch}" == "${EXPECTED_BRANCH}" ]] || exit 1
           [[ "${run_attempt}" == '1' ]] || exit 1
-
           gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/78/comments" \
             -f body="APDM Phase 11 exact dispatcher: started run \`${run_id}\` at exact frozen source \`${run_sha}\`, attempt \`1\`, status \`${run_status}\`. The evidence branch was not modified." >/dev/null
