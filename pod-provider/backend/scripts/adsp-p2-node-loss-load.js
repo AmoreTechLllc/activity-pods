@@ -7,6 +7,10 @@ const { performance } = require('node:perf_hooks');
 const { ServiceBroker } = require('moleculer');
 const RdfJSONSerializer = require('../RdfJSONSerializer');
 const {
+  DEFAULT_DISTRIBUTED_HEARTBEAT_INTERVAL,
+  DEFAULT_DISTRIBUTED_HEARTBEAT_TIMEOUT
+} = require('../config/moleculer-fabric');
+const {
   executorName,
   findTraceMatches,
   readJsonLines,
@@ -336,6 +340,8 @@ async function main(argv = process.argv.slice(2)) {
     logger: false,
     requestTimeout: traceTimeoutMs,
     retryPolicy: { enabled: false },
+    heartbeatInterval: DEFAULT_DISTRIBUTED_HEARTBEAT_INTERVAL,
+    heartbeatTimeout: DEFAULT_DISTRIBUTED_HEARTBEAT_TIMEOUT,
     registry: { preferLocal: true }
   });
 
