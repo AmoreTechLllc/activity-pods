@@ -1,6 +1,7 @@
 'use strict';
 
 const {
+  ACTIVITYSTREAMS_NOTE_IRI,
   auditPersistence,
   buildFusekiAuthorization,
   buildMarkerQuery,
@@ -39,9 +40,11 @@ describe('ADSP P2 node-loss persistence audit', () => {
     rejoin: { results: [{ requestId: 'rejoin-1' }] }
   };
 
-  test('builds an exact request-marker SPARQL query', () => {
+  test('counts only authoritative IRI Note resources with the exact request marker', () => {
     const query = buildMarkerQuery('request-123');
     expect(query).toContain('COUNT(DISTINCT ?subject)');
+    expect(query).toContain(`<${ACTIVITYSTREAMS_NOTE_IRI}>`);
+    expect(query).toContain('FILTER(isIRI(?subject))');
     expect(query).toContain('ADSP P2 node-loss request-123');
     expect(query).toContain('GRAPH ?graph');
     expect(query).toContain('STR(?value) =');
@@ -110,12 +113,16 @@ describe('ADSP P2 node-loss persistence audit', () => {
       fusekiPassword: 'sensitive-password',
       fetchImpl
     });
+    expect(audit.version).toBe(2);
     expect(audit.authenticatedQuery).toBe(true);
+    expect(audit.authoritativeResourceType).toBe(ACTIVITYSTREAMS_NOTE_IRI);
+    expect(audit.resourceIdentityRequirement).toBe('iri');
+    expect(audit.records[0].persistedNoteResourceCount).toBe(1);
     expect(audit.fusekiBase).toBe('http://fuseki_test:3030/');
     expect(JSON.stringify(audit)).not.toContain('sensitive-password');
   });
 
-  test('requires accepted and targeted ambiguous mutations exactly once', async () => {
+  test('requires accepted and targeted ambiguous Note resources exactly once', async () => {
     const counts = new Map([
       ['fault-accepted', 1],
       ['recovery-1', 1],
@@ -137,10 +144,11 @@ describe('ADSP P2 node-loss persistence audit', () => {
     expect(audit.targetedAmbiguousCommitPersistedExactlyOnce).toBe(true);
     expect(audit.ambiguousPersistedRejectedCount).toBe(1);
     expect(audit.duplicatePersistedMutationCount).toBe(0);
+    expect(audit.records.every(record => Number.isInteger(record.persistedNoteResourceCount))).toBe(true);
     expect(fetchImpl).toHaveBeenCalledTimes(5);
   });
 
-  test('fails when the targeted ambiguous commit disappears or any request is persisted twice', async () => {
+  test('fails when the targeted ambiguous Note disappears or any request creates two Note IRIs', async () => {
     const counts = new Map([
       ['fault-accepted', 1],
       ['recovery-1', 1],
