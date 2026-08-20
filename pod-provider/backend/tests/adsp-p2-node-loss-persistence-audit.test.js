@@ -22,9 +22,10 @@ function fakeResponse(count, ok = true, status = 200) {
 
 describe('ADSP P2 node-loss persistence audit', () => {
   const result = {
+    victimRootEntry: { requestId: 'fault-rejected' },
     faultBurst: {
       accepted: [{ requestId: 'fault-accepted' }],
-      rejected: [{ requestId: 'fault-rejected' }]
+      rejected: [{ requestId: 'fault-rejected' }, { requestId: 'fault-rejected-other' }]
     },
     recovery: { results: [{ requestId: 'recovery-1' }] },
     rejoin: { results: [{ requestId: 'rejoin-1' }] }
@@ -38,16 +39,25 @@ describe('ADSP P2 node-loss persistence audit', () => {
     expect(query).toContain('STR(?value) =');
   });
 
-  test('collects accepted and rejected cardinality contracts without duplicates', () => {
+  test('makes the held victim commit exactly-once while keeping other rejections zero-or-once', () => {
     expect(collectOutcomeExpectations(result)).toEqual([
-      { requestId: 'fault-accepted', callerOutcome: 'accepted', minCount: 1, maxCount: 1 },
-      { requestId: 'recovery-1', callerOutcome: 'accepted', minCount: 1, maxCount: 1 },
-      { requestId: 'rejoin-1', callerOutcome: 'accepted', minCount: 1, maxCount: 1 },
-      { requestId: 'fault-rejected', callerOutcome: 'rejected', minCount: 0, maxCount: 1 }
+      { requestId: 'fault-accepted', callerOutcome: 'accepted', targetedAmbiguousCommit: false, minCount: 1, maxCount: 1 },
+      { requestId: 'recovery-1', callerOutcome: 'accepted', targetedAmbiguousCommit: false, minCount: 1, maxCount: 1 },
+      { requestId: 'rejoin-1', callerOutcome: 'accepted', targetedAmbiguousCommit: false, minCount: 1, maxCount: 1 },
+      { requestId: 'fault-rejected', callerOutcome: 'rejected', targetedAmbiguousCommit: true, minCount: 1, maxCount: 1 },
+      { requestId: 'fault-rejected-other', callerOutcome: 'rejected', targetedAmbiguousCommit: false, minCount: 0, maxCount: 1 }
     ]);
     expect(() => collectOutcomeExpectations({
+      victimRootEntry: { requestId: 'same' },
       faultBurst: { accepted: [{ requestId: 'same' }], rejected: [{ requestId: 'same' }] }
     })).toThrow(/Duplicate node-loss requestId/u);
+  });
+
+  test('fails closed when the victim request is absent from all outcomes', () => {
+    expect(() => collectOutcomeExpectations({
+      victimRootEntry: { requestId: 'missing-target' },
+      faultBurst: { accepted: [{ requestId: 'different' }], rejected: [] }
+    })).toThrow(/exactly one targeted ambiguous request outcome/u);
   });
 
   test('constructs a bounded dataset query URL and rejects path injection', () => {
@@ -55,12 +65,13 @@ describe('ADSP P2 node-loss persistence audit', () => {
     expect(() => datasetQueryUrl('http://fuseki_test:3030/', '../admin')).toThrow(/Unsafe Fuseki dataset identifier/u);
   });
 
-  test('requires every accepted request exactly once and permits rejected zero-or-once', async () => {
+  test('requires accepted and targeted ambiguous mutations exactly once', async () => {
     const counts = new Map([
       ['fault-accepted', 1],
       ['recovery-1', 1],
       ['rejoin-1', 1],
-      ['fault-rejected', 1]
+      ['fault-rejected', 1],
+      ['fault-rejected-other', 0]
     ]);
     const fetchImpl = jest.fn(async (_url, options) => {
       const body = new URLSearchParams(options.body);
@@ -71,18 +82,22 @@ describe('ADSP P2 node-loss persistence audit', () => {
 
     const audit = await auditPersistence({ result, dataset: 'alice', fetchImpl });
     expect(audit.passed).toBe(true);
-    expect(audit.requestCount).toBe(4);
+    expect(audit.requestCount).toBe(5);
+    expect(audit.targetedAmbiguousRequestId).toBe('fault-rejected');
+    expect(audit.targetedAmbiguousCallerOutcome).toBe('rejected');
+    expect(audit.targetedAmbiguousCommitPersistedExactlyOnce).toBe(true);
     expect(audit.ambiguousPersistedRejectedCount).toBe(1);
     expect(audit.duplicatePersistedMutationCount).toBe(0);
-    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(fetchImpl).toHaveBeenCalledTimes(5);
   });
 
-  test('fails when an accepted request disappears or any request is persisted twice', async () => {
+  test('fails when the targeted ambiguous commit disappears or any request is persisted twice', async () => {
     const counts = new Map([
-      ['fault-accepted', 0],
+      ['fault-accepted', 1],
       ['recovery-1', 1],
       ['rejoin-1', 1],
-      ['fault-rejected', 2]
+      ['fault-rejected', 0],
+      ['fault-rejected-other', 2]
     ]);
     const fetchImpl = jest.fn(async (_url, options) => {
       const query = new URLSearchParams(options.body).get('query');
@@ -92,6 +107,7 @@ describe('ADSP P2 node-loss persistence audit', () => {
 
     const audit = await auditPersistence({ result, dataset: 'alice', fetchImpl });
     expect(audit.passed).toBe(false);
+    expect(audit.targetedAmbiguousCommitPersistedExactlyOnce).toBe(false);
     expect(audit.failures).toHaveLength(2);
     expect(audit.duplicatePersistedMutationCount).toBe(1);
   });
