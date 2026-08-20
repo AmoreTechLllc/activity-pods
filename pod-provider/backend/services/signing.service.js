@@ -352,28 +352,13 @@ module.exports = {
           throw new MoleculerError('canonicalAccountId must be an HTTP(S) WebID without URL credentials', 400, 'INVALID_INPUT');
         }
 
-        let account;
-        try {
-          account = await ctx.call('auth.account.findByWebId', { webId: canonicalAccountId });
-        } catch (e) {
-          throw new MoleculerError('Local account verification unavailable', 503, 'ACCOUNT_AUTHORITY_UNAVAILABLE', {
-            canonicalAccountId,
-            message: e?.message
-          });
-        }
-        if (!account || account.webId !== canonicalAccountId || !account.username) {
-          throw new MoleculerError(
-            'canonicalAccountId is not bound to a local ActivityPods account',
-            403,
-            'ACCOUNT_NOT_LOCAL',
-            { canonicalAccountId }
-          );
-        }
+        const accountAuthority = await this._resolveAtprotoAccountAuthority(ctx, canonicalAccountId);
+        const account = accountAuthority.account;
 
         const slug = accountUrl.pathname.split('/').filter(Boolean).pop() || 'account';
         const did = ctx.params.did || `did:plc:${slug}`;
         const handle = ctx.params.handle || `${slug}.test`;
-        const keyCallMeta = { ...ctx.meta, dataset: account.username, webId };
+        const keyCallMeta = { ...ctx.meta, dataset: accountAuthority.dataset, webId };
 
         const commitKey = await ctx.call('keys.generateSecp256k1Key', { webId }, { meta: keyCallMeta });
         const rotationKey = await ctx.call('keys.generateSecp256k1Key', { webId }, { meta: keyCallMeta });
@@ -416,9 +401,14 @@ module.exports = {
           throw new MoleculerError('atSigningKeyRef not set — AT keys not yet provisioned', 422, 'KEY_UNAVAILABLE', { canonicalAccountId });
         }
 
+        const accountAuthority = await this._resolveAtprotoAccountAuthority(ctx, canonicalAccountId);
         let keyPair;
         try {
-          keyPair = await ctx.call('keys.getAtprotoKeyPair', { keyRef: binding.atSigningKeyRef });
+          keyPair = await ctx.call(
+            'keys.getAtprotoKeyPair',
+            { keyRef: binding.atSigningKeyRef },
+            { meta: { ...ctx.meta, dataset: accountAuthority.dataset, webId: canonicalAccountId } }
+          );
         } catch (e) {
           throw new MoleculerError('AT key lookup failed', 500, 'KEY_UNAVAILABLE', { message: e?.message });
         }
@@ -477,9 +467,14 @@ module.exports = {
           throw new MoleculerError('PLC signing is only allowed for did:plc', 400, 'INVALID_INPUT', { did: resolvedDid });
         }
 
+        const accountAuthority = await this._resolveAtprotoAccountAuthority(ctx, canonicalAccountId);
         let keyPair;
         try {
-          keyPair = await ctx.call('keys.getAtprotoKeyPair', { keyRef: binding.atRotationKeyRef });
+          keyPair = await ctx.call(
+            'keys.getAtprotoKeyPair',
+            { keyRef: binding.atRotationKeyRef },
+            { meta: { ...ctx.meta, dataset: accountAuthority.dataset, webId: canonicalAccountId } }
+          );
         } catch (e) {
           throw new MoleculerError('AT rotation key lookup failed', 500, 'KEY_UNAVAILABLE', { message: e?.message });
         }
@@ -530,9 +525,14 @@ module.exports = {
           );
         }
 
+        const accountAuthority = await this._resolveAtprotoAccountAuthority(ctx, canonicalAccountId);
         let keyPair;
         try {
-          keyPair = await ctx.call('keys.getAtprotoKeyPair', { keyRef });
+          keyPair = await ctx.call(
+            'keys.getAtprotoKeyPair',
+            { keyRef },
+            { meta: { ...ctx.meta, dataset: accountAuthority.dataset, webId: canonicalAccountId } }
+          );
         } catch (e) {
           throw new MoleculerError('AT key lookup failed', 500, 'KEY_UNAVAILABLE', { message: e?.message });
         }
@@ -604,6 +604,30 @@ module.exports = {
 
     _err(r, code, message, retryable) {
       return { requestId: r?.requestId, ok: false, error: { code, message, retryable } };
+    },
+
+    async _resolveAtprotoAccountAuthority(ctx, canonicalAccountId) {
+      let account;
+      try {
+        account = await ctx.call('auth.account.findByWebId', { webId: canonicalAccountId });
+      } catch (e) {
+        throw new MoleculerError('Local account verification unavailable', 503, 'ACCOUNT_AUTHORITY_UNAVAILABLE', {
+          canonicalAccountId,
+          message: e?.message
+        });
+      }
+
+      const dataset = String(account?.username || '').trim();
+      if (!account || account.webId !== canonicalAccountId || !dataset) {
+        throw new MoleculerError(
+          'canonicalAccountId is not bound to a local ActivityPods account',
+          403,
+          'ACCOUNT_NOT_LOCAL',
+          { canonicalAccountId }
+        );
+      }
+
+      return { account, dataset };
     },
 
     async _validateLocalActor(ctx, actorUri) {
