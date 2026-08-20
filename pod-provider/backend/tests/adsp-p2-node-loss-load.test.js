@@ -4,7 +4,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {
+  EXPECTED_VICTIM_BOUNDARY,
   assertExecutorSet,
+  assertTargetedVictimRejected,
   assertUnique,
   findRootEntries,
   readBarrierTimestamp,
@@ -29,6 +31,16 @@ describe('ADSP P2 node-loss load driver', () => {
     expect(() => assertUnique(['a', 'b', 'a'], 'id')).toThrow(/Duplicate id: a/u);
   });
 
+  test('requires the targeted victim call to be caller-rejected exactly once', () => {
+    const rejected = { requestId: 'victim-request', error: { message: 'node disconnected' } };
+    expect(assertTargetedVictimRejected({ accepted: [], rejected: [rejected] }, 'victim-request')).toBe(rejected);
+    expect(() => assertTargetedVictimRejected({
+      accepted: [{ requestId: 'victim-request' }],
+      rejected: []
+    }, 'victim-request')).toThrow(/caller-rejected exactly once/u);
+    expect(() => assertTargetedVictimRejected({ accepted: [], rejected: [] }, 'victim-request')).toThrow(/caller-rejected exactly once/u);
+  });
+
   test('binds fault payload content to the request identity for persistence audit', () => {
     const payload = requestPayload(
       { sender: { outbox: 'https://pod.example/alice/outbox', webId: 'https://pod.example/alice' } },
@@ -40,7 +52,7 @@ describe('ADSP P2 node-loss load driver', () => {
     expect(payload.to).toEqual(['https://pod.example/bob']);
   });
 
-  test('proves the targeted request entered exactly the selected victim', async () => {
+  test('proves the targeted request reached the exact held-response boundary on the selected victim', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-loss-root-'));
     const files = [1, 2, 3, 4].map(index => path.join(directory, `r${index}.jsonl`));
     try {
@@ -48,11 +60,30 @@ describe('ADSP P2 node-loss load driver', () => {
         phase: 'ADSP-P2-ROOT-ENTRY',
         requestId: 'victim-request',
         nodeID: 'adsp-p2-pod-cell-4',
+        boundary: EXPECTED_VICTIM_BOUNDARY,
         enteredAtEpochMs: Date.now()
       });
       const match = await waitForExactVictimRootEntry(files, 'victim-request', 'adsp-p2-pod-cell-4', 200);
       expect(match.filePath).toBe(files[3]);
+      expect(match.record.boundary).toBe(EXPECTED_VICTIM_BOUNDARY);
       expect(findRootEntries(files, 'victim-request')).toHaveLength(1);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('fails closed if the victim marker is only ordinary root entry', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-loss-wrong-boundary-'));
+    const files = [1, 2, 3, 4].map(index => path.join(directory, `r${index}.jsonl`));
+    try {
+      writeJsonLine(files[3], {
+        phase: 'ADSP-P2-ROOT-ENTRY',
+        requestId: 'victim-request',
+        nodeID: 'adsp-p2-pod-cell-4',
+        boundary: 'root-action-entry',
+        enteredAtEpochMs: Date.now()
+      });
+      await expect(waitForExactVictimRootEntry(files, 'victim-request', 'adsp-p2-pod-cell-4', 200)).rejects.toThrow(/expected "root-action-complete-response-held"/u);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
@@ -65,6 +96,7 @@ describe('ADSP P2 node-loss load driver', () => {
       phase: 'ADSP-P2-ROOT-ENTRY',
       requestId: 'victim-request',
       nodeID: 'adsp-p2-pod-cell-4',
+      boundary: EXPECTED_VICTIM_BOUNDARY,
       enteredAtEpochMs: Date.now()
     };
     try {
