@@ -18,6 +18,7 @@ const Fep5bf0CollectionViewsMiddleware = require('./middlewares/fep-5bf0-collect
 const SkipOrphanBlankNodesCleanupMiddleware = require('./middlewares/skip-orphan-blank-nodes-cleanup');
 const ApdmLocalDeliveryDatasetExistMemoMiddleware = require('./middlewares/apdm-local-delivery-dataset-exist-memo');
 const AdspActionLocalityMiddleware = require('./middlewares/adsp-action-locality');
+const AdspRootEntryEvidenceMiddleware = require('./middlewares/adsp-root-entry-evidence');
 const { createPhase8Tier1Instrumentation } = require('./lib/apdm-phase8-tier1-instrumentation');
 const CONFIG = require('./config/config');
 const errorHandler = require('./config/errorHandler');
@@ -94,6 +95,16 @@ const localityTelemetry = AdspActionLocalityMiddleware({
   outputPath: process.env.SEMAPPS_MOLECULER_LOCALITY_TELEMETRY_OUTPUT || undefined
 });
 if (localityTelemetry) middlewares.push(localityTelemetry);
+
+// Fault-injection evidence may need to prove that a request entered one exact
+// broker before that process is killed. This observer is disabled everywhere
+// unless the dedicated evidence flag and per-replica output path are supplied.
+const rootEntryEvidence = AdspRootEntryEvidenceMiddleware({
+  enabled: process.env.SEMAPPS_ADSP_ROOT_ENTRY_EVIDENCE_ENABLED === 'true',
+  outputPath: process.env.SEMAPPS_ADSP_ROOT_ENTRY_EVIDENCE_OUTPUT || undefined,
+  nodeID: fabric.nodeID
+});
+if (rootEntryEvidence) middlewares.push(rootEntryEvidence);
 
 /** @type {import('moleculer').BrokerOptions} */
 module.exports = {
