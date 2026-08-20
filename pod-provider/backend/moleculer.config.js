@@ -96,13 +96,16 @@ const localityTelemetry = AdspActionLocalityMiddleware({
 });
 if (localityTelemetry) middlewares.push(localityTelemetry);
 
-// Fault-injection evidence may need to prove that a request entered one exact
-// broker before that process is killed. This observer is disabled everywhere
-// unless the dedicated evidence flag and per-replica output path are supplied.
+// Fault-injection evidence may need to prove one exact ambiguous commit window:
+// the real root action completes on the selected victim, but its response is
+// held until that process is SIGKILLed. Every control is explicit and disabled
+// outside the dedicated evidence fixture.
 const rootEntryEvidence = AdspRootEntryEvidenceMiddleware({
   enabled: process.env.SEMAPPS_ADSP_ROOT_ENTRY_EVIDENCE_ENABLED === 'true',
   outputPath: process.env.SEMAPPS_ADSP_ROOT_ENTRY_EVIDENCE_OUTPUT || undefined,
-  nodeID: fabric.nodeID
+  nodeID: fabric.nodeID,
+  holdAfterAction: process.env.SEMAPPS_ADSP_ROOT_HOLD_AFTER_ACTION === 'true',
+  holdRequestPrefix: process.env.SEMAPPS_ADSP_ROOT_HOLD_REQUEST_PREFIX || undefined
 });
 if (rootEntryEvidence) middlewares.push(rootEntryEvidence);
 
