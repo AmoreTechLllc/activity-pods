@@ -12,6 +12,49 @@ const {
 const DEFAULT_TRANSPORTER_URL = 'redis://redis:6379/12';
 const DEFAULT_TIMEOUT_MS = 30000;
 const ACTIVITYSTREAMS_CONTEXT_URI = 'https://www.w3.org/ns/activitystreams';
+const ACTIVITYSTREAMS_NAMESPACE = 'https://www.w3.org/ns/activitystreams#';
+const ACTIVITYSTREAMS_REQUIRED_TYPES = [
+  'Object',
+  'Link',
+  'Activity',
+  'IntransitiveActivity',
+  'Collection',
+  'OrderedCollection',
+  'CollectionPage',
+  'OrderedCollectionPage',
+  'Application',
+  'Group',
+  'Organization',
+  'Person',
+  'Service',
+  'Article',
+  'Audio',
+  'Document',
+  'Event',
+  'Image',
+  'Note',
+  'Page',
+  'Place',
+  'Profile',
+  'Question',
+  'Relationship',
+  'Tombstone',
+  'Video',
+  'Create',
+  'Update',
+  'Delete',
+  'Follow',
+  'Accept',
+  'Reject',
+  'Add',
+  'Remove',
+  'Like',
+  'Announce',
+  'Undo',
+  'Block',
+  'Flag',
+  'Move'
+];
 const EXPECTED_NODES = [
   'adsp-p2-pod-cell-1',
   'adsp-p2-pod-cell-2',
@@ -76,14 +119,23 @@ function containsActivityStreamsUri(value) {
   return false;
 }
 
-function containsNoteTerm(value) {
-  if (value === 'Note' || value === 'as:Note' || value === 'https://www.w3.org/ns/activitystreams#Note') return true;
-  if (Array.isArray(value)) return value.some(containsNoteTerm);
+function containsActivityStreamsTerm(value, term) {
+  const expanded = `${ACTIVITYSTREAMS_NAMESPACE}${term}`;
+  if (value === term || value === `as:${term}` || value === expanded) return true;
+  if (Array.isArray(value)) return value.some(entry => containsActivityStreamsTerm(entry, term));
   if (value && typeof value === 'object') {
-    if (Object.prototype.hasOwnProperty.call(value, 'Note')) return true;
-    return Object.entries(value).some(([key, entry]) => key === 'Note' || containsNoteTerm(entry));
+    if (Object.prototype.hasOwnProperty.call(value, term)) return true;
+    return Object.entries(value).some(([key, entry]) => key === term || containsActivityStreamsTerm(entry, term));
   }
   return false;
+}
+
+function containsNoteTerm(value) {
+  return containsActivityStreamsTerm(value, 'Note');
+}
+
+function expectedExpandedTypes(types = ACTIVITYSTREAMS_REQUIRED_TYPES) {
+  return types.map(type => `${ACTIVITYSTREAMS_NAMESPACE}${type}`);
 }
 
 function summarizeOntologies(ontologies) {
@@ -115,6 +167,9 @@ function summarizeContext(context) {
 }
 
 function summarizeCachedDocument(document) {
+  const missingRequiredTypes = ACTIVITYSTREAMS_REQUIRED_TYPES.filter(
+    type => !containsActivityStreamsTerm(document, type)
+  );
   return {
     present: document !== undefined && document !== null,
     topLevelKind: Array.isArray(document) ? 'array' : typeof document,
@@ -122,7 +177,29 @@ function summarizeCachedDocument(document) {
       ? Object.keys(document).sort().slice(0, 50)
       : [],
     hasContextKey: Boolean(document && typeof document === 'object' && Object.prototype.hasOwnProperty.call(document, '@context')),
-    containsNoteTerm: containsNoteTerm(document)
+    requiredTypeCount: ACTIVITYSTREAMS_REQUIRED_TYPES.length,
+    missingRequiredTypes,
+    containsAllRequiredTypes: missingRequiredTypes.length === 0,
+    containsNoteTerm: containsActivityStreamsTerm(document, 'Note'),
+    containsArticleTerm: containsActivityStreamsTerm(document, 'Article')
+  };
+}
+
+function summarizeExpandedTypes(value) {
+  const expected = expectedExpandedTypes();
+  const actual = Array.isArray(value) ? value : [];
+  const mismatches = ACTIVITYSTREAMS_REQUIRED_TYPES.filter((type, index) => actual[index] !== expected[index]);
+  return {
+    ok: true,
+    value: actual,
+    expected,
+    requiredTypeCount: ACTIVITYSTREAMS_REQUIRED_TYPES.length,
+    expandsAllRequiredTypes: actual.length === expected.length && mismatches.length === 0,
+    mismatches,
+    expandsToActivityStreamsNote:
+      actual[ACTIVITYSTREAMS_REQUIRED_TYPES.indexOf('Note')] === `${ACTIVITYSTREAMS_NAMESPACE}Note`,
+    expandsToActivityStreamsArticle:
+      actual[ACTIVITYSTREAMS_REQUIRED_TYPES.indexOf('Article')] === `${ACTIVITYSTREAMS_NAMESPACE}Article`
   };
 }
 
@@ -146,7 +223,13 @@ async function probeNode(broker, nodeID, timeoutMs) {
     { uri: ACTIVITYSTREAMS_CONTEXT_URI },
     timeoutMs
   );
-  const expandCall = await pinnedCall(broker, nodeID, 'jsonld.parser.expandTypes', { types: ['Note'] }, timeoutMs);
+  const expandCall = await pinnedCall(
+    broker,
+    nodeID,
+    'jsonld.parser.expandTypes',
+    { types: ACTIVITYSTREAMS_REQUIRED_TYPES },
+    timeoutMs
+  );
 
   return {
     nodeID,
@@ -155,16 +238,7 @@ async function probeNode(broker, nodeID, timeoutMs) {
     context: contextCall.ok ? { ok: true, ...summarizeContext(contextCall.value) } : contextCall,
     localContext: localContextCall.ok ? { ok: true, ...summarizeContext(localContextCall.value) } : localContextCall,
     activityStreamsCache: cacheCall.ok ? { ok: true, ...summarizeCachedDocument(cacheCall.value) } : cacheCall,
-    expandNote: expandCall.ok
-      ? {
-          ok: true,
-          value: expandCall.value,
-          expandsToActivityStreamsNote:
-            Array.isArray(expandCall.value) &&
-            expandCall.value.length === 1 &&
-            expandCall.value[0] === 'https://www.w3.org/ns/activitystreams#Note'
-        }
-      : expandCall
+    expandActivityStreamsTypes: expandCall.ok ? summarizeExpandedTypes(expandCall.value) : expandCall
   };
 }
 
@@ -174,11 +248,14 @@ function semanticProbePasses(node) {
       node.ontologies.hasActivityStreamsOntology &&
       node.context?.ok &&
       node.context.includesActivityStreamsContextUri &&
+      node.localContext?.ok &&
       node.activityStreamsCache?.ok &&
       node.activityStreamsCache.present &&
-      node.activityStreamsCache.containsNoteTerm &&
-      node.expandNote?.ok &&
-      node.expandNote.expandsToActivityStreamsNote
+      node.activityStreamsCache.containsAllRequiredTypes &&
+      node.expandActivityStreamsTypes?.ok &&
+      node.expandActivityStreamsTypes.expandsAllRequiredTypes &&
+      node.expandActivityStreamsTypes.expandsToActivityStreamsNote &&
+      node.expandActivityStreamsTypes.expandsToActivityStreamsArticle
   );
 }
 
@@ -223,11 +300,12 @@ async function runProbe({ namespace, transporterUrl, timeoutMs = DEFAULT_TIMEOUT
     const nodeResults = [];
     for (const nodeID of nodes) nodeResults.push(await probeNode(broker, nodeID, timeoutMs));
     return {
-      version: 1,
+      version: 2,
       phase: 'ADSP-P2-SEMANTIC-PROBE',
       complete: true,
       passed: nodeResults.every(semanticProbePasses),
       activityStreamsContextUri: ACTIVITYSTREAMS_CONTEXT_URI,
+      activityStreamsRequiredTypes: ACTIVITYSTREAMS_REQUIRED_TYPES,
       nodes: nodeResults
     };
   } finally {
@@ -267,13 +345,18 @@ if (require.main === module) {
 
 module.exports = {
   ACTIVITYSTREAMS_CONTEXT_URI,
+  ACTIVITYSTREAMS_NAMESPACE,
+  ACTIVITYSTREAMS_REQUIRED_TYPES,
   EXPECTED_NODES,
   REQUIRED_ACTIONS,
   containsActivityStreamsUri,
+  containsActivityStreamsTerm,
   containsNoteTerm,
+  expectedExpandedTypes,
   summarizeOntologies,
   summarizeContext,
   summarizeCachedDocument,
+  summarizeExpandedTypes,
   semanticProbePasses,
   startBrokerWithin,
   runProbe
