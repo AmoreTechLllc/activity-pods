@@ -40,6 +40,7 @@ module.exports = {
 
   created() {
     this.failureBuckets = new Map();
+    this.overflowBlockedUntil = 0;
   },
 
   async started() {
@@ -136,29 +137,70 @@ module.exports = {
       }
     },
 
+    _pruneExpiredFailureBuckets(now = Date.now()) {
+      for (const [key, bucket] of this.failureBuckets.entries()) {
+        if (now - bucket.windowStartedAt >= FAILURE_WINDOW_MS) {
+          this.failureBuckets.delete(key);
+        }
+      }
+      if (this.overflowBlockedUntil && now >= this.overflowBlockedUntil) {
+        this.overflowBlockedUntil = 0;
+      }
+    },
+
     _isRateLimited(bucketKey, now = Date.now()) {
+      this._pruneExpiredFailureBuckets(now);
+      if (this.overflowBlockedUntil && now < this.overflowBlockedUntil) return true;
       const bucket = this.failureBuckets.get(bucketKey);
       if (!bucket) return false;
-      if (now - bucket.windowStartedAt >= FAILURE_WINDOW_MS) {
-        this.failureBuckets.delete(bucketKey);
-        return false;
-      }
       return bucket.failures >= MAX_FAILURES_PER_WINDOW;
     },
 
     _recordFailure(bucketKey, now = Date.now()) {
+      this._pruneExpiredFailureBuckets(now);
       let bucket = this.failureBuckets.get(bucketKey);
-      if (!bucket || now - bucket.windowStartedAt >= FAILURE_WINDOW_MS) {
+
+      if (!bucket && this.failureBuckets.size >= MAX_TRACKED_ACCOUNTS) {
+        let evictableKey = null;
+        let evictableLastFailureAt = Infinity;
+        let earliestBlockedExpiry = Infinity;
+
+        for (const [key, candidate] of this.failureBuckets.entries()) {
+          if (candidate.failures >= MAX_FAILURES_PER_WINDOW) {
+            earliestBlockedExpiry = Math.min(
+              earliestBlockedExpiry,
+              candidate.windowStartedAt + FAILURE_WINDOW_MS
+            );
+            continue;
+          }
+          if (candidate.lastFailureAt < evictableLastFailureAt) {
+            evictableKey = key;
+            evictableLastFailureAt = candidate.lastFailureAt;
+          }
+        }
+
+        if (evictableKey) {
+          this.failureBuckets.delete(evictableKey);
+        } else {
+          // Never evict a currently blocked account. If an attacker fills the
+          // bounded map entirely with blocked arbitrary IDs, fail closed with a
+          // temporary global pressure block until the first protected bucket
+          // expires. This prevents bucket flooding from resetting a real
+          // account's throttle while keeping memory bounded.
+          this.overflowBlockedUntil = Number.isFinite(earliestBlockedExpiry)
+            ? Math.max(this.overflowBlockedUntil || 0, earliestBlockedExpiry)
+            : now + FAILURE_WINDOW_MS;
+          return;
+        }
+      }
+
+      bucket = this.failureBuckets.get(bucketKey);
+      if (!bucket) {
         bucket = { failures: 0, windowStartedAt: now, lastFailureAt: now };
       }
       bucket.failures += 1;
       bucket.lastFailureAt = now;
       this.failureBuckets.set(bucketKey, bucket);
-
-      if (this.failureBuckets.size > MAX_TRACKED_ACCOUNTS) {
-        const oldestKey = this.failureBuckets.keys().next().value;
-        if (oldestKey) this.failureBuckets.delete(oldestKey);
-      }
     },
 
     async _padFailureLatency(startedAt) {
