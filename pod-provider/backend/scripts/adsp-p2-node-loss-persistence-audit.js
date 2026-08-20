@@ -21,6 +21,8 @@ function collectOutcomeExpectations(result) {
     ...(result?.rejoin?.results || [])
   ];
   const rejected = result?.faultBurst?.rejected || [];
+  const targetedAmbiguousRequestId = result?.victimRootEntry?.requestId;
+  if (!targetedAmbiguousRequestId) throw new Error('Node-loss result is missing victimRootEntry.requestId');
   const seen = new Set();
 
   const expectations = [];
@@ -28,16 +30,33 @@ function collectOutcomeExpectations(result) {
     if (!entry?.requestId) throw new Error('Accepted node-loss outcome is missing requestId');
     if (seen.has(entry.requestId)) throw new Error(`Duplicate node-loss requestId in persistence audit: ${entry.requestId}`);
     seen.add(entry.requestId);
-    expectations.push({ requestId: entry.requestId, callerOutcome: 'accepted', minCount: 1, maxCount: 1 });
+    expectations.push({
+      requestId: entry.requestId,
+      callerOutcome: 'accepted',
+      targetedAmbiguousCommit: entry.requestId === targetedAmbiguousRequestId,
+      minCount: 1,
+      maxCount: 1
+    });
   }
   for (const entry of rejected) {
     if (!entry?.requestId) throw new Error('Rejected node-loss outcome is missing requestId');
     if (seen.has(entry.requestId)) throw new Error(`Duplicate node-loss requestId in persistence audit: ${entry.requestId}`);
     seen.add(entry.requestId);
-    expectations.push({ requestId: entry.requestId, callerOutcome: 'rejected', minCount: 0, maxCount: 1 });
+    const targetedAmbiguousCommit = entry.requestId === targetedAmbiguousRequestId;
+    expectations.push({
+      requestId: entry.requestId,
+      callerOutcome: 'rejected',
+      targetedAmbiguousCommit,
+      minCount: targetedAmbiguousCommit ? 1 : 0,
+      maxCount: 1
+    });
   }
 
   if (expectations.length === 0) throw new Error('Node-loss persistence audit has no request outcomes');
+  const targeted = expectations.filter(expectation => expectation.targetedAmbiguousCommit);
+  if (targeted.length !== 1) {
+    throw new Error(`Expected exactly one targeted ambiguous request outcome, observed ${targeted.length}`);
+  }
   return expectations;
 }
 
@@ -89,6 +108,7 @@ async function auditPersistence({ result, dataset, fusekiBase = DEFAULT_FUSEKI_B
   }
 
   const failures = records.filter(record => !record.ok);
+  const targetedAmbiguousRecord = records.find(record => record.targetedAmbiguousCommit);
   return {
     version: 1,
     phase: 'ADSP-P2-A',
@@ -98,12 +118,15 @@ async function auditPersistence({ result, dataset, fusekiBase = DEFAULT_FUSEKI_B
     requestCount: records.length,
     acceptedCount: records.filter(record => record.callerOutcome === 'accepted').length,
     rejectedCount: records.filter(record => record.callerOutcome === 'rejected').length,
+    targetedAmbiguousRequestId: targetedAmbiguousRecord.requestId,
+    targetedAmbiguousCallerOutcome: targetedAmbiguousRecord.callerOutcome,
+    targetedAmbiguousCommitPersistedExactlyOnce: targetedAmbiguousRecord.persistedMarkerSubjectCount === 1,
     ambiguousPersistedRejectedCount: records.filter(record => record.ambiguousPersistedMutationObserved).length,
     duplicatePersistedMutationCount: records.filter(record => record.persistedMarkerSubjectCount > 1).length,
     failures,
     records,
     complete: true,
-    passed: failures.length === 0
+    passed: failures.length === 0 && targetedAmbiguousRecord.persistedMarkerSubjectCount === 1
   };
 }
 
@@ -130,6 +153,7 @@ async function main(argv = process.argv.slice(2)) {
   process.stdout.write(`${JSON.stringify({
     ok: audit.passed,
     requestCount: audit.requestCount,
+    targetedAmbiguousCommitPersistedExactlyOnce: audit.targetedAmbiguousCommitPersistedExactlyOnce,
     ambiguousPersistedRejectedCount: audit.ambiguousPersistedRejectedCount,
     duplicatePersistedMutationCount: audit.duplicatePersistedMutationCount,
     outputPath
