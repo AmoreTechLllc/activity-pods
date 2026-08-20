@@ -74,11 +74,12 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm apdm-phase8-backend:local \
-            yarn test \
-              tests/adsp-root-entry-evidence.test.js \
-              tests/adsp-p2-node-loss-load.test.js \
-              tests/adsp-p2-node-loss-persistence-audit.test.js \
-              tests/adsp-p2-node-loss-redis-audit.test.js \
+            yarn test:unit \
+              --runTestsByPath \
+              pod-provider/backend/tests/adsp-root-entry-evidence.test.js \
+              pod-provider/backend/tests/adsp-p2-node-loss-load.test.js \
+              pod-provider/backend/tests/adsp-p2-node-loss-persistence-audit.test.js \
+              pod-provider/backend/tests/adsp-p2-node-loss-redis-audit.test.js \
               --runInBand
 
       - name: Record exact environment
