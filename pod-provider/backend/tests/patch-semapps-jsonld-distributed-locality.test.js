@@ -79,6 +79,7 @@ describe('ADSP P2 distributed JSON-LD semantic locality patch', () => {
 
   test('keeps getLocal ontology and parse operations local', () => {
     const result = patchContextGetLocal(fixtures.contextGetLocal);
+    expect(result.source).toContain(PATCH_MARKER);
     expect(result.source).toContain("getLocalService('ontologies')");
     expect(result.source).toContain('this.actions.parse');
     expect(result.source).toContain("ctx.call('jsonld.context.parse'");
@@ -86,6 +87,7 @@ describe('ADSP P2 distributed JSON-LD semantic locality patch', () => {
 
   test('keeps parser context and document-loader dependencies local', () => {
     const result = patchParser(fixtures.parser);
+    expect(result.source).toContain(PATCH_MARKER);
     expect(result.source).toContain("getLocalService('jsonld.document-loader')");
     expect(result.source).toContain("getLocalService('jsonld.context')");
     expect(result.source).toContain("this.broker.call('jsonld.document-loader.loadWithCache'");
@@ -94,6 +96,7 @@ describe('ADSP P2 distributed JSON-LD semantic locality patch', () => {
 
   test('keeps local-context document loading on local context service', () => {
     const result = patchDocumentLoader(fixtures.documentLoader);
+    expect(result.source).toContain(PATCH_MARKER);
     expect(result.source).toContain("getLocalService('jsonld.context')");
     expect(result.source).toContain("ctx.call('jsonld.context.getLocal')");
   });
@@ -109,6 +112,14 @@ describe('ADSP P2 distributed JSON-LD semantic locality patch', () => {
     expect(first.changed).toBe(true);
     expect(second.changed).toBe(false);
     expect(second.source).toBe(first.source);
+  });
+
+  test('recognizes a markerless getLocal artifact that already contains the distributed rewrite', () => {
+    const first = patchContextGetLocal(fixtures.contextGetLocal);
+    const markerless = first.source.replace(`// ${PATCH_MARKER}`, '');
+    const revalidated = patchContextGetLocal(markerless);
+    expect(revalidated.changed).toBe(false);
+    expect(revalidated.source).toBe(markerless);
   });
 
   test('fails closed when parser contract drifts', () => {
