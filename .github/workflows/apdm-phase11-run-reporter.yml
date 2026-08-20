@@ -1,0 +1,33 @@
+name: APDM Phase 11 run reporter
+
+on:
+  workflow_run:
+    workflows: ['APDM Phase 11 query attribution']
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+jobs:
+  report:
+    if: github.event.workflow_run.head_branch == 'agent/apdm-phase11-query-attribution'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Publish exact Phase 11 run identity to PR 78
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${RUN_ID}" =~ ^[0-9]+$ ]] || exit 1
+          [[ "${RUN_ATTEMPT}" =~ ^[0-9]+$ ]] || exit 1
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/78/comments" \
+            -f body="APDM Phase 11 run reporter: run \`${RUN_ID}\`, exact source \`${SOURCE_SHA}\`, attempt \`${RUN_ATTEMPT}\`, conclusion \`${RUN_CONCLUSION}\`. This report is discovery metadata only; evidence remains authoritative only after the Phase 11 gates are independently inspected." >/dev/null
