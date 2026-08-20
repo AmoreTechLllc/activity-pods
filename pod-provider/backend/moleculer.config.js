@@ -113,6 +113,8 @@ if (rootEntryEvidence) middlewares.push(rootEntryEvidence);
 module.exports = {
   nodeID: fabric.nodeID,
   namespace: fabric.namespace,
+  heartbeatInterval: fabric.heartbeatInterval,
+  heartbeatTimeout: fabric.heartbeatTimeout,
   registry: fabric.registry,
   middlewares,
   errorHandler,
