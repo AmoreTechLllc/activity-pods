@@ -6,12 +6,16 @@ on:
       - '.github/workflows/adsp-p2-node-loss-under-load.yml'
       - 'pod-provider/backend/package.json'
       - 'pod-provider/backend/moleculer.config.js'
+      - 'pod-provider/backend/config/moleculer-fabric.js'
       - 'pod-provider/backend/middlewares/adsp-local-ontology-registration.js'
       - 'pod-provider/backend/middlewares/adsp-root-entry-evidence.js'
       - 'pod-provider/backend/scripts/adsp-p2-node-loss-load.js'
+      - 'pod-provider/backend/scripts/adsp-p2-node-loss-removal-clock.js'
       - 'pod-provider/backend/scripts/adsp-p2-node-loss-persistence-audit.js'
       - 'pod-provider/backend/scripts/adsp-p2-node-loss-redis-audit.js'
+      - 'pod-provider/backend/scripts/adsp-p2-preload-bull-scripts.js'
       - 'pod-provider/backend/scripts/adsp-p2-semantic-probe.js'
+      - 'pod-provider/backend/services/adsp-p2-redis-script-preload.service.js'
       - 'pod-provider/backend/scripts/patch-semapps-jsonld-distributed-context-cache.js'
       - 'pod-provider/backend/scripts/patch-semapps-jsonld-distributed-locality.js'
       - 'pod-provider/backend/scripts/patch-semapps-ldp-distributed-semantic-locality.js'
@@ -20,8 +24,10 @@ on:
       - 'pod-provider/backend/tests/adsp-local-ontology-registration.test.js'
       - 'pod-provider/backend/tests/adsp-root-entry-evidence.test.js'
       - 'pod-provider/backend/tests/adsp-p2-node-loss-load.test.js'
+      - 'pod-provider/backend/tests/adsp-p2-node-loss-removal-clock.test.js'
       - 'pod-provider/backend/tests/adsp-p2-node-loss-persistence-audit.test.js'
       - 'pod-provider/backend/tests/adsp-p2-node-loss-redis-audit.test.js'
+      - 'pod-provider/backend/tests/adsp-p2-preload-bull-scripts.test.js'
       - 'pod-provider/backend/tests/adsp-p2-semantic-probe.test.js'
       - 'pod-provider/backend/tests/patch-semapps-jsonld-distributed-context-cache.test.js'
       - 'pod-provider/backend/tests/patch-semapps-jsonld-distributed-locality.test.js'
@@ -95,8 +101,11 @@ jobs:
           const localOntologyRegistration = require('./middlewares/adsp-local-ontology-registration');
           const middleware = require('./middlewares/adsp-root-entry-evidence');
           const load = require('./scripts/adsp-p2-node-loss-load');
+          const removalClock = require('./scripts/adsp-p2-node-loss-removal-clock');
           const persistence = require('./scripts/adsp-p2-node-loss-persistence-audit');
           const redis = require('./scripts/adsp-p2-node-loss-redis-audit');
+          const bullPreload = require('./scripts/adsp-p2-preload-bull-scripts');
+          const bullPreloadService = require('./services/adsp-p2-redis-script-preload.service');
           const semanticProbe = require('./scripts/adsp-p2-semantic-probe');
           const contextCachePatch = require('./scripts/patch-semapps-jsonld-distributed-context-cache');
           const jsonldLocalityPatch = require('./scripts/patch-semapps-jsonld-distributed-locality');
@@ -109,9 +118,12 @@ jobs:
           assert.equal(load.EXPECTED_VICTIM_BOUNDARY, 'root-action-complete-response-held');
           assert.equal(typeof load.waitForExactVictimRootEntry, 'function');
           assert.equal(typeof load.assertTargetedVictimRejected, 'function');
+          assert.equal(typeof removalClock.runRemovalClock, 'function');
           assert.equal(typeof persistence.auditPersistence, 'function');
           assert.equal(typeof persistence.buildFusekiAuthorization, 'function');
           assert.equal(typeof redis.auditRedisCommandstats, 'function');
+          assert.equal(typeof bullPreload.preloadBullScripts, 'function');
+          assert.equal(bullPreloadService.name, 'adspP2RedisScriptPreload');
           assert.equal(typeof semanticProbe.runProbe, 'function');
           const contextPatchResult = contextCachePatch.applyPatch();
           assert.equal(contextPatchResult.results.length, 2);
@@ -161,7 +173,8 @@ jobs:
             offeredConcurrency: 8,
             localDeliveryConcurrency: 4,
             recoveryBoundMs: 30000,
-            recoveryBoundScope: 'moleculer-endpoint-removal-rejoin-and-victim-semantic-readiness',
+            recoveryBoundScope: 'pre-sigkill-endpoint-removal-plus-endpoint-rejoin-and-victim-semantic-readiness',
+            authoritativeEndpointRemovalClock: 'pre-sigkill-fault-start',
             applicationLatencyIsDiagnosticOnly: true,
             replayObservationMs: 8000,
             victimNode: 'adsp-p2-pod-cell-4',
@@ -181,6 +194,7 @@ jobs:
             distributedJsonldSemanticLocalityEnabled: true,
             distributedLdpSemanticLocalityEnabled: true,
             distributedLocalOntologyRegistrationBarrierEnabled: true,
+            bullRedisScriptsPreloadedBeforePodCellAdvertisement: true,
             semanticProbeEnabled: true
           }, null, 2)}\n`);
           NODE
@@ -216,6 +230,8 @@ jobs:
           barrier_container='/app/backend/measurements/adsp-p2-node-loss/barrier'
           result_host='measurements/adsp-p2-node-loss/result.json'
           log_host='measurements/adsp-p2-node-loss/load-driver.log'
+          removal_clock_result='measurements/adsp-p2-node-loss/removal-clock.json'
+          removal_clock_log='measurements/adsp-p2-node-loss/removal-clock.log'
 
           wait_port() {
             local port="$1"
@@ -244,6 +260,23 @@ jobs:
             return 1
           }
 
+          wait_marker_or_clock() {
+            local marker="$1"
+            for attempt in $(seq 1 1800); do
+              if [[ -f "$marker" ]]; then return 0; fi
+              if ! kill -0 "$removal_clock_pid" 2>/dev/null; then
+                wait "$removal_clock_pid" || true
+                cat "$removal_clock_log"
+                echo "removal clock exited before marker $marker" >&2
+                return 1
+              fi
+              sleep 0.1
+            done
+            cat "$removal_clock_log"
+            echo "timed out waiting for removal clock marker $marker" >&2
+            return 1
+          }
+
           write_epoch_marker() {
             node - "$1" <<'NODE'
           const fs = require('node:fs');
@@ -255,6 +288,15 @@ jobs:
           export APDM_P8_ENABLED=true ADSP_P2_ROOT_ENTRY_EVIDENCE_ENABLED=true ADSP_P2_REPLICAS=4
           docker compose $files up -d --no-deps backend backend_p2_2 backend_p2_3 backend_p2_4
           for port in 3000 3102 3103 3104; do wait_port "$port"; done
+
+          docker compose $files run --rm -T --no-deps --entrypoint node \
+            -e ADSP_P2_BARRIER_DIR="$barrier_container" \
+            -e ADSP_P2_RECOVERY_BOUND_MS=30000 \
+            backend scripts/adsp-p2-node-loss-removal-clock.js \
+              /app/backend/measurements/adsp-p2-node-loss/removal-clock.json \
+              > "$removal_clock_log" 2>&1 &
+          removal_clock_pid=$!
+          wait_marker_or_clock "$barrier_host/removal-clock-ready"
 
           trace_files='/app/backend/measurements/adsp-p2/trace-10-r1.jsonl,/app/backend/measurements/adsp-p2/trace-10-r2.jsonl,/app/backend/measurements/adsp-p2/trace-10-r3.jsonl,/app/backend/measurements/adsp-p2/trace-10-r4.jsonl'
           root_files='/app/backend/measurements/adsp-p2/root-entry-r1.jsonl,/app/backend/measurements/adsp-p2/root-entry-r2.jsonl,/app/backend/measurements/adsp-p2/root-entry-r3.jsonl,/app/backend/measurements/adsp-p2/root-entry-r4.jsonl'
@@ -284,6 +326,7 @@ jobs:
           write_epoch_marker "$barrier_host/go"
           wait_marker_or_driver "$barrier_host/victim-inflight"
 
+          write_epoch_marker "$barrier_host/fault-start"
           docker compose $files kill -s SIGKILL backend_p2_4
           write_epoch_marker "$barrier_host/victim-killed"
 
@@ -295,11 +338,19 @@ jobs:
           wait "$driver_pid"
           cat "$log_host"
           test -s "$result_host"
+          wait "$removal_clock_pid"
+          cat "$removal_clock_log"
+          test -s "$removal_clock_result"
 
           node - <<'NODE'
           const fs = require('node:fs');
           const result = JSON.parse(fs.readFileSync('measurements/adsp-p2-node-loss/result.json', 'utf8'));
+          const clock = JSON.parse(fs.readFileSync('measurements/adsp-p2-node-loss/removal-clock.json', 'utf8'));
           if (!result.complete || !result.passed) throw new Error('node-loss result is not complete/pass');
+          if (!clock.complete || !clock.passed) throw new Error('authoritative endpoint-removal clock is not complete/pass');
+          if (clock.clockScope !== 'pre-sigkill-fault-start-to-moleculer-endpoint-removal') throw new Error('unexpected endpoint-removal clock scope');
+          if (clock.baselineEndpointCount !== 4 || clock.convergedEndpointCount !== 3) throw new Error('endpoint-removal clock topology mismatch');
+          if (clock.endpointRemovalMs > 30000) throw new Error('authoritative endpoint removal exceeded 30s bound');
           if (!result.correctness?.targetedVictimBoundaryProvenBeforeKill) throw new Error('victim held-response boundary proof missing');
           if (result.correctness?.targetedVictimBoundary !== 'root-action-complete-response-held') throw new Error('unexpected victim fault boundary');
           if (!result.correctness?.targetedVictimCallerRejectedExactlyOnce) throw new Error('victim caller rejection proof missing');
@@ -307,7 +358,6 @@ jobs:
           if (!result.correctness?.victimSemanticReadinessWithinRecoveryBound) throw new Error('victim semantic readiness exceeded recovery bound');
           if (result.victimRootEntry?.boundary !== 'root-action-complete-response-held') throw new Error('victim result boundary mismatch');
           if (result.victimRootEntry?.callerOutcome !== 'rejected') throw new Error('victim caller outcome was not rejected');
-          if (result.recovery?.endpointRemovalMs > 30000) throw new Error('endpoint removal exceeded 30s bound');
           if (result.rejoin?.endpointRejoinMs > 30000) throw new Error('endpoint rejoin exceeded 30s bound');
           if (result.rejoin?.semanticRejoinMs > 30000) throw new Error('victim semantic rejoin exceeded 30s bound');
           NODE
