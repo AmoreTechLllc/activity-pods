@@ -32,6 +32,7 @@ jobs:
       run:
         working-directory: pod-provider
     env:
+      ADSP_P2_SOURCE_SHA: '${{ github.event.pull_request.head.sha || github.sha }}'
       ADSP_P2_NAMESPACE: 'adsp-p2-loss-${{ github.run_id }}-${{ github.run_attempt }}'
       ADSP_P2_REPLICAS: '4'
       APDM_P8_COUNT: '10'
@@ -45,6 +46,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: '${{ github.event.pull_request.head.sha || github.sha }}'
 
       - uses: actions/setup-node@v4
         with:
@@ -79,13 +82,18 @@ jobs:
         run: |
           set -euo pipefail
           export BACKEND_IMAGE_ID="$(docker image inspect apdm-phase8-backend:local --format '{{.Id}}')"
+          export CHECKOUT_SHA="$(git rev-parse HEAD)"
+          test "$CHECKOUT_SHA" = "$ADSP_P2_SOURCE_SHA"
           node - <<'NODE' > measurements/adsp-p2-node-loss/environment.json
           const os = require('node:os');
           process.stdout.write(`${JSON.stringify({
             version: 1,
             phase: 'ADSP-P2-A',
             fixture: 'horizontal-redis-node-loss-under-load',
-            commitSha: process.env.GITHUB_SHA,
+            sourceSha: process.env.ADSP_P2_SOURCE_SHA,
+            checkoutSha: process.env.CHECKOUT_SHA,
+            eventSha: process.env.GITHUB_SHA,
+            exactHeadCheckout: process.env.CHECKOUT_SHA === process.env.ADSP_P2_SOURCE_SHA,
             workflowRunId: process.env.GITHUB_RUN_ID,
             runAttempt: process.env.GITHUB_RUN_ATTEMPT,
             eventName: process.env.GITHUB_EVENT_NAME,
@@ -102,8 +110,11 @@ jobs:
             offeredConcurrency: 8,
             localDeliveryConcurrency: 4,
             recoveryBoundMs: 30000,
+            recoveryBoundScope: 'moleculer-endpoint-removal-and-rejoin',
+            applicationLatencyIsDiagnosticOnly: true,
             replayObservationMs: 8000,
             victimNode: 'adsp-p2-pod-cell-4',
+            victimBoundary: 'root-action-complete-response-held',
             activityPubRemoteDeliveryMode: 'native',
             datasetExistMemoEnabled: false,
             rootEntryEvidenceEnabled: true,
@@ -226,7 +237,11 @@ jobs:
           const fs = require('node:fs');
           const result = JSON.parse(fs.readFileSync('measurements/adsp-p2-node-loss/result.json', 'utf8'));
           if (!result.complete || !result.passed) throw new Error('node-loss result is not complete/pass');
-          if (!result.correctness?.targetedVictimRootEntryProvenBeforeKill) throw new Error('victim root-entry proof missing');
+          if (!result.correctness?.targetedVictimBoundaryProvenBeforeKill) throw new Error('victim held-response boundary proof missing');
+          if (result.correctness?.targetedVictimBoundary !== 'root-action-complete-response-held') throw new Error('unexpected victim fault boundary');
+          if (!result.correctness?.targetedVictimCallerRejectedExactlyOnce) throw new Error('victim caller rejection proof missing');
+          if (result.victimRootEntry?.boundary !== 'root-action-complete-response-held') throw new Error('victim result boundary mismatch');
+          if (result.victimRootEntry?.callerOutcome !== 'rejected') throw new Error('victim caller outcome was not rejected');
           if (result.recovery?.endpointRemovalMs > 30000) throw new Error('endpoint removal exceeded 30s bound');
           if (result.rejoin?.endpointRejoinMs > 30000) throw new Error('endpoint rejoin exceeded 30s bound');
           NODE
@@ -243,6 +258,8 @@ jobs:
           const fs = require('node:fs');
           const audit = JSON.parse(fs.readFileSync('measurements/adsp-p2-node-loss/persistence-audit.json', 'utf8'));
           if (!audit.complete || !audit.passed) throw new Error('persistence audit is not complete/pass');
+          if (audit.targetedAmbiguousCallerOutcome !== 'rejected') throw new Error('targeted ambiguous caller outcome mismatch');
+          if (!audit.targetedAmbiguousCommitPersistedExactlyOnce) throw new Error('targeted ambiguous commit was not persisted exactly once');
           if (audit.duplicatePersistedMutationCount !== 0) throw new Error('duplicate authoritative persistence observed');
           NODE
 
