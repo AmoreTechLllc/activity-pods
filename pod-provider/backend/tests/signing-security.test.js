@@ -28,6 +28,23 @@ function expectMoleculerError(fn, { code, type, message }) {
   expect(error.message).toMatch(message);
 }
 
+function atprotoActionService() {
+  return {
+    _auth: jest.fn(),
+    _resolveAtprotoAccountAuthority(ctx, canonicalAccountId) {
+      return signingService.methods._resolveAtprotoAccountAuthority.call(this, ctx, canonicalAccountId);
+    }
+  };
+}
+
+function generateSecp256k1PemPair() {
+  return crypto.generateKeyPairSync('ec', {
+    namedCurve: 'secp256k1',
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+  });
+}
+
 describe('signing internal authentication hardening', () => {
   test('requires a dedicated ACTIVITYPODS_TOKEN and never falls back to other shared secrets', () => {
     const validToken = 'a'.repeat(MIN_SIGNING_TOKEN_BYTES);
@@ -71,7 +88,7 @@ describe('signing internal authentication hardening', () => {
 
   test('service auth distinguishes malformed and invalid credentials', () => {
     const expected = 'e'.repeat(32);
-    const service = { settings: { auth: { bearerToken: expected } } };
+    const service = { settings: { auth: { bearerToken: expected } };
     expectMoleculerError(
       () => signingService.methods._auth.call(service, { meta: { $headers: {} } }),
       { code: 401, type: 'AUTH_FAILED', message: /missing or malformed/iu }
@@ -164,7 +181,12 @@ describe('ATProto provisioning authority binding', () => {
       meta: {},
       call: jest.fn().mockResolvedValueOnce(null)
     };
-    const service = { _auth: jest.fn() };
+    const service = {
+      _auth: jest.fn(),
+      _resolveAtprotoAccountAuthority(ctxArg, canonicalAccountId) {
+        return signingService.methods._resolveAtprotoAccountAuthority.call(this, ctxArg, canonicalAccountId);
+      }
+    };
 
     await expect(signingService.actions.provisionAtprotoIdentity.handler.call(service, ctx)).rejects.toMatchObject({
       code: 403,
@@ -185,7 +207,7 @@ describe('ATProto provisioning authority binding', () => {
         .mockResolvedValueOnce({ keyRef: 'rotation-key' })
         .mockResolvedValueOnce({ canonicalAccountId, webId: canonicalAccountId })
     };
-    const service = { _auth: jest.fn() };
+    const service = atprotoActionService();
 
     await signingService.actions.provisionAtprotoIdentity.handler.call(service, ctx);
 
@@ -202,5 +224,73 @@ describe('ATProto provisioning authority binding', () => {
       { webId: canonicalAccountId },
       { meta: { requestId: 'req-1', dataset: 'alice-dataset', webId: canonicalAccountId } }
     );
+  });
+
+  test('uses the authoritative local account dataset for commit-key reads', async () => {
+    const canonicalAccountId = 'https://pods.example/alice';
+    const { privateKey } = generateSecp256k1PemPair();
+    const ctx = {
+      params: {
+        canonicalAccountId,
+        did: 'did:plc:alice',
+        unsignedCommitBytesBase64: Buffer.from('commit').toString('base64'),
+        rev: '3k-test'
+      },
+      meta: { requestId: 'commit-read' },
+      call: jest.fn()
+        .mockResolvedValueOnce({ canonicalAccountId, atprotoDid: 'did:plc:alice', atSigningKeyRef: 'commit-key' })
+        .mockResolvedValueOnce({ webId: canonicalAccountId, username: 'alice-dataset' })
+        .mockResolvedValueOnce({ privateKeyPem: privateKey })
+    };
+    const service = atprotoActionService();
+
+    await signingService.actions.signAtprotoCommit.handler.call(service, ctx);
+
+    expect(ctx.call).toHaveBeenNthCalledWith(3, 'keys.getAtprotoKeyPair', { keyRef: 'commit-key' }, {
+      meta: { requestId: 'commit-read', dataset: 'alice-dataset', webId: canonicalAccountId }
+    });
+  });
+
+  test('uses the authoritative local account dataset for rotation-key reads', async () => {
+    const canonicalAccountId = 'https://pods.example/alice';
+    const { privateKey } = generateSecp256k1PemPair();
+    const ctx = {
+      params: {
+        canonicalAccountId,
+        did: 'did:plc:alice',
+        operationBytesBase64: Buffer.from('plc-operation').toString('base64')
+      },
+      meta: { requestId: 'plc-read' },
+      call: jest.fn()
+        .mockResolvedValueOnce({ canonicalAccountId, atprotoDid: 'did:plc:alice', atRotationKeyRef: 'rotation-key' })
+        .mockResolvedValueOnce({ webId: canonicalAccountId, username: 'alice-dataset' })
+        .mockResolvedValueOnce({ privateKeyPem: privateKey })
+    };
+    const service = atprotoActionService();
+
+    await signingService.actions.signAtprotoPlcOp.handler.call(service, ctx);
+
+    expect(ctx.call).toHaveBeenNthCalledWith(3, 'keys.getAtprotoKeyPair', { keyRef: 'rotation-key' }, {
+      meta: { requestId: 'plc-read', dataset: 'alice-dataset', webId: canonicalAccountId }
+    });
+  });
+
+  test('uses the authoritative local account dataset for public-key reads', async () => {
+    const canonicalAccountId = 'https://pods.example/alice';
+    const ctx = {
+      params: { canonicalAccountId, purpose: 'commit' },
+      meta: { requestId: 'public-read' },
+      call: jest.fn()
+        .mockResolvedValueOnce({ canonicalAccountId, atprotoDid: 'did:plc:alice', atSigningKeyRef: 'commit-key' })
+        .mockResolvedValueOnce({ webId: canonicalAccountId, username: 'alice-dataset' })
+        .mockResolvedValueOnce({ publicKeyMultibase: 'zExamplePublicKey' })
+    };
+    const service = atprotoActionService();
+
+    await signingService.actions.getAtprotoPublicKey.handler.call(service, ctx);
+
+    expect(ctx.call).toHaveBeenNthCalledWith(3, 'keys.getAtprotoKeyPair', { keyRef: 'commit-key' }, {
+      meta: { requestId: 'public-read', dataset: 'alice-dataset', webId: canonicalAccountId }
+    });
   });
 });
