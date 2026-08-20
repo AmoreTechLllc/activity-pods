@@ -1,0 +1,90 @@
+'use strict';
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const {
+  assertExecutorSet,
+  assertUnique,
+  findRootEntries,
+  readBarrierTimestamp,
+  requestPayload,
+  waitForExactVictimRootEntry
+} = require('../scripts/adsp-p2-node-loss-load');
+
+function writeJsonLine(filePath, record) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, 'utf8');
+}
+
+describe('ADSP P2 node-loss load driver', () => {
+  test('requires every expected executor to carry accepted work', () => {
+    expect(() => assertExecutorSet({ r1: 3, r2: 3, r3: 2 }, ['r1', 'r2', 'r3'], 8)).not.toThrow();
+    expect(() => assertExecutorSet({ r1: 4, r2: 4 }, ['r1', 'r2', 'r3'], 8)).toThrow(/r3 carried no accepted work/u);
+    expect(() => assertExecutorSet({ r1: 2, r2: 2, r3: 2, r4: 2 }, ['r1', 'r2', 'r3'], 8)).toThrow(/Unexpected executor/u);
+  });
+
+  test('rejects duplicate authoritative identities', () => {
+    expect(() => assertUnique(['a', 'b', 'c'], 'id')).not.toThrow();
+    expect(() => assertUnique(['a', 'b', 'a'], 'id')).toThrow(/Duplicate id: a/u);
+  });
+
+  test('binds fault payload content to the request identity for persistence audit', () => {
+    const payload = requestPayload(
+      { sender: { outbox: 'https://pod.example/alice/outbox', webId: 'https://pod.example/alice' } },
+      ['https://pod.example/bob'],
+      'request-123'
+    );
+    expect(payload.collectionUri).toBe('https://pod.example/alice/outbox');
+    expect(payload.object.content).toBe('ADSP P2 node-loss request-123');
+    expect(payload.to).toEqual(['https://pod.example/bob']);
+  });
+
+  test('proves the targeted request entered exactly the selected victim', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-loss-root-'));
+    const files = [1, 2, 3, 4].map(index => path.join(directory, `r${index}.jsonl`));
+    try {
+      writeJsonLine(files[3], {
+        phase: 'ADSP-P2-ROOT-ENTRY',
+        requestId: 'victim-request',
+        nodeID: 'adsp-p2-pod-cell-4',
+        enteredAtEpochMs: Date.now()
+      });
+      const match = await waitForExactVictimRootEntry(files, 'victim-request', 'adsp-p2-pod-cell-4', 200);
+      expect(match.filePath).toBe(files[3]);
+      expect(findRootEntries(files, 'victim-request')).toHaveLength(1);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('fails closed if the same targeted request appears on multiple root executors', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-loss-duplicate-root-'));
+    const files = [1, 2, 3, 4].map(index => path.join(directory, `r${index}.jsonl`));
+    const record = {
+      phase: 'ADSP-P2-ROOT-ENTRY',
+      requestId: 'victim-request',
+      nodeID: 'adsp-p2-pod-cell-4',
+      enteredAtEpochMs: Date.now()
+    };
+    try {
+      writeJsonLine(files[2], { ...record, nodeID: 'adsp-p2-pod-cell-3' });
+      writeJsonLine(files[3], record);
+      await expect(waitForExactVictimRootEntry(files, 'victim-request', 'adsp-p2-pod-cell-4', 200)).rejects.toThrow(/multiple root executors/u);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('requires timestamp-bearing kill/restart barriers', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'adsp-loss-barrier-'));
+    try {
+      fs.writeFileSync(path.join(directory, 'victim-killed'), '12345\n', 'utf8');
+      expect(readBarrierTimestamp(directory, 'victim-killed')).toBe(12345);
+      fs.writeFileSync(path.join(directory, 'victim-killed'), 'not-a-time\n', 'utf8');
+      expect(() => readBarrierTimestamp(directory, 'victim-killed')).toThrow(/epoch timestamp/u);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
