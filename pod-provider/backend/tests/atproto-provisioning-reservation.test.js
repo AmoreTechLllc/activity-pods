@@ -1,48 +1,48 @@
 'use strict';
 
-const values = new Map();
+const mockValues = new Map();
 
-class FakeRedis {
-  constructor() {
-    this.status = 'ready';
-  }
+jest.mock('ioredis', () => {
+  return class MockRedis {
+    constructor() {
+      this.status = 'ready';
+    }
 
-  async connect() {
-    this.status = 'ready';
-  }
+    async connect() {
+      this.status = 'ready';
+    }
 
-  async set(key, value, px, ttl, nx) {
-    expect(px).toBe('PX');
-    expect(nx).toBe('NX');
-    expect(ttl).toBeGreaterThanOrEqual(30_000);
-    if (values.has(key)) return null;
-    values.set(key, value);
-    return 'OK';
-  }
+    async set(key, value, px, ttl, nx) {
+      expect(px).toBe('PX');
+      expect(nx).toBe('NX');
+      expect(ttl).toBeGreaterThanOrEqual(30_000);
+      if (mockValues.has(key)) return null;
+      mockValues.set(key, value);
+      return 'OK';
+    }
 
-  async eval(script, keyCount, key, token) {
-    expect(script).toContain("redis.call('GET', KEYS[1]) == ARGV[1]");
-    expect(keyCount).toBe(1);
-    if (values.get(key) !== token) return 0;
-    values.delete(key);
-    return 1;
-  }
+    async eval(script, keyCount, key, token) {
+      expect(script).toContain("redis.call('GET', KEYS[1]) == ARGV[1]");
+      expect(keyCount).toBe(1);
+      if (mockValues.get(key) !== token) return 0;
+      mockValues.delete(key);
+      return 1;
+    }
 
-  async quit() {
-    this.status = 'end';
-  }
+    async quit() {
+      this.status = 'end';
+    }
 
-  disconnect() {
-    this.status = 'end';
-  }
-}
-
-jest.mock('ioredis', () => FakeRedis);
+    disconnect() {
+      this.status = 'end';
+    }
+  };
+});
 
 const AtprotoProvisioningReservationMiddleware = require('../middlewares/atproto-provisioning-reservation');
 
 describe('ATProto provisioning reservation middleware', () => {
-  beforeEach(() => values.clear());
+  beforeEach(() => mockValues.clear());
 
   test('blocks a concurrent same-account action before the second handler runs', async () => {
     const middleware = AtprotoProvisioningReservationMiddleware({
