@@ -11,21 +11,29 @@ const PATCHED_CACHE_DECLARATION =
   "cache: process.env.SEMAPPS_MOLECULER_MODE === 'distributed' ? false : true";
 
 const ACTION_CONTRACTS = [
-  { name: 'ontologies.list', signatures: ['Object.values(this.ontologies)'] },
+  {
+    name: 'ontologies.list',
+    relativePath: 'actions/list.js',
+    signatures: ['Object.values(this.ontologies)']
+  },
   {
     name: 'ontologies.get',
+    relativePath: 'actions/get.js',
     signatures: ['this.ontologies[prefix]', 'uri.startsWith(o.namespace)']
   },
   {
     name: 'ontologies.getPrefixes',
+    relativePath: 'actions/getPrefixes.js',
     signatures: ['this.actions.list', 'Object.fromEntries']
   },
   {
     name: 'ontologies.getRdfPrefixes',
+    relativePath: 'actions/getRdfPrefixes.js',
     signatures: ['this.actions.list', 'PREFIX ${ontology.prefix}']
   },
   {
     name: 'ontologies.prefixToUri',
+    relativePath: 'actions/prefixToUri.js',
     signatures: ['this.actions.get({ prefix })', 'No ontology found with prefix']
   }
 ];
@@ -43,32 +51,24 @@ function findPackageRoot() {
   throw new Error(`[ADSP-P2] Could not locate ${EXPECTED_PACKAGE} package root`);
 }
 
-function walkJavaScriptFiles(directory) {
-  const files = [];
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    if (entry.name === 'node_modules') continue;
-    const entryPath = path.join(directory, entry.name);
-    if (entry.isDirectory()) files.push(...walkJavaScriptFiles(entryPath));
-    else if (/\.(?:c?js|mjs)$/u.test(entry.name)) files.push(entryPath);
-  }
-  return files;
-}
-
 function matchesActionContract(source, contract) {
   return contract.signatures.every(signature => source.includes(signature));
 }
 
 function locateActionSource(packageRoot, contract) {
-  const candidates = walkJavaScriptFiles(packageRoot).filter(file => {
-    const source = fs.readFileSync(file, 'utf8');
-    return matchesActionContract(source, contract);
-  });
-  if (candidates.length !== 1) {
+  const file = path.join(packageRoot, contract.relativePath);
+  if (!fs.existsSync(file)) {
     throw new Error(
-      `[ADSP-P2] Expected exactly one ${contract.name} artifact in ${EXPECTED_PACKAGE}@${EXPECTED_VERSION}, found ${candidates.length}: ${candidates.join(', ')}`
+      `[ADSP-P2] Expected ${contract.name} at ${contract.relativePath} in ${EXPECTED_PACKAGE}@${EXPECTED_VERSION}`
     );
   }
-  return candidates[0];
+  const source = fs.readFileSync(file, 'utf8');
+  if (!matchesActionContract(source, contract)) {
+    throw new Error(
+      `[ADSP-P2] ${contract.name} at ${contract.relativePath} no longer matches the pinned ${EXPECTED_PACKAGE}@${EXPECTED_VERSION} contract`
+    );
+  }
+  return file;
 }
 
 function countOccurrences(source, needle) {
@@ -141,6 +141,7 @@ module.exports = {
   PATCHED_CACHE_DECLARATION,
   ACTION_CONTRACTS,
   matchesActionContract,
+  locateActionSource,
   patchOntologyActionSource,
   applyPatch
 };
