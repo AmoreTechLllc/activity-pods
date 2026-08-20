@@ -4,15 +4,18 @@ on:
   pull_request:
     paths:
       - '.github/workflows/adsp-p2-node-loss-under-load.yml'
+      - 'pod-provider/backend/package.json'
       - 'pod-provider/backend/moleculer.config.js'
       - 'pod-provider/backend/middlewares/adsp-root-entry-evidence.js'
       - 'pod-provider/backend/scripts/adsp-p2-node-loss-load.js'
       - 'pod-provider/backend/scripts/adsp-p2-node-loss-persistence-audit.js'
       - 'pod-provider/backend/scripts/adsp-p2-node-loss-redis-audit.js'
+      - 'pod-provider/backend/scripts/patch-semapps-jsonld-distributed-context-cache.js'
       - 'pod-provider/backend/tests/adsp-root-entry-evidence.test.js'
       - 'pod-provider/backend/tests/adsp-p2-node-loss-load.test.js'
       - 'pod-provider/backend/tests/adsp-p2-node-loss-persistence-audit.test.js'
       - 'pod-provider/backend/tests/adsp-p2-node-loss-redis-audit.test.js'
+      - 'pod-provider/backend/tests/patch-semapps-jsonld-distributed-context-cache.test.js'
       - 'pod-provider/docker-compose-adsp-p2-horizontal.yml'
       - 'pod-provider/docker-compose-phase8.yml'
       - 'pod-provider/docker-compose-test.yml'
@@ -79,12 +82,16 @@ jobs:
           const load = require('./scripts/adsp-p2-node-loss-load');
           const persistence = require('./scripts/adsp-p2-node-loss-persistence-audit');
           const redis = require('./scripts/adsp-p2-node-loss-redis-audit');
+          const contextCachePatch = require('./scripts/patch-semapps-jsonld-distributed-context-cache');
           assert.equal(middleware({ enabled: false }), null);
           assert.equal(load.EXPECTED_VICTIM_BOUNDARY, 'root-action-complete-response-held');
           assert.equal(typeof load.waitForExactVictimRootEntry, 'function');
           assert.equal(typeof load.assertTargetedVictimRejected, 'function');
           assert.equal(typeof persistence.auditPersistence, 'function');
           assert.equal(typeof redis.auditRedisCommandstats, 'function');
+          const patchResult = contextCachePatch.applyPatch();
+          assert.equal(patchResult.results.length, 2);
+          assert.equal(patchResult.results.every(result => result.changed === false), true);
           process.stdout.write('ADSP P2 production-image node-loss modules: OK\n');
           NODE
 
@@ -132,7 +139,9 @@ jobs:
             victimHoldRequestPrefix: process.env.ADSP_P2_VICTIM_HOLD_REQUEST_PREFIX,
             callerRetryEnabled: false,
             redisStreamPayloadCompressionEnabled: false,
-            redisStatsResetImmediatelyBeforeFaultScenario: true
+            redisStartupStatsCapturedBeforeReset: true,
+            redisStatsResetAfterHarnessAndFourCellStartupBeforeFaultScenario: true,
+            distributedJsonldContextActionCachingEnabled: false
           }, null, 2)}\n`);
           NODE
           cat measurements/adsp-p2-node-loss/environment.json
@@ -158,7 +167,6 @@ jobs:
               /app/backend/measurements/adsp-p2-node-loss/actors.json 10
           test -s measurements/adsp-p2-node-loss/actors.json
           docker compose $files stop -t 30 backend
-          docker compose $files exec -T redis redis-cli CONFIG RESETSTAT >/dev/null
 
       - name: Run four-cell SIGKILL recovery proof
         run: |
@@ -230,6 +238,9 @@ jobs:
           driver_pid=$!
 
           wait_marker_or_driver "$barrier_host/ready"
+          docker compose $files exec -T redis redis-cli INFO commandstats > measurements/adsp-p2-node-loss/redis-commandstats-startup.txt
+          docker compose $files exec -T redis redis-cli INFO errorstats > measurements/adsp-p2-node-loss/redis-errorstats-startup.txt
+          docker compose $files exec -T redis redis-cli CONFIG RESETSTAT >/dev/null
           write_epoch_marker "$barrier_host/go"
           wait_marker_or_driver "$barrier_host/victim-inflight"
 
