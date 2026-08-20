@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const DEFAULT_FUSEKI_BASE = 'http://fuseki_test:3030/';
+const ACTIVITYSTREAMS_NOTE_IRI = 'https://www.w3.org/ns/activitystreams#Note';
 
 function sparqlString(value) {
   return JSON.stringify(String(value));
@@ -11,7 +12,7 @@ function sparqlString(value) {
 
 function buildMarkerQuery(requestId) {
   const marker = `ADSP P2 node-loss ${requestId}`;
-  return `SELECT (COUNT(DISTINCT ?subject) AS ?count) WHERE {\n  { ?subject ?predicate ?value . }\n  UNION\n  { GRAPH ?graph { ?subject ?predicate ?value . } }\n  FILTER(STR(?value) = ${sparqlString(marker)})\n}`;
+  return `SELECT (COUNT(DISTINCT ?subject) AS ?count) WHERE {\n  {\n    ?subject a <${ACTIVITYSTREAMS_NOTE_IRI}> ; ?predicate ?value .\n  }\n  UNION\n  {\n    GRAPH ?graph { ?subject a <${ACTIVITYSTREAMS_NOTE_IRI}> ; ?predicate ?value . }\n  }\n  FILTER(isIRI(?subject))\n  FILTER(STR(?value) = ${sparqlString(marker)})\n}`;
 }
 
 function collectOutcomeExpectations(result) {
@@ -133,7 +134,7 @@ async function auditPersistence({
     const ok = count >= expectation.minCount && count <= expectation.maxCount;
     records.push({
       ...expectation,
-      persistedMarkerSubjectCount: count,
+      persistedNoteResourceCount: count,
       ambiguousPersistedMutationObserved: expectation.callerOutcome === 'rejected' && count === 1,
       ok
     });
@@ -142,9 +143,11 @@ async function auditPersistence({
   const failures = records.filter(record => !record.ok);
   const targetedAmbiguousRecord = records.find(record => record.targetedAmbiguousCommit);
   return {
-    version: 1,
+    version: 2,
     phase: 'ADSP-P2-A',
     fixture: 'horizontal-redis-node-loss-persistence-audit',
+    authoritativeResourceType: ACTIVITYSTREAMS_NOTE_IRI,
+    resourceIdentityRequirement: 'iri',
     dataset,
     fusekiBase,
     authenticatedQuery: authorization !== null,
@@ -153,13 +156,13 @@ async function auditPersistence({
     rejectedCount: records.filter(record => record.callerOutcome === 'rejected').length,
     targetedAmbiguousRequestId: targetedAmbiguousRecord.requestId,
     targetedAmbiguousCallerOutcome: targetedAmbiguousRecord.callerOutcome,
-    targetedAmbiguousCommitPersistedExactlyOnce: targetedAmbiguousRecord.persistedMarkerSubjectCount === 1,
+    targetedAmbiguousCommitPersistedExactlyOnce: targetedAmbiguousRecord.persistedNoteResourceCount === 1,
     ambiguousPersistedRejectedCount: records.filter(record => record.ambiguousPersistedMutationObserved).length,
-    duplicatePersistedMutationCount: records.filter(record => record.persistedMarkerSubjectCount > 1).length,
+    duplicatePersistedMutationCount: records.filter(record => record.persistedNoteResourceCount > 1).length,
     failures,
     records,
     complete: true,
-    passed: failures.length === 0 && targetedAmbiguousRecord.persistedMarkerSubjectCount === 1
+    passed: failures.length === 0 && targetedAmbiguousRecord.persistedNoteResourceCount === 1
   };
 }
 
@@ -205,6 +208,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  ACTIVITYSTREAMS_NOTE_IRI,
   auditPersistence,
   buildFusekiAuthorization,
   buildMarkerQuery,
