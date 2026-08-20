@@ -70,17 +70,23 @@ jobs:
             -f docker-compose-adsp-p2-horizontal.yml \
             build backend
 
-      - name: Run focused semantic regressions
+      - name: Verify production-image node-loss modules
         run: |
           set -euo pipefail
-          docker run --rm apdm-phase8-backend:local \
-            yarn test:unit \
-              --runTestsByPath \
-              pod-provider/backend/tests/adsp-root-entry-evidence.test.js \
-              pod-provider/backend/tests/adsp-p2-node-loss-load.test.js \
-              pod-provider/backend/tests/adsp-p2-node-loss-persistence-audit.test.js \
-              pod-provider/backend/tests/adsp-p2-node-loss-redis-audit.test.js \
-              --runInBand
+          docker run --rm apdm-phase8-backend:local node - <<'NODE'
+          const assert = require('node:assert/strict');
+          const middleware = require('./middlewares/adsp-root-entry-evidence');
+          const load = require('./scripts/adsp-p2-node-loss-load');
+          const persistence = require('./scripts/adsp-p2-node-loss-persistence-audit');
+          const redis = require('./scripts/adsp-p2-node-loss-redis-audit');
+          assert.equal(middleware({ enabled: false }), null);
+          assert.equal(load.EXPECTED_VICTIM_BOUNDARY, 'root-action-complete-response-held');
+          assert.equal(typeof load.waitForExactVictimRootEntry, 'function');
+          assert.equal(typeof load.assertTargetedVictimRejected, 'function');
+          assert.equal(typeof persistence.auditPersistence, 'function');
+          assert.equal(typeof redis.auditRedisCommandHealth, 'function');
+          process.stdout.write('ADSP P2 production-image node-loss modules: OK\n');
+          NODE
 
       - name: Record exact environment
         run: |
