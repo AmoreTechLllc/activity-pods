@@ -87,6 +87,20 @@ describe('APDM Phase 9 evidence comparator', () => {
     expect(result.concurrencies[2].selectionGate.failures.join('\n')).toContain('N=100 speedup');
   });
 
+  test('malformed zero-denominator evidence cannot fail open into eligibility', () => {
+    const baseline = summary();
+    const candidate = summary({ speedups: { 100: 1.2, 200: 1.2, 1000: 1.2 } });
+    baseline.cases[100].actionCount.mean = 0;
+    const result = compare({
+      '1': baseline,
+      '2': candidate,
+      '4': summary({ speedups: { 100: 1.2, 200: 1.2, 1000: 1.2 } }),
+      '8': summary({ speedups: { 100: 1.2, 200: 1.2, 1000: 1.2 } })
+    });
+    expect(result.concurrencies[2].selectionGate.eligible).toBe(false);
+    expect(result.concurrencies[2].selectionGate.failures.join('\n')).toContain('actionDeltaPctVsC1 is not finite');
+  });
+
   test('markdown makes automated recommendation and manual promotion boundary explicit', () => {
     const result = compare({
       '1': summary(),

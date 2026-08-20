@@ -8,17 +8,24 @@ const { retryWithBackoff } = require('../utils/backoff');
 const { validateDeliveryPlanV1 } = require('../utils/activitypub-delivery-plan');
 const { resolvePublicSearchConsent } = require('../utils/search-consent');
 const { extractHashtagsFromText } = require('../utils/hashtags');
+const { resolvePhase6ObservationConfig } = require('../lib/activitypub-phase6-observation-config');
+
+const observationConfig = resolvePhase6ObservationConfig({
+  remoteDeliveryMode: process.env.SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native',
+  sidecarObservationWebhookUrl:
+    process.env.SIDECAR_OBSERVATION_WEBHOOK_URL || 'http://fedify-sidecar:8080/webhook/outbox-observation',
+  // Unit suites load this service without deployment secrets. The synthetic
+  // test-only value never escapes NODE_ENV=test; production native mode still
+  // fails closed if SIDECAR_TOKEN is absent.
+  sidecarToken: process.env.SIDECAR_TOKEN || (process.env.NODE_ENV === 'test' ? 'apdm-test-sidecar-token' : ''),
+  observationWebhookRetries: process.env.OBSERVATION_WEBHOOK_RETRIES,
+  observationWebhookTimeoutMs: process.env.OBSERVATION_WEBHOOK_TIMEOUT_MS
+});
 
 module.exports = {
   name: 'outbox-emitter',
   dependencies: ['activitypub.outbox'],
-  settings: {
-    remoteDeliveryMode: String(process.env.SEMAPPS_ACTIVITYPUB_REMOTE_DELIVERY_MODE || 'native').trim().toLowerCase(),
-    sidecarObservationWebhookUrl: process.env.SIDECAR_OBSERVATION_WEBHOOK_URL || 'http://fedify-sidecar:8080/webhook/outbox-observation',
-    sidecarToken: process.env.SIDECAR_TOKEN || '',
-    observationWebhookRetries: Number(process.env.OBSERVATION_WEBHOOK_RETRIES) || 3,
-    observationWebhookTimeoutMs: Number(process.env.OBSERVATION_WEBHOOK_TIMEOUT_MS) || 5000
-  },
+  settings: observationConfig,
   events: {
     'activitypub.outbox.posted': {
       async handler(ctx) {
@@ -104,23 +111,43 @@ module.exports = {
         activity: event.activity,
         meta: event.meta
       };
+      const expectedIntentId = `apdm-observation:${event.eventId}`;
       try {
         await retryWithBackoff(async () => {
           const headers = {
             'Content-Type': 'application/json',
             'X-Event-Id': event.eventId,
-            'X-Event-Schema': event.schema
+            'X-Event-Schema': event.schema,
+            Authorization: `Bearer ${this.settings.sidecarToken}`
           };
-          if (this.settings.sidecarToken) headers.Authorization = `Bearer ${this.settings.sidecarToken}`;
           const response = await fetch(this.settings.sidecarObservationWebhookUrl, {
             method: 'POST',
             headers,
             body: JSON.stringify(payload),
             signal: AbortSignal.timeout(this.settings.observationWebhookTimeoutMs)
           });
-          if (!response.ok) {
-            const error = new Error(`Sidecar observation webhook returned ${response.status}`);
+          if (response.status !== 202) {
+            const error = new Error(`Sidecar observation webhook returned ${response.status}; expected durable 202 acceptance`);
             error.retryable = response.status === 429 || response.status >= 500;
+            throw error;
+          }
+          let acknowledgement;
+          try {
+            acknowledgement = await response.json();
+          } catch {
+            const error = new Error('Sidecar observation webhook returned an invalid acknowledgement body');
+            error.retryable = true;
+            throw error;
+          }
+          if (
+            !acknowledgement ||
+            acknowledgement.accepted !== true ||
+            acknowledgement.intentId !== expectedIntentId ||
+            acknowledgement.jobCount !== 0 ||
+            acknowledgement.observationOnly !== true
+          ) {
+            const error = new Error('Sidecar observation webhook acknowledgement did not confirm the exact durable zero-target observation intent');
+            error.retryable = true;
             throw error;
           }
         }, {

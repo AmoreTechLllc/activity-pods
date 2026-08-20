@@ -42,7 +42,7 @@ describe('APDM Phase 8 correlated Fuseki request evidence', () => {
     expect(getRequestMethod([new URL('http://127.0.0.1:3030/$/datasets/alice'), { method: 'post' }])).toBe('POST');
   });
 
-  test('records method and path together so GET and DELETE cannot be conflated', async () => {
+  test('records method and privacy-safe route shape together so GET and DELETE cannot be conflated', async () => {
     const outputDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'apdm-p8-request-key-'));
     const outputPath = path.join(outputDirectory, 'measurement.jsonl');
     const server = http.createServer((_incoming, response) => {
@@ -60,11 +60,13 @@ describe('APDM Phase 8 correlated Fuseki request evidence', () => {
       }, { name: 'activitypub.outbox.post' });
 
       await root({ id: 'root-request-key' });
-      const [record] = fs.readFileSync(outputPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const artifact = fs.readFileSync(outputPath, 'utf8');
+      const [record] = artifact.trim().split('\n').map(line => JSON.parse(line));
 
-      expect(record.fuseki.pathCounts['/$/datasets/alice']).toBe(2);
-      expect(record.fuseki.requestKeyCounts['GET /$/datasets/alice']).toBe(1);
-      expect(record.fuseki.requestKeyCounts['DELETE /$/datasets/alice']).toBe(1);
+      expect(record.fuseki.pathCounts['/$/datasets/:dataset']).toBe(2);
+      expect(record.fuseki.requestKeyCounts['GET /$/datasets/:dataset']).toBe(1);
+      expect(record.fuseki.requestKeyCounts['DELETE /$/datasets/:dataset']).toBe(1);
+      expect(artifact).not.toContain('/$/datasets/alice');
     } finally {
       instrumentation.dispose();
       await close(server);

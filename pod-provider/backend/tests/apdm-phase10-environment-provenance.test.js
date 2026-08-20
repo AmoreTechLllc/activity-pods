@@ -9,6 +9,7 @@ function manifest(overrides = {}) {
   return {
     phase: 'APDM-P10-A',
     arm: 'off',
+    armOrder: 'off-first',
     memoEnabled: false,
     commitSha: 'abc123',
     workflowRunId: '42',
@@ -39,6 +40,50 @@ describe('APDM Phase 10 environment provenance', () => {
     expect(result.resourceDifferences).toEqual([]);
   });
 
+  test('accepts on-first provenance only on an even run attempt', () => {
+    const result = validateEnvironment(
+      manifest({ armOrder: 'on-first', runAttempt: '2' }),
+      manifest({ arm: 'on', armOrder: 'on-first', memoEnabled: true, runAttempt: '2' })
+    );
+    expect(result.passed).toBe(true);
+  });
+
+  test('rejects arm order that does not match run-attempt parity', () => {
+    const result = validateEnvironment(
+      manifest({ armOrder: 'on-first' }),
+      manifest({ arm: 'on', armOrder: 'on-first', memoEnabled: true })
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures.join('\n')).toContain('does not match run attempt');
+  });
+
+  test('rejects malformed run-attempt provenance instead of skipping parity validation', () => {
+    const result = validateEnvironment(
+      manifest({ runAttempt: 'not-an-attempt' }),
+      manifest({ arm: 'on', memoEnabled: true, runAttempt: 'not-an-attempt' })
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures.join('\n')).toContain('runAttempt');
+  });
+
+  test('rejects zero run-attempt provenance', () => {
+    const result = validateEnvironment(
+      manifest({ runAttempt: '0' }),
+      manifest({ arm: 'on', memoEnabled: true, runAttempt: '0' })
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures.join('\n')).toContain('positive integer string');
+  });
+
+  test('rejects mismatched arm-order provenance between arms', () => {
+    const result = validateEnvironment(
+      manifest(),
+      manifest({ arm: 'on', armOrder: 'on-first', memoEnabled: true })
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures.join('\n')).toContain('armOrder');
+  });
+
   test('rejects mislabeled control and enabled arms', () => {
     const result = validateEnvironment(
       manifest({ memoEnabled: true }),
@@ -48,13 +93,20 @@ describe('APDM Phase 10 environment provenance', () => {
     expect(result.failures.join('\n')).toContain('Control manifest must prove arm=off');
   });
 
-  test('rejects evidence that is not concurrency four', () => {
-    const result = validateEnvironment(
+  test('rejects evidence that is not exact numeric concurrency four', () => {
+    const numericMismatch = validateEnvironment(
       manifest({ concurrency: 2 }),
       manifest({ arm: 'on', memoEnabled: true, concurrency: 2 })
     );
-    expect(result.passed).toBe(false);
-    expect(result.failures.join('\n')).toContain('concurrency 4');
+    expect(numericMismatch.passed).toBe(false);
+    expect(numericMismatch.failures.join('\n')).toContain('concurrency 4');
+
+    const stringFour = validateEnvironment(
+      manifest({ concurrency: '4' }),
+      manifest({ arm: 'on', memoEnabled: true, concurrency: '4' })
+    );
+    expect(stringFour.passed).toBe(false);
+    expect(stringFour.failures.join('\n')).toContain('concurrency 4');
   });
 
   test('rejects cross-commit or cross-image mechanism evidence', () => {
@@ -68,7 +120,7 @@ describe('APDM Phase 10 environment provenance', () => {
     expect(result.failures.join('\n')).toContain('fusekiImageId');
   });
 
-  test('preserves mechanism evidence but marks timing and CPU incomparable across host hardware', () => {
+  test('rejects timing and CPU evidence across different host hardware', () => {
     const result = validateEnvironment(
       manifest(),
       manifest({
@@ -79,9 +131,8 @@ describe('APDM Phase 10 environment provenance', () => {
         hostTotalMemoryBytes: 34359738368
       })
     );
-    expect(result.passed).toBe(true);
+    expect(result.passed).toBe(false);
     expect(result.resourceComparable).toBe(false);
-    expect(result.failures).toEqual([]);
     expect(result.resourceDifferences.join('\n')).toContain('hostCpuModel');
     expect(result.resourceDifferences.join('\n')).toContain('hostCpuCount');
     expect(result.resourceDifferences.join('\n')).toContain('hostTotalMemoryBytes');
@@ -94,5 +145,16 @@ describe('APDM Phase 10 environment provenance', () => {
     );
     expect(result.passed).toBe(false);
     expect(result.failures.join('\n')).toContain('backendImageId');
+  });
+
+  test('rejects equal but impossible host resource values and reports each invalid field', () => {
+    const result = validateEnvironment(
+      manifest({ hostCpuCount: 0, hostTotalMemoryBytes: -1 }),
+      manifest({ arm: 'on', memoEnabled: true, hostCpuCount: 0, hostTotalMemoryBytes: -1 })
+    );
+    expect(result.passed).toBe(false);
+    expect(result.resourceComparable).toBe(false);
+    expect(result.failures.join('\n')).toContain('hostCpuCount');
+    expect(result.failures.join('\n')).toContain('hostTotalMemoryBytes');
   });
 });

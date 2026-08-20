@@ -34,9 +34,9 @@ function caseSummary({
       [DATASET_EXIST_ACTION]: datasetExistPerSample * successfulSamples
     },
     fusekiRequestKeyCounts: {
-      'GET /$/datasets/alice': datasetRegistryPerSample * successfulSamples,
-      'DELETE /$/datasets/alice': 2 * successfulSamples,
-      'POST /alice/query': 10 * successfulSamples
+      'GET /$/datasets/:dataset': datasetRegistryPerSample * successfulSamples,
+      'DELETE /$/datasets/:dataset': 2 * successfulSamples,
+      'POST /:dataset/query': 10 * successfulSamples
     }
   };
 }
@@ -65,31 +65,19 @@ function summary({
 }
 
 describe('APDM Phase 10 evidence comparator', () => {
-  test('normalizes aggregated action and exact Fuseki registry GET counts to per-sample means', () => {
-    const current = caseSummary({
-      datasetExistPerSample: 42,
-      datasetRegistryPerSample: 40,
-      fusekiPerSample: 90
-    });
+  test('normalizes aggregated action and redacted Fuseki registry GET counts to per-sample means', () => {
+    const current = caseSummary({ datasetExistPerSample: 42, datasetRegistryPerSample: 40, fusekiPerSample: 90 });
     expect(meanActionCount(current, DATASET_EXIST_ACTION)).toBe(42);
     expect(meanDatasetRegistryRequests(current)).toBe(40);
   });
 
-  test('does not count a DELETE to the dataset registry path as an existence probe', () => {
-    const current = caseSummary({
-      datasetExistPerSample: 5,
-      datasetRegistryPerSample: 3,
-      fusekiPerSample: 10
-    });
+  test('does not count a DELETE to the redacted dataset registry path as an existence probe', () => {
+    const current = caseSummary({ datasetExistPerSample: 5, datasetRegistryPerSample: 3, fusekiPerSample: 10 });
     expect(meanDatasetRegistryRequests(current)).toBe(3);
   });
 
   test('gates on real dataset-registry GETs even when outer middleware still counts attempted actions', () => {
-    const result = compare(
-      summary(),
-      summary({ registryReduction: 0.8, actionReduction: 0, fusekiReduction: 0.35 })
-    );
-
+    const result = compare(summary(), summary({ registryReduction: 0.8, actionReduction: 0, fusekiReduction: 0.35 }));
     expect(result.gate.passed).toBe(true);
     expect(result.gate.scope).toBe('mechanism-and-delivery-correctness');
     expect(result.gate.requiresManualResourceReview).toBe(true);
@@ -104,48 +92,30 @@ describe('APDM Phase 10 evidence comparator', () => {
       summary({ samples: MIN_MEASURED_SAMPLES - 1 }),
       summary({ registryReduction: 0.8, fusekiReduction: 0.3, samples: MIN_MEASURED_SAMPLES - 1 })
     );
-
     expect(result.gate.passed).toBe(false);
-    expect(result.gate.failures).toEqual(
-      expect.arrayContaining([expect.stringContaining(`requires at least ${MIN_MEASURED_SAMPLES} measured samples`)])
-    );
+    expect(result.gate.failures).toEqual(expect.arrayContaining([expect.stringContaining(`requires at least ${MIN_MEASURED_SAMPLES} measured samples`)]));
   });
 
   test('fails closed when control and enabled sample counts differ', () => {
-    const result = compare(
-      summary({ samples: 3 }),
-      summary({ registryReduction: 0.8, fusekiReduction: 0.3, samples: 4 })
-    );
-
+    const result = compare(summary({ samples: 3 }), summary({ registryReduction: 0.8, fusekiReduction: 0.3, samples: 4 }));
     expect(result.gate.passed).toBe(false);
     expect(result.gate.failures).toEqual(expect.arrayContaining([expect.stringContaining('unmatched sample counts')]));
   });
 
   test('fails closed when the intended large-case metadata round-trip reduction is not material', () => {
-    const result = compare(
-      summary(),
-      summary({ registryReduction: MIN_DATASET_REGISTRY_REDUCTION - 0.01, fusekiReduction: 0.2 })
-    );
-
+    const result = compare(summary(), summary({ registryReduction: MIN_DATASET_REGISTRY_REDUCTION - 0.01, fusekiReduction: 0.2 }));
     expect(result.gate.passed).toBe(false);
-    expect(result.gate.failures).toEqual(
-      expect.arrayContaining([expect.stringContaining('reduced Fuseki dataset-registry GETs by only')])
-    );
+    expect(result.gate.failures).toEqual(expect.arrayContaining([expect.stringContaining('reduced Fuseki dataset-registry GETs by only')]));
   });
 
   test('fails when total Fuseki requests do not fall in a large case', () => {
     const result = compare(summary(), summary({ registryReduction: 0.8, fusekiReduction: 0 }));
-
     expect(result.gate.passed).toBe(false);
     expect(result.gate.failures).toEqual(expect.arrayContaining([expect.stringContaining('total Fuseki')]));
   });
 
   test('fails when either side contains a failed delivery sample', () => {
-    const result = compare(
-      summary(),
-      summary({ registryReduction: 0.8, fusekiReduction: 0.3, failedAt: 200 })
-    );
-
+    const result = compare(summary(), summary({ registryReduction: 0.8, fusekiReduction: 0.3, failedAt: 200 }));
     expect(result.gate.passed).toBe(false);
     expect(result.gate.failures).toEqual(expect.arrayContaining([expect.stringContaining('requires all measured samples to succeed')]));
   });
@@ -153,7 +123,6 @@ describe('APDM Phase 10 evidence comparator', () => {
   test('renders a concise markdown evidence table without implying production approval', () => {
     const result = compare(summary(), summary({ registryReduction: 0.8, fusekiReduction: 0.3 }));
     const markdown = renderMarkdown(result);
-
     expect(markdown).toContain('APDM Phase 10 dataset-existence memo comparison');
     expect(markdown).toContain('Mechanism/delivery gate: **PASS**');
     expect(markdown).toContain('not production promotion approval');

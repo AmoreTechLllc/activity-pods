@@ -27,6 +27,8 @@ on:
       - 'pod-provider/backend/scripts/apdm-phase8-warm-restart-ready.js'
       - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-delivery.js'
       - 'pod-provider/backend/scripts/patch-semapps-activitypub-local-delivery-phase9.js'
+      - 'pod-provider/backend/tests/apdm-phase7-phase10-hardening.test.js'
+      - 'pod-provider/backend/tests/apdm-phase10-environment-provenance.test.js'
       - 'pod-provider/docker-compose-phase8.yml'
       - 'pod-provider/docker/backend.dockerfile'
 
@@ -39,7 +41,7 @@ concurrency:
 
 jobs:
   measure-paired:
-    name: paired memo OFF ON evidence
+    name: paired memo evidence
     runs-on: ubuntu-latest
     timeout-minutes: 360
     defaults:
@@ -100,6 +102,7 @@ jobs:
           const manifest = {
             phase: 'APDM-P10-A',
             arm: process.env.APDM_P10_ARM,
+            armOrder: process.env.APDM_P10_ARM_ORDER,
             memoEnabled: process.env.APDM_P10_DATASET_EXIST_MEMO_ENABLED === 'true',
             commitSha: process.env.GITHUB_SHA,
             workflowRunId: process.env.GITHUB_RUN_ID,
@@ -125,8 +128,8 @@ jobs:
           reset_arm_storage() {
             # docker-compose-test.yml uses host bind mounts for Fuseki and Redis.
             # `docker compose down -v` does not remove those directories, so an
-            # explicit host-side reset is required to prevent OFF state from
-            # contaminating the ON arm (or vice versa).
+            # explicit host-side reset is required to prevent either arm from
+            # contaminating the arm that follows it.
             docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml down -v || true
             sudo rm -rf data/fuseki_test data/redis_test
             mkdir -p data/fuseki_test data/redis_test
@@ -206,8 +209,15 @@ jobs:
             reset_arm_storage
           }
 
-          run_arm off false
-          run_arm on true
+          if (( GITHUB_RUN_ATTEMPT % 2 == 1 )); then
+            export APDM_P10_ARM_ORDER='off-first'
+            run_arm off false
+            run_arm on true
+          else
+            export APDM_P10_ARM_ORDER='on-first'
+            run_arm on true
+            run_arm off false
+          fi
 
       - name: Validate evidence provenance
         run: |
@@ -225,6 +235,8 @@ jobs:
             measurements/apdm-p10-comparison.json \
             measurements/apdm-p10-comparison.md
           cat measurements/apdm-p10-comparison.md >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '> A future production-default reconsideration requires successful exact-SHA attempts in both arm orders; one attempt is not sufficient promotion evidence.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload paired Phase 10 evidence
         if: always()

@@ -36,6 +36,17 @@ function increment(map, key, amount = 1) {
   map[key] = (map[key] || 0) + amount;
 }
 
+function safeErrorMetadata(source, error, extra = {}) {
+  return {
+    source,
+    ...extra,
+    name:
+      error && typeof error.name === 'string' && /^[A-Za-z0-9_.-]{1,128}$/u.test(error.name)
+        ? error.name
+        : 'Error'
+  };
+}
+
 function createTrace({ requestId, recipientCount, caseLabel }) {
   const memory = process.memoryUsage();
   return {
@@ -74,13 +85,7 @@ function finishTrace(trace, error) {
   const memory = process.memoryUsage();
   const cpu = process.cpuUsage(trace.cpuStart);
   const elapsedMs = performance.now() - trace.startedPerfMs;
-  if (error) {
-    trace.errors.push({
-      source: 'root-action',
-      name: error.name || 'Error',
-      message: error.message || String(error)
-    });
-  }
+  if (error) trace.errors.push(safeErrorMetadata('root-action', error));
 
   return {
     version: trace.version,
@@ -131,10 +136,8 @@ function tryWriteJsonLine(outputPath, record, onInstrumentationError = () => {})
 function getRequestTarget(args, protocol) {
   if (args.length === 0) return undefined;
   const [first] = args;
-
   if (first instanceof URL) return first;
   if (typeof first === 'string') return normalizeUrl(first);
-
   if (first && typeof first === 'object') {
     if (first.href) return normalizeUrl(first.href);
     let hostname = first.hostname || first.host;
@@ -147,36 +150,42 @@ function getRequestTarget(args, protocol) {
     const requestPath = first.path || first.pathname || '/';
     return normalizeUrl(`${scheme}//${hostname}${port}${requestPath}`);
   }
-
   return undefined;
 }
 
 function getRequestMethod(args) {
-  // Node supports request(url, options), request(URL, options), and
-  // request(options). A legacy URL/options descriptor can itself be an object,
-  // so taking the first object argument can accidentally ignore a later explicit
-  // { method: 'DELETE' } and misclassify it as the default GET. Prefer the first
-  // non-URL object that actually declares a method; otherwise HTTP defaults GET.
   const explicitMethodOptions = args.find(
-    value =>
-      value &&
-      typeof value === 'object' &&
-      !(value instanceof URL) &&
-      typeof value.method === 'string' &&
-      value.method.length > 0
+    value => value && typeof value === 'object' && !(value instanceof URL) && typeof value.method === 'string' && value.method.length > 0
   );
   return String((explicitMethodOptions && explicitMethodOptions.method) || 'GET').toUpperCase();
 }
 
+function matchingFusekiTarget(target, fusekiTargets) {
+  if (!target) return undefined;
+  return fusekiTargets
+    .filter(candidate => {
+      if (!candidate || candidate.origin !== target.origin) return false;
+      const prefix = candidate.pathname.replace(/\/$/u, '');
+      return prefix === '' || target.pathname === prefix || target.pathname.startsWith(`${prefix}/`);
+    })
+    .sort((left, right) => right.pathname.length - left.pathname.length)[0];
+}
+
 function targetMatchesFuseki(target, fusekiTargets) {
-  if (!target) return false;
-  return fusekiTargets.some(candidate => {
-    if (!candidate) return false;
-    if (candidate.origin !== target.origin) return false;
-    const prefix = candidate.pathname.replace(/\/$/u, '');
-    if (prefix === '') return true;
-    return target.pathname === prefix || target.pathname.startsWith(`${prefix}/`);
-  });
+  return matchingFusekiTarget(target, fusekiTargets) !== undefined;
+}
+
+function evidenceFusekiPath(target, fusekiTargets) {
+  if (!target) return undefined;
+  if (/^\/\$\/datasets\/[^/]+\/?$/u.test(target.pathname)) return '/$/datasets/:dataset';
+  const candidate = matchingFusekiTarget(target, fusekiTargets);
+  if (!candidate) return undefined;
+  const configuredPrefix = candidate.pathname.replace(/\/$/u, '');
+  if (configuredPrefix !== '') return target.pathname;
+
+  const segments = target.pathname.split('/').filter(Boolean);
+  if (segments.length === 0 || segments[0] === '$') return target.pathname;
+  return `/:dataset${segments.length > 1 ? `/${segments.slice(1).join('/')}` : ''}`;
 }
 
 function installFusekiHttpProbe({ storage, fusekiUrls = [] }) {
@@ -185,34 +194,41 @@ function installFusekiHttpProbe({ storage, fusekiUrls = [] }) {
 
   const restorers = [];
   for (const transport of [http, https]) {
-    if (transport[PATCH_MARKER]) continue;
+    if (transport[PATCH_MARKER]) {
+      for (const restore of restorers.reverse()) restore();
+      throw new Error('[APDM-P8] Fuseki HTTP probe is already installed; refusing ambiguous measurement ownership');
+    }
     const originalRequest = transport.request;
 
     function instrumentedRequest(...args) {
       const trace = storage.getStore();
       const target = getRequestTarget(args, transport === https ? 'https' : 'http');
-      if (!trace || !targetMatchesFuseki(target, targets)) {
-        return originalRequest.apply(this, args);
-      }
+      if (!trace || !targetMatchesFuseki(target, targets)) return originalRequest.apply(this, args);
 
       const method = getRequestMethod(args);
+      const evidencePath = evidenceFusekiPath(target, targets);
       const started = performance.now();
+      let accounted = false;
       trace.fuseki.requestCount += 1;
       increment(trace.fuseki.methodCounts, method);
-      increment(trace.fuseki.pathCounts, target.pathname);
-      increment(trace.fuseki.requestKeyCounts, `${method} ${target.pathname}`);
+      increment(trace.fuseki.pathCounts, evidencePath);
+      increment(trace.fuseki.requestKeyCounts, `${method} ${evidencePath}`);
+
+      const accountCompletion = error => {
+        if (accounted) return;
+        accounted = true;
+        trace.fuseki.totalDurationMs += performance.now() - started;
+        if (error) trace.errors.push(safeErrorMetadata('fuseki-http', error));
+      };
 
       const request = originalRequest.apply(this, args);
       request.once('response', response => {
         increment(trace.fuseki.statusCounts, String(response.statusCode || 'unknown'));
-        response.once('end', () => {
-          trace.fuseki.totalDurationMs += performance.now() - started;
-        });
+        response.once('end', () => accountCompletion());
+        response.once('aborted', () => accountCompletion(new Error('response-aborted')));
+        response.once('error', error => accountCompletion(error));
       });
-      request.once('error', error => {
-        trace.fuseki.totalDurationMs += performance.now() - started;
-        trace.errors.push({ source: 'fuseki-http', name: error.name || 'Error', message: error.message || String(error) });
-      });
+      request.once('error', error => accountCompletion(error));
       return request;
     }
 
@@ -231,40 +247,28 @@ function installFusekiHttpProbe({ storage, fusekiUrls = [] }) {
 }
 
 function createPhase8Tier1Instrumentation(options = {}) {
-  const enabled = options.enabled === true;
-  if (!enabled) {
-    return {
-      middleware: null,
-      dispose() {}
-    };
-  }
+  if (options.enabled !== true) return { middleware: null, dispose() {} };
 
   const storage = new AsyncLocalStorage();
   const rootAction = options.rootAction || DEFAULT_ROOT_ACTION;
   const outputPath = path.resolve(options.outputPath || DEFAULT_OUTPUT);
   const defaultRecipientCount = Number(options.recipientCount);
   const caseLabel = options.caseLabel || undefined;
-  const onInstrumentationError =
-    typeof options.onInstrumentationError === 'function' ? options.onInstrumentationError : () => {};
+  const onInstrumentationError = typeof options.onInstrumentationError === 'function' ? options.onInstrumentationError : () => {};
   const restoreHttp = installFusekiHttpProbe({
     storage,
     fusekiUrls: [options.fusekiBase, options.sparqlEndpoint].filter(Boolean)
   });
 
   function reportInstrumentationError(error) {
-    try {
-      onInstrumentationError(error);
-    } catch (_ignored) {
-      // Instrumentation callbacks must never block the real delivery path.
-    }
+    try { onInstrumentationError(error); } catch (_ignored) {}
   }
 
   function maybeFinalizeTrace(trace) {
     if (!trace || trace.finalized || !trace.rootSettled || trace.pendingDetachedLocalDeliveries > 0) return false;
     trace.finalized = true;
     try {
-      const record = finishTrace(trace, trace.rootError);
-      tryWriteJsonLine(outputPath, record, reportInstrumentationError);
+      tryWriteJsonLine(outputPath, finishTrace(trace, trace.rootError), reportInstrumentationError);
     } catch (error) {
       reportInstrumentationError(error);
     }
@@ -276,43 +280,39 @@ function createPhase8Tier1Instrumentation(options = {}) {
   const previousLocalDeliveryObserver = globalThis[observerKey];
   const previousLocalDeliveryResultObserver = globalThis[resultObserverKey];
 
-  const localDeliveryObserver = (phase, _activity, error) => {
+  const localDeliveryObserver = (phase, activity, error) => {
+    if (typeof previousLocalDeliveryObserver === 'function') {
+      try { previousLocalDeliveryObserver(phase, activity, error); } catch (observerError) { reportInstrumentationError(observerError); }
+    }
     const trace = storage.getStore();
     if (!trace) return;
-
     if (phase === 'start') {
       trace.pendingDetachedLocalDeliveries += 1;
       return;
     }
-
     if (phase === 'finish') {
-      if (error) {
-        trace.errors.push({
-          source: 'detached-local-delivery',
-          name: error.name || 'Error',
-          message: error.message || String(error)
-        });
+      if (trace.pendingDetachedLocalDeliveries <= 0) {
+        trace.errors.push({ source: 'detached-local-delivery-observer-unbalanced' });
+        maybeFinalizeTrace(trace);
+        return;
       }
-      trace.pendingDetachedLocalDeliveries = Math.max(0, trace.pendingDetachedLocalDeliveries - 1);
+      if (error) trace.errors.push(safeErrorMetadata('detached-local-delivery', error));
+      trace.pendingDetachedLocalDeliveries -= 1;
       maybeFinalizeTrace(trace);
+      return;
     }
+    trace.errors.push({ source: 'detached-local-delivery-observer-unknown-phase' });
   };
 
-  const localDeliveryResultObserver = (_activity, result) => {
+  const localDeliveryResultObserver = (activity, result) => {
+    if (typeof previousLocalDeliveryResultObserver === 'function') {
+      try { previousLocalDeliveryResultObserver(activity, result); } catch (observerError) { reportInstrumentationError(observerError); }
+    }
     const trace = storage.getStore();
     if (!trace || !result) return;
-
     const successes = Array.isArray(result.success) ? result.success : [];
     const failures = Array.isArray(result.failures) ? result.failures : [];
-
-    if (failures.length > 0) {
-      trace.errors.push({
-        source: 'detached-local-delivery-partial',
-        failureCount: failures.length,
-        failures: [...failures]
-      });
-    }
-
+    if (failures.length > 0) trace.errors.push({ source: 'detached-local-delivery-partial', failureCount: failures.length });
     if (Number.isInteger(trace.recipientCount) && trace.recipientCount > 0 && successes.length !== trace.recipientCount) {
       trace.errors.push({
         source: 'detached-local-delivery-count-mismatch',
@@ -334,7 +334,6 @@ function createPhase8Tier1Instrumentation(options = {}) {
         const currentTrace = storage.getStore();
         const isRoot = actionName === rootAction && !currentTrace;
         let trace = currentTrace;
-
         if (isRoot) {
           try {
             trace = createTrace({
@@ -347,32 +346,23 @@ function createPhase8Tier1Instrumentation(options = {}) {
             return next(ctx);
           }
         }
-
         if (!trace) return next(ctx);
 
         const started = performance.now();
         trace.actionCount += 1;
         increment(trace.actionCounts, actionName || 'unknown');
         increment(trace.categoryCounts, classifyAction(actionName));
-
         const invoke = async () => {
           try {
             return await next(ctx);
           } catch (error) {
-            trace.errors.push({
-              source: 'moleculer-action',
-              action: actionName || 'unknown',
-              name: error.name || 'Error',
-              message: error.message || String(error)
-            });
+            trace.errors.push(safeErrorMetadata('moleculer-action', error, { action: actionName || 'unknown' }));
             throw error;
           } finally {
             increment(trace.actionDurationsMs, actionName || 'unknown', performance.now() - started);
           }
         };
-
         if (!isRoot) return invoke();
-
         try {
           return await storage.run(trace, invoke);
         } catch (error) {
@@ -411,11 +401,14 @@ module.exports = {
   LOCAL_DELIVERY_RESULT_OBSERVER_SYMBOL_KEY,
   classifyAction,
   createTrace,
+  evidenceFusekiPath,
   finishTrace,
   createPhase8Tier1Instrumentation,
   getRequestMethod,
   installFusekiHttpProbe,
+  matchingFusekiTarget,
   normalizeUrl,
+  safeErrorMetadata,
   targetMatchesFuseki,
   tryWriteJsonLine,
   writeJsonLine

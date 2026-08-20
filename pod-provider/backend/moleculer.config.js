@@ -19,6 +19,7 @@ const SkipOrphanBlankNodesCleanupMiddleware = require('./middlewares/skip-orphan
 const ApdmLocalDeliveryDatasetExistMemoMiddleware = require('./middlewares/apdm-local-delivery-dataset-exist-memo');
 const AdspActionLocalityMiddleware = require('./middlewares/adsp-action-locality');
 const { createPhase8Tier1Instrumentation } = require('./lib/apdm-phase8-tier1-instrumentation');
+const { createPhase11QueryAttribution } = require('./lib/apdm-phase11-query-attribution');
 const CONFIG = require('./config/config');
 const errorHandler = require('./config/errorHandler');
 const {
@@ -51,6 +52,18 @@ function createPodCellMiddlewares() {
     sparqlEndpoint: CONFIG.SPARQL_ENDPOINT
   });
 
+  // Phase 11 is measurement-only and fail-closed. It attributes triplestore.query
+  // calls within the same real local-delivery lineage observed by Phase 8, but it
+  // never changes a query, its result, or authorization context.
+  const phase11QueryAttribution = createPhase11QueryAttribution({
+    enabled: CONFIG.APDM_PHASE11_QUERY_ATTRIBUTION_ENABLED,
+    outputPath: CONFIG.APDM_PHASE11_QUERY_ATTRIBUTION_OUTPUT,
+    recipientCount: CONFIG.APDM_PHASE8_RECIPIENT_COUNT,
+    caseLabel: CONFIG.APDM_PHASE8_CASE_LABEL,
+    maxKeys: CONFIG.APDM_PHASE11_QUERY_ATTRIBUTION_MAX_KEYS,
+    maxContexts: CONFIG.APDM_PHASE11_QUERY_ATTRIBUTION_MAX_CONTEXTS
+  });
+
   // Keep the production Pod/SemApps cell middleware order exactly as before.
   // Non-production P1 groups intentionally do not attach these middlewares:
   // several of them have startup dependencies on LDP/WebACL/etc. that belong
@@ -60,6 +73,8 @@ function createPodCellMiddlewares() {
     CacherMiddleware(cacherConfig),
     WebAclMiddleware({ baseUrl: CONFIG.BASE_URL, podProvider: true }),
     SkipOrphanBlankNodesCleanupMiddleware({ enabled: CONFIG.SKIP_ORPHAN_BLANK_NODE_CLEANUP }),
+    // Phase 10 remains default-OFF. When explicitly enabled it owns exactly one
+    // process-global local-delivery scope seam and refuses ambiguous duplicate ownership.
     ApdmLocalDeliveryDatasetExistMemoMiddleware({ enabled: CONFIG.APDM_LOCAL_DELIVERY_DATASET_EXIST_MEMO_ENABLED }),
     ObjectsWatcherMiddleware({ baseUrl: CONFIG.BASE_URL, podProvider: true, postWithoutRecipients: true }),
     LongFormTextMiddleware(),
@@ -79,7 +94,10 @@ function createPodCellMiddlewares() {
     AppControlMiddleware({ baseUrl: CONFIG.BASE_URL })
   ];
 
+  // Keep APDM measurement entirely opt-in. Phase 8 is installed first so
+  // Phase 11 can safely chain its local-delivery observer in benchmark runs.
   if (phase8Instrumentation.middleware) middlewares.push(phase8Instrumentation.middleware);
+  if (phase11QueryAttribution.middleware) middlewares.push(phase11QueryAttribution.middleware);
   return middlewares;
 }
 
