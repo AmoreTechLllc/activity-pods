@@ -15,11 +15,7 @@ function makeService(overrides = {}) {
 }
 
 function localAccount(overrides = {}) {
-  return {
-    username: 'alice',
-    webId: ACTOR,
-    ...overrides
-  };
+  return { username: 'alice', webId: ACTOR, ...overrides };
 }
 
 function localActor(overrides = {}) {
@@ -64,9 +60,7 @@ describe('ActivityPub signing authority boundary', () => {
         throw new Error(`Unexpected action: ${action}`);
       })
     };
-
     const result = await makeService()._validateLocalActor(ctx, ACTOR);
-
     expect(result.ok).toBe(true);
     expect(result.account).toEqual(account);
     expect(result.actor.id).toBe(ACTOR);
@@ -76,51 +70,24 @@ describe('ActivityPub signing authority boundary', () => {
     ]);
   });
 
-  test('rejects a remote actor before actor lookup', async () => {
+  test.each([
+    ['remote actor', 'https://remote.example/users/alice'],
+    ['same-host non-account', 'http://localhost:3000/not-a-user']
+  ])('rejects %s before accepting actor authority', async (_label, actorUri) => {
     const ctx = {
       call: jest.fn(async action => {
         if (action === 'auth.account.findByWebId') return null;
         throw new Error(`Unexpected action: ${action}`);
       })
     };
-
-    const result = await makeService()._validateLocalActor(ctx, 'https://remote.example/users/alice');
-
-    expect(result).toMatchObject({
-      ok: false,
-      error: 'ACTOR_NOT_LOCAL',
-      retryable: false
-    });
+    const result = await makeService()._validateLocalActor(ctx, actorUri);
+    expect(result).toMatchObject({ ok: false, error: 'ACTOR_NOT_LOCAL', retryable: false });
     expect(ctx.call).toHaveBeenCalledTimes(1);
   });
 
-  test('rejects a same-host URL that is not an actual local account', async () => {
-    const ctx = {
-      call: jest.fn(async action => {
-        if (action === 'auth.account.findByWebId') return null;
-        throw new Error(`Unexpected action: ${action}`);
-      })
-    };
-
-    const result = await makeService()._validateLocalActor(ctx, 'http://localhost:3000/not-a-user');
-
-    expect(result).toMatchObject({
-      ok: false,
-      error: 'ACTOR_NOT_LOCAL',
-      retryable: false
-    });
-  });
-
-  test('fails closed and retryable when local account verification is unavailable', async () => {
-    const ctx = {
-      call: jest.fn(async () => {
-        throw new Error('database unavailable');
-      })
-    };
-
-    const result = await makeService()._validateLocalActor(ctx, ACTOR);
-
-    expect(result).toEqual({
+  test('fails closed and retryable when account authority is unavailable', async () => {
+    const ctx = { call: jest.fn(async () => { throw new Error('database unavailable'); }) };
+    await expect(makeService()._validateLocalActor(ctx, ACTOR)).resolves.toEqual({
       ok: false,
       error: 'ACTOR_NOT_LOCAL',
       message: 'local account verification unavailable',
@@ -128,27 +95,19 @@ describe('ActivityPub signing authority boundary', () => {
     });
   });
 
-  test('rejects an account whose resolved actor does not exactly match actorUri', async () => {
+  test('requires the resolved actor ID to exactly match the requested actor URI', async () => {
     const ctx = {
       call: jest.fn(async action => {
         if (action === 'auth.account.findByWebId') return localAccount();
-        if (action === 'activitypub.actor.get') {
-          return localActor({ id: 'http://localhost:3000/bob' });
-        }
+        if (action === 'activitypub.actor.get') return localActor({ id: 'http://localhost:3000/bob' });
         throw new Error(`Unexpected action: ${action}`);
       })
     };
-
     const result = await makeService()._validateLocalActor(ctx, ACTOR);
-
-    expect(result).toMatchObject({
-      ok: false,
-      error: 'ACTOR_NOT_LOCAL',
-      retryable: false
-    });
+    expect(result).toMatchObject({ ok: false, error: 'ACTOR_NOT_LOCAL', retryable: false });
   });
 
-  test('rejects non-HTTP actor identifiers and URL credentials before any lookup', async () => {
+  test('rejects non-HTTP actors and URL credentials before any authority lookup', async () => {
     for (const actorUri of [
       'did:example:alice',
       'ftp://localhost/alice',
@@ -162,103 +121,56 @@ describe('ActivityPub signing authority boundary', () => {
     }
   });
 
-  test('resolves the exact actor-attached RSA key with dataset context', async () => {
+  test('resolves exactly one actor-attached RSA key in the authoritative account dataset', async () => {
     const ctx = {
       meta: { traceId: 'trace-1' },
       call: jest.fn(async (action, params, options) => {
         expect(action).toBe('keys.getOrCreateWebIdKeys');
         expect(params).toEqual({ webId: ACTOR, keyType: RSA_KEY_TYPE });
         expect(options).toEqual({
-          meta: {
-            traceId: 'trace-1',
-            dataset: 'alice',
-            webId: ACTOR
-          }
+          meta: { traceId: 'trace-1', dataset: 'alice', webId: ACTOR }
         });
         return [rsaPrivateKey()];
       })
     };
-
-    const result = await makeService()._resolveActivityPubSigningMaterial(
-      ctx,
-      ACTOR,
-      localAccount(),
-      localActor()
-    );
-
-    expect(result).toEqual({
-      ok: true,
-      keyId: KEY_ID,
-      privateKeyPem: 'PRIVATE'
-    });
+    await expect(
+      makeService()._resolveActivityPubSigningMaterial(ctx, ACTOR, localAccount(), localActor())
+    ).resolves.toEqual({ ok: true, keyId: KEY_ID, privateKeyPem: 'PRIVATE' });
   });
 
   test.each([
     ['wrong owner', rsaPrivateKey({ owner: 'http://localhost:3000/bob' })],
     ['wrong controller', rsaPrivateKey({ controller: 'http://localhost:3000/bob' })],
     ['missing private key', rsaPrivateKey({ privateKeyPem: undefined })],
-    ['unattached public key', rsaPrivateKey({ 'rdfs:seeAlso': 'http://localhost:3000/public-key/other' })],
-    ['non-HTTP public key', rsaPrivateKey({ 'rdfs:seeAlso': 'did:key:zBad' })]
+    ['unattached key', rsaPrivateKey({ 'rdfs:seeAlso': 'http://localhost:3000/public-key/other' })],
+    ['unsafe key identifier', rsaPrivateKey({ 'rdfs:seeAlso': 'https://pods.example/key\"algorithm=none' })]
   ])('rejects signing material with %s', async (_label, key) => {
-    const ctx = {
-      meta: {},
-      call: jest.fn(async () => [key])
-    };
-
+    const ctx = { meta: {}, call: jest.fn(async () => [key]) };
     const result = await makeService()._resolveActivityPubSigningMaterial(
       ctx,
       ACTOR,
       localAccount(),
       localActor()
     );
-
-    expect(result).toMatchObject({
-      ok: false,
-      error: 'KEY_UNAVAILABLE',
-      retryable: false
-    });
+    expect(result).toMatchObject({ ok: false, error: 'KEY_UNAVAILABLE', retryable: false });
   });
 
-  test('rejects ambiguous actor-controlled RSA keys', async () => {
-    const ctx = {
+  test('rejects ambiguous actor-controlled keys and marks key outages retryable', async () => {
+    const ambiguousCtx = {
       meta: {},
-      call: jest.fn(async () => [
-        rsaPrivateKey(),
-        rsaPrivateKey({ id: 'http://localhost:3000/alice/data/key/private-rsa-2' })
-      ])
+      call: jest.fn(async () => [rsaPrivateKey(), rsaPrivateKey({ id: 'second-key' })])
     };
+    await expect(
+      makeService()._resolveActivityPubSigningMaterial(ambiguousCtx, ACTOR, localAccount(), localActor())
+    ).resolves.toMatchObject({ ok: false, error: 'KEY_UNAVAILABLE', retryable: false });
 
-    const result = await makeService()._resolveActivityPubSigningMaterial(
-      ctx,
-      ACTOR,
-      localAccount(),
-      localActor()
-    );
-
-    expect(result).toEqual({
-      ok: false,
-      error: 'KEY_UNAVAILABLE',
-      message: 'multiple actor-controlled RSA signing keys are attached to the actor',
-      retryable: false
-    });
-  });
-
-  test('marks key-service outages retryable without weakening authority', async () => {
-    const ctx = {
+    const outageCtx = {
       meta: {},
-      call: jest.fn(async () => {
-        throw new Error('key service unavailable');
-      })
+      call: jest.fn(async () => { throw new Error('key service unavailable'); })
     };
-
-    const result = await makeService()._resolveActivityPubSigningMaterial(
-      ctx,
-      ACTOR,
-      localAccount(),
-      localActor()
-    );
-
-    expect(result).toEqual({
+    await expect(
+      makeService()._resolveActivityPubSigningMaterial(outageCtx, ACTOR, localAccount(), localActor())
+    ).resolves.toEqual({
       ok: false,
       error: 'KEY_UNAVAILABLE',
       message: 'RSA key lookup unavailable',
@@ -266,7 +178,7 @@ describe('ActivityPub signing authority boundary', () => {
     });
   });
 
-  test('batch signing uses only deployed ActivityPods/SemApps authority services', async () => {
+  test('batch signing traverses only the deployed account, actor and key authority chain', async () => {
     const request = {
       requestId: 'req-1',
       actorUri: ACTOR,
@@ -276,7 +188,6 @@ describe('ActivityPub signing authority boundary', () => {
       body: { bytes: '{}', encoding: 'utf8' },
       digest: { mode: 'server_compute' }
     };
-
     const ctx = {
       params: { requests: [request] },
       meta: { $headers: { authorization: 'Bearer ignored-by-test' } },
@@ -287,28 +198,25 @@ describe('ActivityPub signing authority boundary', () => {
         throw new Error(`Unexpected action: ${action}`);
       })
     };
-
-    const signOne = jest.fn(async (_ctx, actorUri, keyId, privateKeyPem, item) => ({
+    const signOne = jest.fn(async (actorUri, keyId, privateKeyPem, item) => ({
       requestId: item.requestId,
       ok: true,
       actorUri,
       keyId,
       privateKeyPem
     }));
-    const service = makeService({ _auth: jest.fn(), _signOne: signOne });
-
-    const result = await signingSchema.actions.signHttpRequestsBatch.handler.call(service, ctx);
-
-    expect(result.results).toEqual([
-      {
-        requestId: 'req-1',
-        ok: true,
-        actorUri: ACTOR,
-        keyId: KEY_ID,
-        privateKeyPem: 'PRIVATE'
-      }
-    ]);
-    expect(signOne).toHaveBeenCalledTimes(1);
+    const result = await signingSchema.actions.signHttpRequestsBatch.handler.call(
+      makeService({ _auth: jest.fn(), _signOne: signOne }),
+      ctx
+    );
+    expect(result.results).toEqual([{
+      requestId: 'req-1',
+      ok: true,
+      actorUri: ACTOR,
+      keyId: KEY_ID,
+      privateKeyPem: 'PRIVATE'
+    }]);
+    expect(signOne).toHaveBeenCalledWith(ACTOR, KEY_ID, 'PRIVATE', request);
     expect(ctx.call.mock.calls.map(([name]) => name)).toEqual([
       'auth.account.findByWebId',
       'activitypub.actor.get',
