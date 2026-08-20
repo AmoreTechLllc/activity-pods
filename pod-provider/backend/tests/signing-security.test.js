@@ -157,4 +157,50 @@ describe('ATProto provisioning authority binding', () => {
     });
     expect(ctx.call).not.toHaveBeenCalled();
   });
+
+  test('rejects an HTTP WebID that is not bound to a local account before any key mutation', async () => {
+    const ctx = {
+      params: { canonicalAccountId: 'https://remote.example/alice' },
+      meta: {},
+      call: jest.fn().mockResolvedValueOnce(null)
+    };
+    const service = { _auth: jest.fn() };
+
+    await expect(signingService.actions.provisionAtprotoIdentity.handler.call(service, ctx)).rejects.toMatchObject({
+      code: 403,
+      type: 'ACCOUNT_NOT_LOCAL'
+    });
+    expect(ctx.call).toHaveBeenCalledTimes(1);
+    expect(ctx.call).toHaveBeenCalledWith('auth.account.findByWebId', { webId: 'https://remote.example/alice' });
+  });
+
+  test('uses the authoritative local account dataset for AT key creation', async () => {
+    const canonicalAccountId = 'https://pods.example/alice';
+    const ctx = {
+      params: { canonicalAccountId, did: 'did:plc:alice', handle: 'alice.example' },
+      meta: { requestId: 'req-1' },
+      call: jest.fn()
+        .mockResolvedValueOnce({ webId: canonicalAccountId, username: 'alice-dataset' })
+        .mockResolvedValueOnce({ keyRef: 'commit-key' })
+        .mockResolvedValueOnce({ keyRef: 'rotation-key' })
+        .mockResolvedValueOnce({ canonicalAccountId, webId: canonicalAccountId })
+    };
+    const service = { _auth: jest.fn() };
+
+    await signingService.actions.provisionAtprotoIdentity.handler.call(service, ctx);
+
+    expect(ctx.call).toHaveBeenNthCalledWith(1, 'auth.account.findByWebId', { webId: canonicalAccountId });
+    expect(ctx.call).toHaveBeenNthCalledWith(
+      2,
+      'keys.generateSecp256k1Key',
+      { webId: canonicalAccountId },
+      { meta: { requestId: 'req-1', dataset: 'alice-dataset', webId: canonicalAccountId } }
+    );
+    expect(ctx.call).toHaveBeenNthCalledWith(
+      3,
+      'keys.generateSecp256k1Key',
+      { webId: canonicalAccountId },
+      { meta: { requestId: 'req-1', dataset: 'alice-dataset', webId: canonicalAccountId } }
+    );
+  });
 });
