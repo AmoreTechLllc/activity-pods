@@ -26,6 +26,12 @@ const DEFAULT_RECOVERY_BOUND_MS = 30000;
 const DEFAULT_REPLAY_OBSERVATION_MS = 8000;
 const ROOT_ACTION = 'activitypub.outbox.post';
 const DEFAULT_VICTIM_NODE = 'adsp-p2-pod-cell-4';
+const DEFAULT_POD_CELL_NODES = Object.freeze([
+  'adsp-p2-pod-cell-1',
+  'adsp-p2-pod-cell-2',
+  'adsp-p2-pod-cell-3',
+  'adsp-p2-pod-cell-4'
+]);
 const EXPECTED_VICTIM_BOUNDARY = 'root-action-complete-response-held';
 
 function sleep(ms) {
@@ -69,6 +75,31 @@ function requestPayload(manifest, recipients, requestId) {
   };
 }
 
+function faultBurstNodeAssignments(requestCount, victimNode, nodeIDs = DEFAULT_POD_CELL_NODES) {
+  if (!Number.isInteger(requestCount) || requestCount < nodeIDs.length) {
+    throw new Error(`Fault burst must contain at least ${nodeIDs.length} requests to cover every Pod cell`);
+  }
+  if (!Array.isArray(nodeIDs) || nodeIDs.length !== 4 || new Set(nodeIDs).size !== nodeIDs.length) {
+    throw new Error('Fault burst requires exactly four unique Pod-cell node IDs');
+  }
+  if (!nodeIDs.includes(victimNode)) {
+    throw new Error(`Fault-burst victim ${victimNode} is not one of the configured Pod cells`);
+  }
+
+  const survivors = nodeIDs.filter(nodeID => nodeID !== victimNode);
+  const assignments = [victimNode];
+  for (let index = 1; index < requestCount; index += 1) {
+    assignments.push(survivors[(index - 1) % survivors.length]);
+  }
+  if (assignments.slice(1).some(nodeID => nodeID === victimNode)) {
+    throw new Error('Non-target fault-burst request was assigned to the SIGKILL victim');
+  }
+  for (const survivor of survivors) {
+    if (!assignments.includes(survivor)) throw new Error(`Fault burst does not cover survivor ${survivor}`);
+  }
+  return assignments;
+}
+
 function submitRequest({ broker, manifest, recipients, requestId, timeoutMs, nodeID }) {
   const startedAtEpochMs = Date.now();
   const options = {
@@ -93,7 +124,7 @@ function submitRequest({ broker, manifest, recipients, requestId, timeoutMs, nod
         message: error?.message || String(error)
       }
     }));
-  return { requestId, promise };
+  return { requestId, nodeID: nodeID || null, promise };
 }
 
 function assertUnique(values, label) {
@@ -331,6 +362,7 @@ async function main(argv = process.argv.slice(2)) {
   const rejoinRequests = positiveInteger(process.env.ADSP_P2_REJOIN_REQUESTS || 8, 'rejoin requests');
   const concurrency = positiveInteger(process.env.ADSP_P2_CONCURRENCY || 8, 'concurrency');
   const recipients = manifest.recipients.slice(0, recipientCount).map(recipient => recipient.webId);
+  const faultNodeAssignments = faultBurstNodeAssignments(faultBurstCount, victimNode);
 
   const broker = new ServiceBroker({
     nodeID: `adsp-p2-loss-driver-${process.pid}-${Date.now()}`,
@@ -358,7 +390,7 @@ async function main(argv = process.argv.slice(2)) {
       recipients,
       requestId: victimRequestId,
       timeoutMs: traceTimeoutMs,
-      nodeID: victimNode
+      nodeID: faultNodeAssignments[0]
     })];
     for (let index = 2; index <= faultBurstCount; index += 1) {
       burst.push(submitRequest({
@@ -366,7 +398,8 @@ async function main(argv = process.argv.slice(2)) {
         manifest,
         recipients,
         requestId: createRequestId(runLabel, 'fault', index),
-        timeoutMs: traceTimeoutMs
+        timeoutMs: traceTimeoutMs,
+        nodeID: faultNodeAssignments[index - 1]
       }));
     }
 
@@ -464,6 +497,7 @@ async function main(argv = process.argv.slice(2)) {
       faultBurst: {
         requestCount: faultBurstCount,
         killEpochMs,
+        plannedNodeAssignments: burst.map(entry => ({ requestId: entry.requestId, nodeID: entry.nodeID })),
         acceptedCount: fault.accepted.length,
         rejectedCount: fault.rejected.length,
         accepted: fault.accepted,
@@ -488,6 +522,8 @@ async function main(argv = process.argv.slice(2)) {
         targetedVictimBoundaryProvenBeforeKill: true,
         targetedVictimBoundary: EXPECTED_VICTIM_BOUNDARY,
         targetedVictimCallerRejectedExactlyOnce: true,
+        faultBurstVictimExclusiveByConstruction: faultNodeAssignments.slice(1).every(nodeID => nodeID !== victimNode),
+        faultBurstCoveredAllFourCells: new Set(faultNodeAssignments).size === DEFAULT_POD_CELL_NODES.length,
         acceptedActivityIdsUnique: true,
         acceptedRequestIdsUnique: true,
         duplicateCompletedTraceForRejectedRequest: false,
@@ -523,6 +559,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  DEFAULT_POD_CELL_NODES,
   EXPECTED_VICTIM_BOUNDARY,
   assertExecutorSet,
   assertTargetedVictimRejected,
@@ -530,6 +567,7 @@ module.exports = {
   auditFaultBurst,
   createRequestId,
   endpointCount,
+  faultBurstNodeAssignments,
   findRootEntries,
   observeRejectedTraceCardinality,
   readBarrierTimestamp,
