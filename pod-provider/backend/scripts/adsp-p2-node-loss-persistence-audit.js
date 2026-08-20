@@ -72,13 +72,28 @@ function datasetQueryUrl(fusekiBase, dataset) {
   return base.toString();
 }
 
-async function queryMarkerCount({ fetchImpl, fusekiBase, dataset, requestId }) {
+function buildFusekiAuthorization(fusekiUser, fusekiPassword) {
+  const hasUser = typeof fusekiUser === 'string' && fusekiUser.length > 0;
+  const hasPassword = typeof fusekiPassword === 'string' && fusekiPassword.length > 0;
+  if (hasUser !== hasPassword) {
+    throw new Error('Fuseki persistence audit requires both username and password when authentication is configured');
+  }
+  if (!hasUser) return null;
+  if (/[:\r\n]/u.test(fusekiUser)) throw new Error('Unsafe Fuseki audit username');
+  if (/[\r\n]/u.test(fusekiPassword)) throw new Error('Unsafe Fuseki audit password');
+  return `Basic ${Buffer.from(`${fusekiUser}:${fusekiPassword}`, 'utf8').toString('base64')}`;
+}
+
+async function queryMarkerCount({ fetchImpl, fusekiBase, dataset, requestId, authorization = null }) {
+  const headers = {
+    accept: 'application/sparql-results+json',
+    'content-type': 'application/x-www-form-urlencoded; charset=utf-8'
+  };
+  if (authorization) headers.authorization = authorization;
+
   const response = await fetchImpl(datasetQueryUrl(fusekiBase, dataset), {
     method: 'POST',
-    headers: {
-      accept: 'application/sparql-results+json',
-      'content-type': 'application/x-www-form-urlencoded; charset=utf-8'
-    },
+    headers,
     body: new URLSearchParams({ query: buildMarkerQuery(requestId) }).toString(),
     signal: AbortSignal.timeout(30000)
   });
@@ -95,12 +110,26 @@ async function queryMarkerCount({ fetchImpl, fusekiBase, dataset, requestId }) {
   return count;
 }
 
-async function auditPersistence({ result, dataset, fusekiBase = DEFAULT_FUSEKI_BASE, fetchImpl = fetch }) {
+async function auditPersistence({
+  result,
+  dataset,
+  fusekiBase = DEFAULT_FUSEKI_BASE,
+  fusekiUser,
+  fusekiPassword,
+  fetchImpl = fetch
+}) {
   const expectations = collectOutcomeExpectations(result);
+  const authorization = buildFusekiAuthorization(fusekiUser, fusekiPassword);
   const records = [];
 
   for (const expectation of expectations) {
-    const count = await queryMarkerCount({ fetchImpl, fusekiBase, dataset, requestId: expectation.requestId });
+    const count = await queryMarkerCount({
+      fetchImpl,
+      fusekiBase,
+      dataset,
+      requestId: expectation.requestId,
+      authorization
+    });
     const ok = count >= expectation.minCount && count <= expectation.maxCount;
     records.push({
       ...expectation,
@@ -118,6 +147,7 @@ async function auditPersistence({ result, dataset, fusekiBase = DEFAULT_FUSEKI_B
     fixture: 'horizontal-redis-node-loss-persistence-audit',
     dataset,
     fusekiBase,
+    authenticatedQuery: authorization !== null,
     requestCount: records.length,
     acceptedCount: records.filter(record => record.callerOutcome === 'accepted').length,
     rejectedCount: records.filter(record => record.callerOutcome === 'rejected').length,
@@ -149,12 +179,15 @@ async function main(argv = process.argv.slice(2)) {
   const audit = await auditPersistence({
     result,
     dataset,
-    fusekiBase: process.env.ADSP_P2_FUSEKI_BASE || DEFAULT_FUSEKI_BASE
+    fusekiBase: process.env.ADSP_P2_FUSEKI_BASE || DEFAULT_FUSEKI_BASE,
+    fusekiUser: process.env.ADSP_P2_FUSEKI_USER,
+    fusekiPassword: process.env.ADSP_P2_FUSEKI_PASSWORD
   });
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, `${JSON.stringify(audit, null, 2)}\n`, 'utf8');
   process.stdout.write(`${JSON.stringify({
     ok: audit.passed,
+    authenticatedQuery: audit.authenticatedQuery,
     requestCount: audit.requestCount,
     targetedAmbiguousCommitPersistedExactlyOnce: audit.targetedAmbiguousCommitPersistedExactlyOnce,
     ambiguousPersistedRejectedCount: audit.ambiguousPersistedRejectedCount,
@@ -173,6 +206,7 @@ if (require.main === module) {
 
 module.exports = {
   auditPersistence,
+  buildFusekiAuthorization,
   buildMarkerQuery,
   collectOutcomeExpectations,
   datasetQueryUrl,
