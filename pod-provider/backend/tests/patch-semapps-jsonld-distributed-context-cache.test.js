@@ -30,7 +30,9 @@ const Schema = {
   async handler(ctx) {
     let ontologies = await ctx.call('ontologies.list');
     ontologies = ontologies.filter(ont => ont.preserveContextUri !== true);
-    return ontologies;
+    const prefixes = Object.fromEntries(ontologies.map(ont => [ont.prefix, ont.namespace]));
+    const context = await ctx.call('jsonld.context.parse', { context: [prefixes] });
+    return { '@context': context };
   }
 };
 `;
@@ -39,6 +41,10 @@ const Schema = {
 describe('ADSP P2 distributed JSON-LD context cache patch', () => {
   test.each(ACTION_CONTRACTS)('recognizes the pinned $name artifact', contract => {
     expect(matchesActionContract(fixture(contract.name), contract)).toBe(true);
+  });
+
+  test('does not confuse jsonld.context.get with getLocal', () => {
+    expect(matchesActionContract(fixture('jsonld.context.get'), ACTION_CONTRACTS[1])).toBe(false);
   });
 
   test.each(ACTION_CONTRACTS)('disables $name caching only in distributed mode', contract => {
