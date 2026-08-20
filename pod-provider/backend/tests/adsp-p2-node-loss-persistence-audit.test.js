@@ -67,6 +67,13 @@ describe('ADSP P2 node-loss persistence audit', () => {
     })).toThrow(/exactly one targeted ambiguous request outcome/u);
   });
 
+  test('fails closed if the held victim call was reported successful to the caller', () => {
+    expect(() => collectOutcomeExpectations({
+      victimRootEntry: { requestId: 'target' },
+      faultBurst: { accepted: [{ requestId: 'target' }], rejected: [] }
+    })).toThrow(/must be caller-rejected/u);
+  });
+
   test('constructs a bounded dataset query URL and rejects path injection', () => {
     expect(datasetQueryUrl('http://fuseki_test:3030/', 'alice')).toBe('http://fuseki_test:3030/alice/query');
     expect(() => datasetQueryUrl('http://fuseki_test:3030/', '../admin')).toThrow(/Unsafe Fuseki dataset identifier/u);
