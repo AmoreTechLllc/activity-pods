@@ -7,6 +7,13 @@ const EXPECTED_PACKAGE = '@semapps/ldp';
 const EXPECTED_VERSION = '1.1.4';
 const PATCH_MARKER = 'ADSP-P2_DISTRIBUTED_LDP_SEMANTIC_LOCALITY';
 const RELATIVE_PATH = 'services/registry/actions/register.js';
+const ORIGINAL_EXPANSION = "options.acceptedTypes && (await ctx.call('jsonld.parser.expandTypes', { types: options.acceptedTypes }))";
+const PATCHED_FRAGMENTS = [
+  "process.env.SEMAPPS_MOLECULER_MODE === 'distributed'",
+  "this.broker.getLocalService('jsonld.parser')",
+  'service.actions.expandTypes({ types: options.acceptedTypes }, { parentCtx: ctx })',
+  "ctx.call('jsonld.parser.expandTypes', { types: options.acceptedTypes })"
+];
 
 function findPackageRoot() {
   let current = path.dirname(require.resolve(EXPECTED_PACKAGE));
@@ -21,15 +28,27 @@ function findPackageRoot() {
   throw new Error(`[ADSP-P2] Could not locate ${EXPECTED_PACKAGE} package root`);
 }
 
+function isAlreadyPatched(source) {
+  if (source.includes(PATCH_MARKER)) return true;
+  return PATCHED_FRAGMENTS.every(fragment => source.includes(fragment));
+}
+
+function addPatchMarker(source) {
+  if (source.includes(PATCH_MARKER)) return source;
+  if (source.includes('const Schema = {')) {
+    return source.replace('const Schema = {', `const Schema = {\n  // ${PATCH_MARKER}`);
+  }
+  return `// ${PATCH_MARKER}\n${source}`;
+}
+
 function patchRegisterSource(source) {
-  if (source.includes(PATCH_MARKER)) return { source, changed: false };
-  const needle = "options.acceptedTypes && (await ctx.call('jsonld.parser.expandTypes', { types: options.acceptedTypes }))";
-  if (!source.includes(needle) || !source.includes('this.registeredContainers[options.name] = options')) {
+  if (isAlreadyPatched(source)) return { source, changed: false };
+  if (!source.includes(ORIGINAL_EXPANSION) || !source.includes('this.registeredContainers[options.name] = options')) {
     throw new Error('[ADSP-P2] ldp.registry.register no longer matches the pinned SemApps contract');
   }
   const replacement = `options.acceptedTypes &&\n      (process.env.SEMAPPS_MOLECULER_MODE === 'distributed'\n        ? await (() => {\n            const service = this.broker.getLocalService('jsonld.parser');\n            if (!service?.actions?.expandTypes) throw new Error('[ADSP-P2] Local jsonld.parser is not ready');\n            return service.actions.expandTypes({ types: options.acceptedTypes }, { parentCtx: ctx });\n          })()\n        : await ctx.call('jsonld.parser.expandTypes', { types: options.acceptedTypes }))`;
-  const patched = source.replace(needle, replacement).replace('const Schema = {', `const Schema = {\n  // ${PATCH_MARKER}`);
-  return { source: patched, changed: true };
+  const replaced = source.replace(ORIGINAL_EXPANSION, replacement);
+  return { source: addPatchMarker(replaced), changed: true };
 }
 
 function applyPatch() {
@@ -54,6 +73,10 @@ module.exports = {
   EXPECTED_VERSION,
   PATCH_MARKER,
   RELATIVE_PATH,
+  ORIGINAL_EXPANSION,
+  PATCHED_FRAGMENTS,
+  isAlreadyPatched,
+  addPatchMarker,
   patchRegisterSource,
   applyPatch
 };
