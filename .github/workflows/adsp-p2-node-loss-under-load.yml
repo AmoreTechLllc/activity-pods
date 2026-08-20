@@ -59,6 +59,8 @@ jobs:
       ADSP_P2_ROOT_ENTRY_EVIDENCE_ENABLED: 'true'
       ADSP_P2_VICTIM_HOLD_AFTER_ACTION: 'true'
       ADSP_P2_VICTIM_HOLD_REQUEST_PREFIX: 'adsp-p2-loss-run-${{ github.run_id }}-${{ github.run_attempt }}-fault-1-'
+      ADSP_P2_FUSEKI_USER: 'admin'
+      ADSP_P2_FUSEKI_PASSWORD: 'admin'
       REDIS_STREAM_PAYLOAD_COMPRESSION_ENABLED: 'false'
 
     steps:
@@ -108,6 +110,7 @@ jobs:
           assert.equal(typeof load.waitForExactVictimRootEntry, 'function');
           assert.equal(typeof load.assertTargetedVictimRejected, 'function');
           assert.equal(typeof persistence.auditPersistence, 'function');
+          assert.equal(typeof persistence.buildFusekiAuthorization, 'function');
           assert.equal(typeof redis.auditRedisCommandstats, 'function');
           assert.equal(typeof semanticProbe.runProbe, 'function');
           const contextPatchResult = contextCachePatch.applyPatch();
@@ -158,7 +161,7 @@ jobs:
             offeredConcurrency: 8,
             localDeliveryConcurrency: 4,
             recoveryBoundMs: 30000,
-            recoveryBoundScope: 'moleculer-endpoint-removal-and-rejoin',
+            recoveryBoundScope: 'moleculer-endpoint-removal-rejoin-and-victim-semantic-readiness',
             applicationLatencyIsDiagnosticOnly: true,
             replayObservationMs: 8000,
             victimNode: 'adsp-p2-pod-cell-4',
@@ -169,6 +172,7 @@ jobs:
             victimResponseHoldAfterRootAction: true,
             victimHoldRequestPrefix: process.env.ADSP_P2_VICTIM_HOLD_REQUEST_PREFIX,
             callerRetryEnabled: false,
+            fusekiPersistenceAuditAuthenticated: true,
             redisStreamPayloadCompressionEnabled: false,
             redisStartupStatsCapturedBeforeReset: true,
             redisStatsResetAfterHarnessAndFourCellStartupBeforeFaultScenario: true,
@@ -299,10 +303,13 @@ jobs:
           if (!result.correctness?.targetedVictimBoundaryProvenBeforeKill) throw new Error('victim held-response boundary proof missing');
           if (result.correctness?.targetedVictimBoundary !== 'root-action-complete-response-held') throw new Error('unexpected victim fault boundary');
           if (!result.correctness?.targetedVictimCallerRejectedExactlyOnce) throw new Error('victim caller rejection proof missing');
+          if (!result.correctness?.victimSemanticReadinessProvenBeforeRejoinWave) throw new Error('victim semantic readiness proof missing');
+          if (!result.correctness?.victimSemanticReadinessWithinRecoveryBound) throw new Error('victim semantic readiness exceeded recovery bound');
           if (result.victimRootEntry?.boundary !== 'root-action-complete-response-held') throw new Error('victim result boundary mismatch');
           if (result.victimRootEntry?.callerOutcome !== 'rejected') throw new Error('victim caller outcome was not rejected');
           if (result.recovery?.endpointRemovalMs > 30000) throw new Error('endpoint removal exceeded 30s bound');
           if (result.rejoin?.endpointRejoinMs > 30000) throw new Error('endpoint rejoin exceeded 30s bound');
+          if (result.rejoin?.semanticRejoinMs > 30000) throw new Error('victim semantic rejoin exceeded 30s bound');
           NODE
 
       - name: Audit authoritative sender persistence
@@ -317,6 +324,7 @@ jobs:
           const fs = require('node:fs');
           const audit = JSON.parse(fs.readFileSync('measurements/adsp-p2-node-loss/persistence-audit.json', 'utf8'));
           if (!audit.complete || !audit.passed) throw new Error('persistence audit is not complete/pass');
+          if (!audit.authenticatedQuery) throw new Error('persistence audit was not authenticated');
           if (audit.targetedAmbiguousCallerOutcome !== 'rejected') throw new Error('targeted ambiguous caller outcome mismatch');
           if (!audit.targetedAmbiguousCommitPersistedExactlyOnce) throw new Error('targeted ambiguous commit was not persisted exactly once');
           if (audit.duplicatePersistedMutationCount !== 0) throw new Error('duplicate authoritative persistence observed');
