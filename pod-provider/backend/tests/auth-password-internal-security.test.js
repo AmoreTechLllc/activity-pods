@@ -6,6 +6,7 @@ function service(overrides = {}) {
   return {
     settings: { bearerToken: 'p'.repeat(32) },
     failureBuckets: new Map(),
+    overflowBlockedUntil: 0,
     ...authPasswordService.methods,
     ...overrides
   };
@@ -84,5 +85,62 @@ describe('internal password verification capability', () => {
     for (let i = 0; i < 10; i += 1) verifier._recordFailure(key, 1000 + i);
     expect(verifier._isRateLimited(key, 2000)).toBe(true);
     expect(verifier.failureBuckets.get(key).failures).toBe(10);
+  });
+
+  test('bucket flooding never evicts an actively blocked account', () => {
+    const verifier = service();
+    const now = 10_000;
+    const protectedKey = 'protected-real-account';
+    verifier.failureBuckets.set(protectedKey, {
+      failures: 10,
+      windowStartedAt: now,
+      lastFailureAt: now
+    });
+    for (let i = 0; i < 9_999; i += 1) {
+      verifier.failureBuckets.set(`blocked-${i}`, {
+        failures: 10,
+        windowStartedAt: now,
+        lastFailureAt: now + i + 1
+      });
+    }
+
+    verifier._recordFailure('attacker-new-account', now + 100);
+
+    expect(verifier.failureBuckets.size).toBe(10_000);
+    expect(verifier.failureBuckets.has(protectedKey)).toBe(true);
+    expect(verifier.failureBuckets.has('attacker-new-account')).toBe(false);
+    expect(verifier.overflowBlockedUntil).toBe(now + 5 * 60 * 1000);
+    expect(verifier._isRateLimited('another-untracked-account', now + 101)).toBe(true);
+    expect(verifier._isRateLimited(protectedKey, now + 101)).toBe(true);
+  });
+
+  test('capacity pressure evicts only a non-blocked bucket when one exists', () => {
+    const verifier = service();
+    const now = 20_000;
+    verifier.failureBuckets.set('protected', {
+      failures: 10,
+      windowStartedAt: now,
+      lastFailureAt: now
+    });
+    verifier.failureBuckets.set('safe-to-evict', {
+      failures: 1,
+      windowStartedAt: now,
+      lastFailureAt: now - 1
+    });
+    for (let i = 0; i < 9_998; i += 1) {
+      verifier.failureBuckets.set(`blocked-${i}`, {
+        failures: 10,
+        windowStartedAt: now,
+        lastFailureAt: now + i + 1
+      });
+    }
+
+    verifier._recordFailure('new-account', now + 100);
+
+    expect(verifier.failureBuckets.size).toBe(10_000);
+    expect(verifier.failureBuckets.has('protected')).toBe(true);
+    expect(verifier.failureBuckets.has('safe-to-evict')).toBe(false);
+    expect(verifier.failureBuckets.get('new-account').failures).toBe(1);
+    expect(verifier.overflowBlockedUntil).toBe(0);
   });
 });
