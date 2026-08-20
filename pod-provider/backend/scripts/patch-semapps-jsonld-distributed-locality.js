@@ -35,8 +35,26 @@ function replaceExactly(source, needle, replacement, label, expectedCount = 1) {
   return source.split(needle).join(replacement);
 }
 
+function alreadyPatched(source, requiredFragments = []) {
+  return source.includes(PATCH_MARKER) || requiredFragments.every(fragment => source.includes(fragment));
+}
+
+function addPatchMarker(source, schemaNeedle) {
+  if (source.includes(PATCH_MARKER)) return source;
+  if (schemaNeedle && source.includes(schemaNeedle)) {
+    return source.replace(schemaNeedle, `${schemaNeedle}\n  // ${PATCH_MARKER}`);
+  }
+  return `// ${PATCH_MARKER}\n${source}`;
+}
+
 function patchContextGet(source) {
-  if (source.includes(PATCH_MARKER)) return { source, changed: false };
+  const patchedFragments = [
+    "process.env.SEMAPPS_MOLECULER_MODE === 'distributed'",
+    "getLocalService('ontologies')",
+    "service.actions.list({}, { parentCtx: ctx })",
+    "await ctx.call('ontologies.list')"
+  ];
+  if (alreadyPatched(source, patchedFragments)) return { source, changed: false };
   if (!source.includes("ctx.call('ontologies.list')") || !source.includes('this.actions.getLocal')) {
     throw new Error('[ADSP-P2] jsonld.context.get no longer matches the pinned SemApps contract');
   }
@@ -47,12 +65,19 @@ function patchContextGet(source) {
     replacement,
     'jsonld.context.get ontologies.list'
   );
-  patched = patched.replace('const Schema = {', `const Schema = {\n  // ${PATCH_MARKER}`);
+  patched = addPatchMarker(patched, 'const Schema = {');
   return { source: patched, changed: true };
 }
 
 function patchContextGetLocal(source) {
-  if (source.includes(PATCH_MARKER)) return { source, changed: false };
+  const patchedFragments = [
+    "process.env.SEMAPPS_MOLECULER_MODE === 'distributed'",
+    "getLocalService('ontologies')",
+    "service.actions.list({}, { parentCtx: ctx })",
+    'this.actions.parse({ context: [...context, prefixes] }, { parentCtx: ctx })',
+    "ctx.call('jsonld.context.parse'"
+  ];
+  if (alreadyPatched(source, patchedFragments)) return { source, changed: false };
   if (!source.includes("ctx.call('ontologies.list')") || !source.includes("ctx.call('jsonld.context.parse'")) {
     throw new Error('[ADSP-P2] jsonld.context.getLocal no longer matches the pinned SemApps contract');
   }
@@ -66,12 +91,18 @@ function patchContextGetLocal(source) {
   const parseNeedle = "context = await ctx.call('jsonld.context.parse', {\n      context: [...context, prefixes]\n    });";
   const parseReplacement = `context = process.env.SEMAPPS_MOLECULER_MODE === 'distributed'\n      ? await this.actions.parse({ context: [...context, prefixes] }, { parentCtx: ctx })\n      : await ctx.call('jsonld.context.parse', {\n          context: [...context, prefixes]\n        });`;
   patched = replaceExactly(patched, parseNeedle, parseReplacement, 'jsonld.context.getLocal parse');
-  patched = patched.replace('const Schema = {', `const Schema = {\n  // ${PATCH_MARKER}`);
+  patched = addPatchMarker(patched, 'const Schema = {');
   return { source: patched, changed: true };
 }
 
 function patchParser(source) {
-  if (source.includes(PATCH_MARKER)) return { source, changed: false };
+  const patchedFragments = [
+    "getLocalService('jsonld.document-loader')",
+    "getLocalService('jsonld.context')",
+    "this.broker.call('jsonld.document-loader.loadWithCache'",
+    "ctx.call('jsonld.context.get')"
+  ];
+  if (alreadyPatched(source, patchedFragments)) return { source, changed: false };
   const loaderNeedle = "this.broker.call('jsonld.document-loader.loadWithCache', { url, options })";
   const streamingNeedle = "this.broker.call('jsonld.document-loader.loadWithCache', { url }).then(context => context.document)";
   const contextNeedle = "if (!context) context = await ctx.call('jsonld.context.get');";
@@ -84,19 +115,24 @@ function patchParser(source) {
   let patched = replaceExactly(source, loaderNeedle, loaderReplacement, 'jsonld.parser document loader');
   patched = replaceExactly(patched, streamingNeedle, streamingReplacement, 'jsonld.parser streaming document loader');
   patched = replaceExactly(patched, contextNeedle, contextReplacement, 'jsonld.parser context lookup', 2);
-  patched = patched.replace('const JsonldParserSchema = {', `const JsonldParserSchema = {\n  // ${PATCH_MARKER}`);
+  patched = addPatchMarker(patched, 'const JsonldParserSchema = {');
   return { source: patched, changed: true };
 }
 
 function patchDocumentLoader(source) {
-  if (source.includes(PATCH_MARKER)) return { source, changed: false };
+  const patchedFragments = [
+    "getLocalService('jsonld.context')",
+    'service.actions.getLocal({}, { parentCtx: ctx })',
+    "ctx.call('jsonld.context.getLocal')"
+  ];
+  if (alreadyPatched(source, patchedFragments)) return { source, changed: false };
   const needle = "document: await ctx.call('jsonld.context.getLocal')";
   if (!source.includes(needle) || !source.includes('url === this.settings.localContextUri')) {
     throw new Error('[ADSP-P2] jsonld.document-loader no longer matches the pinned SemApps contract');
   }
   const replacement = `document: process.env.SEMAPPS_MOLECULER_MODE === 'distributed'\n              ? await (() => {\n                  const service = this.broker.getLocalService('jsonld.context');\n                  if (!service?.actions?.getLocal) throw new Error('[ADSP-P2] Local jsonld.context is not ready');\n                  return service.actions.getLocal({}, { parentCtx: ctx });\n                })()\n              : await ctx.call('jsonld.context.getLocal')`;
   let patched = replaceExactly(source, needle, replacement, 'jsonld.document-loader local context');
-  patched = patched.replace('const JsonldDocumentLoaderSchema = {', `const JsonldDocumentLoaderSchema = {\n  // ${PATCH_MARKER}`);
+  patched = addPatchMarker(patched, 'const JsonldDocumentLoaderSchema = {');
   return { source: patched, changed: true };
 }
 
@@ -132,6 +168,8 @@ module.exports = {
   EXPECTED_VERSION,
   PATCH_MARKER,
   replaceExactly,
+  alreadyPatched,
+  addPatchMarker,
   patchContextGet,
   patchContextGetLocal,
   patchParser,
