@@ -88,7 +88,7 @@ describe('signing internal authentication hardening', () => {
 
   test('service auth distinguishes malformed and invalid credentials', () => {
     const expected = 'e'.repeat(32);
-    const service = { settings: { auth: { bearerToken: expected } };
+    const service = { settings: { auth: { bearerToken: expected } } };
     expectMoleculerError(
       () => signingService.methods._auth.call(service, { meta: { $headers: {} } }),
       { code: 401, type: 'AUTH_FAILED', message: /missing or malformed/iu }
@@ -181,12 +181,7 @@ describe('ATProto provisioning authority binding', () => {
       meta: {},
       call: jest.fn().mockResolvedValueOnce(null)
     };
-    const service = {
-      _auth: jest.fn(),
-      _resolveAtprotoAccountAuthority(ctxArg, canonicalAccountId) {
-        return signingService.methods._resolveAtprotoAccountAuthority.call(this, ctxArg, canonicalAccountId);
-      }
-    };
+    const service = atprotoActionService();
 
     await expect(signingService.actions.provisionAtprotoIdentity.handler.call(service, ctx)).rejects.toMatchObject({
       code: 403,
