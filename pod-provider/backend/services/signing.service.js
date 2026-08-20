@@ -352,10 +352,28 @@ module.exports = {
           throw new MoleculerError('canonicalAccountId must be an HTTP(S) WebID without URL credentials', 400, 'INVALID_INPUT');
         }
 
+        let account;
+        try {
+          account = await ctx.call('auth.account.findByWebId', { webId: canonicalAccountId });
+        } catch (e) {
+          throw new MoleculerError('Local account verification unavailable', 503, 'ACCOUNT_AUTHORITY_UNAVAILABLE', {
+            canonicalAccountId,
+            message: e?.message
+          });
+        }
+        if (!account || account.webId !== canonicalAccountId || !account.username) {
+          throw new MoleculerError(
+            'canonicalAccountId is not bound to a local ActivityPods account',
+            403,
+            'ACCOUNT_NOT_LOCAL',
+            { canonicalAccountId }
+          );
+        }
+
         const slug = accountUrl.pathname.split('/').filter(Boolean).pop() || 'account';
         const did = ctx.params.did || `did:plc:${slug}`;
         const handle = ctx.params.handle || `${slug}.test`;
-        const keyCallMeta = { ...ctx.meta, dataset: slug, webId };
+        const keyCallMeta = { ...ctx.meta, dataset: account.username, webId };
 
         const commitKey = await ctx.call('keys.generateSecp256k1Key', { webId }, { meta: keyCallMeta });
         const rotationKey = await ctx.call('keys.generateSecp256k1Key', { webId }, { meta: keyCallMeta });
