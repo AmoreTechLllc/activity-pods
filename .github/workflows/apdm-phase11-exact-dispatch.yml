@@ -12,7 +12,10 @@ permissions:
 
 jobs:
   dispatch:
-    if: github.event.issue.number == 78 && github.event.comment.body == '/apdm-phase11-start'
+    if: >-
+      github.event.issue.number == 78 &&
+      github.event.comment.user.login == github.repository_owner &&
+      github.event.comment.body == '/apdm-phase11-start'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
