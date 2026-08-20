@@ -90,7 +90,7 @@
     "ts-mls": "^1.6.2",
     "ulid": "^3.0.2",
     "unicode-confusables": "^0.1.1",
-    "url-join": "4.0.0",
+    "url-join": "^4.0.1",
     "ws": "^8.17.0"
   },
   "engines": {
