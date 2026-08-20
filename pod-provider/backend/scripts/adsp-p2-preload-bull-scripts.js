@@ -31,6 +31,7 @@ async function preloadBullScripts({ redisUrl, commandsDir = resolveBullCommandsD
   if (!redisUrl) throw new Error('Bull Redis script preload requires a Redis URL');
   const scripts = readBullScripts(commandsDir);
   const client = new RedisImpl(redisUrl, {
+    lazyConnect: true,
     enableOfflineQueue: false,
     maxRetriesPerRequest: 1,
     retryStrategy: null
@@ -38,6 +39,7 @@ async function preloadBullScripts({ redisUrl, commandsDir = resolveBullCommandsD
 
   const loaded = [];
   try {
+    await client.connect();
     await client.ping();
     for (const script of scripts) {
       const sha = await client.script('LOAD', script.source);
