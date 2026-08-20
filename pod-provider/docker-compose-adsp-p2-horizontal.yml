@@ -36,6 +36,7 @@ x-adsp-p2-common: &adsp-p2-common
     SEMAPPS_APDM_PHASE8_INSTRUMENTATION_ENABLED: '${APDM_P8_ENABLED:-false}'
     SEMAPPS_APDM_PHASE8_RECIPIENT_COUNT: '${APDM_P8_COUNT:-0}'
     SEMAPPS_APDM_PHASE8_CASE_LABEL: 'adsp-p2-${ADSP_P2_REPLICAS:-0}r-${APDM_P8_COUNT:-0}n'
+    SEMAPPS_ADSP_ROOT_ENTRY_EVIDENCE_ENABLED: '${ADSP_P2_ROOT_ENTRY_EVIDENCE_ENABLED:-false}'
     APDM_P8_RUN_ID: '${APDM_P8_RUN_ID:-adsp-p2}'
     APDM_P8_SAMPLES: '${APDM_P8_SAMPLES:-5}'
     APDM_P8_WARMUPS: '${APDM_P8_WARMUPS:-1}'
@@ -54,6 +55,7 @@ services:
       <<: *adsp-p2-environment
       SEMAPPS_MOLECULER_NODE_ID: adsp-p2-pod-cell-1
       SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT: '/app/backend/measurements/adsp-p2/trace-${APDM_P8_COUNT:-0}-r1.jsonl'
+      SEMAPPS_ADSP_ROOT_ENTRY_EVIDENCE_OUTPUT: '/app/backend/measurements/adsp-p2/root-entry-r1.jsonl'
 
   backend_p2_2:
     <<: *adsp-p2-common
@@ -63,6 +65,7 @@ services:
       <<: *adsp-p2-environment
       SEMAPPS_MOLECULER_NODE_ID: adsp-p2-pod-cell-2
       SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT: '/app/backend/measurements/adsp-p2/trace-${APDM_P8_COUNT:-0}-r2.jsonl'
+      SEMAPPS_ADSP_ROOT_ENTRY_EVIDENCE_OUTPUT: '/app/backend/measurements/adsp-p2/root-entry-r2.jsonl'
 
   backend_p2_3:
     <<: *adsp-p2-common
@@ -72,6 +75,7 @@ services:
       <<: *adsp-p2-environment
       SEMAPPS_MOLECULER_NODE_ID: adsp-p2-pod-cell-3
       SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT: '/app/backend/measurements/adsp-p2/trace-${APDM_P8_COUNT:-0}-r3.jsonl'
+      SEMAPPS_ADSP_ROOT_ENTRY_EVIDENCE_OUTPUT: '/app/backend/measurements/adsp-p2/root-entry-r3.jsonl'
 
   backend_p2_4:
     <<: *adsp-p2-common
@@ -81,3 +85,4 @@ services:
       <<: *adsp-p2-environment
       SEMAPPS_MOLECULER_NODE_ID: adsp-p2-pod-cell-4
       SEMAPPS_APDM_PHASE8_INSTRUMENTATION_OUTPUT: '/app/backend/measurements/adsp-p2/trace-${APDM_P8_COUNT:-0}-r4.jsonl'
+      SEMAPPS_ADSP_ROOT_ENTRY_EVIDENCE_OUTPUT: '/app/backend/measurements/adsp-p2/root-entry-r4.jsonl'
