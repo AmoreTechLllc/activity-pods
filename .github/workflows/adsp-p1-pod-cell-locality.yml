@@ -138,6 +138,8 @@ jobs:
             exit 1
           fi
           docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml exec -T backend \
+            node scripts/apdm-phase8-warm-restart-ready.js
+          docker compose -f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p1-locality.yml exec -T backend \
             node scripts/apdm-phase8-real-measure.js provision \
               /app/backend/measurements/adsp-p1/actors.json 10
 
