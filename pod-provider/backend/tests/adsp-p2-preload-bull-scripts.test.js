@@ -45,7 +45,7 @@ describe('ADSP P2 Bull Redis script preload', () => {
     expect(() => readBullScripts(tempDir)).toThrow(/script is empty/u);
   });
 
-  test('SCRIPT LOADs every Bull command before closing the Redis connection', async () => {
+  test('connects explicitly and SCRIPT LOADs every Bull command before closing Redis', async () => {
     fs.writeFileSync(path.join(tempDir, 'a.lua'), 'return 1\n');
     fs.writeFileSync(path.join(tempDir, 'b.lua'), 'return 2\n');
     const calls = [];
@@ -53,6 +53,11 @@ describe('ADSP P2 Bull Redis script preload', () => {
     class FakeRedis {
       constructor(url, options) {
         calls.push(['constructor', url, options]);
+        this.status = 'wait';
+      }
+
+      async connect() {
+        calls.push(['connect']);
         this.status = 'ready';
       }
 
@@ -87,7 +92,7 @@ describe('ADSP P2 Bull Redis script preload', () => {
         { name: 'b.lua', sha: '2222222222222222222222222222222222222222' }
       ]
     });
-    expect(calls.map(call => call[0])).toEqual(['constructor', 'ping', 'script', 'script', 'quit']);
+    expect(calls.map(call => call[0])).toEqual(['constructor', 'connect', 'ping', 'script', 'script', 'quit']);
   });
 
   test('rejects invalid Redis script digests instead of claiming preload success', async () => {
@@ -95,6 +100,9 @@ describe('ADSP P2 Bull Redis script preload', () => {
 
     class FakeRedis {
       constructor() {
+        this.status = 'wait';
+      }
+      async connect() {
         this.status = 'ready';
       }
       async ping() {}
