@@ -6,6 +6,7 @@ on:
       - agent/apdm-phase11-query-attribution
     paths:
       - 'pod-provider/backend/docs/apdm-phase11-query-attribution.md'
+      - 'pod-provider/docker/backend.dockerfile'
 
 permissions:
   actions: read
