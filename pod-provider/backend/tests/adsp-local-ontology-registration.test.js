@@ -2,8 +2,10 @@
 
 const AdspLocalOntologyRegistrationMiddleware = require('../middlewares/adsp-local-ontology-registration');
 const {
+  DEFAULT_READINESS_ACTIONS,
   baselinePrefixes,
-  isLocalOntologyBaselineReady
+  isLocalOntologyBaselineReady,
+  waitForBrokerStarted
 } = require('../middlewares/adsp-local-ontology-registration');
 
 function createService({ configured = ['rdfs', 'semapps'], present = ['rdfs', 'semapps'], register } = {}) {
@@ -18,6 +20,12 @@ function wireMiddleware(options, broker, next = jest.fn()) {
   const middleware = AdspLocalOntologyRegistrationMiddleware(options);
   middleware.created(broker);
   return { middleware, wrapped: middleware.call(next), next };
+}
+
+function wireLocalAction(options, broker, actionName, next = jest.fn(async ctx => ctx)) {
+  const middleware = AdspLocalOntologyRegistrationMiddleware(options);
+  middleware.created(broker);
+  return { middleware, wrapped: middleware.localAction(next, { name: actionName }), next };
 }
 
 describe('ADSP distributed local ontology registration middleware', () => {
@@ -101,5 +109,53 @@ describe('ADSP distributed local ontology registration middleware', () => {
     await expect(wrapped('ontologies.register', { prefix: 'as' })).rejects.toThrow(
       /Local ontologies baseline did not become ready/u
     );
+  });
+
+  test('guards the ActivityPub root action until Moleculer finishes all local started hooks', async () => {
+    expect(DEFAULT_READINESS_ACTIONS).toEqual(['activitypub.outbox.post']);
+    const broker = { getLocalService: jest.fn(), started: false, stopping: false };
+    const ctx = { requestID: 'restart-root' };
+    const { wrapped, next } = wireLocalAction(
+      { enabled: true, timeoutMs: 200, pollMs: 1 },
+      broker,
+      'activitypub.outbox.post'
+    );
+
+    setTimeout(() => {
+      broker.started = true;
+    }, 5);
+
+    await expect(wrapped(ctx)).resolves.toBe(ctx);
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not block internal startup actions while root readiness is pending', async () => {
+    const broker = { getLocalService: jest.fn(), started: false, stopping: false };
+    const ctx = { requestID: 'internal-startup' };
+    const { wrapped, next } = wireLocalAction(
+      { enabled: true, timeoutMs: 5, pollMs: 1 },
+      broker,
+      'jsonld.parser.expandTypes'
+    );
+
+    await expect(wrapped(ctx)).resolves.toBe(ctx);
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  test('root readiness fails closed if startup does not finish inside the frozen bound', async () => {
+    const broker = { getLocalService: jest.fn(), started: false, stopping: false };
+    const { wrapped, next } = wireLocalAction(
+      { enabled: true, timeoutMs: 5, pollMs: 1 },
+      broker,
+      'activitypub.outbox.post'
+    );
+
+    await expect(wrapped({ requestID: 'late-root' })).rejects.toThrow(/did not become ready/u);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test('root readiness fails closed when the broker starts stopping', async () => {
+    const broker = { getLocalService: jest.fn(), started: false, stopping: true };
+    await expect(waitForBrokerStarted(broker, 100, 1)).rejects.toThrow(/began stopping/u);
   });
 });
