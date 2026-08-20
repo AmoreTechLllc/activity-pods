@@ -8,9 +8,11 @@ on:
       - 'pod-provider/backend/middlewares/adsp-root-entry-evidence.js'
       - 'pod-provider/backend/scripts/adsp-p2-node-loss-load.js'
       - 'pod-provider/backend/scripts/adsp-p2-node-loss-persistence-audit.js'
+      - 'pod-provider/backend/scripts/adsp-p2-node-loss-redis-audit.js'
       - 'pod-provider/backend/tests/adsp-root-entry-evidence.test.js'
       - 'pod-provider/backend/tests/adsp-p2-node-loss-load.test.js'
       - 'pod-provider/backend/tests/adsp-p2-node-loss-persistence-audit.test.js'
+      - 'pod-provider/backend/tests/adsp-p2-node-loss-redis-audit.test.js'
       - 'pod-provider/docker-compose-adsp-p2-horizontal.yml'
       - 'pod-provider/docker-compose-phase8.yml'
       - 'pod-provider/docker-compose-test.yml'
@@ -76,6 +78,7 @@ jobs:
               tests/adsp-root-entry-evidence.test.js \
               tests/adsp-p2-node-loss-load.test.js \
               tests/adsp-p2-node-loss-persistence-audit.test.js \
+              tests/adsp-p2-node-loss-redis-audit.test.js \
               --runInBand
 
       - name: Record exact environment
@@ -121,7 +124,8 @@ jobs:
             victimResponseHoldAfterRootAction: true,
             victimHoldRequestPrefix: process.env.ADSP_P2_VICTIM_HOLD_REQUEST_PREFIX,
             callerRetryEnabled: false,
-            redisStreamPayloadCompressionEnabled: false
+            redisStreamPayloadCompressionEnabled: false,
+            redisStatsResetImmediatelyBeforeFaultScenario: true
           }, null, 2)}\n`);
           NODE
           cat measurements/adsp-p2-node-loss/environment.json
@@ -147,6 +151,7 @@ jobs:
               /app/backend/measurements/adsp-p2-node-loss/actors.json 10
           test -s measurements/adsp-p2-node-loss/actors.json
           docker compose $files stop -t 30 backend
+          docker compose $files exec -T redis redis-cli CONFIG RESETSTAT >/dev/null
 
       - name: Run four-cell SIGKILL recovery proof
         run: |
@@ -263,6 +268,15 @@ jobs:
           if (audit.duplicatePersistedMutationCount !== 0) throw new Error('duplicate authoritative persistence observed');
           NODE
 
+      - name: Audit Redis command health
+        run: |
+          set -euo pipefail
+          files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
+          docker compose $files exec -T redis redis-cli INFO commandstats > measurements/adsp-p2-node-loss/redis-commandstats.txt
+          node backend/scripts/adsp-p2-node-loss-redis-audit.js \
+            measurements/adsp-p2-node-loss/redis-commandstats.txt \
+            measurements/adsp-p2-node-loss/redis-audit.json
+
       - name: Capture final topology and dependency evidence
         if: always()
         run: |
@@ -270,7 +284,7 @@ jobs:
           files='-f docker-compose-test.yml -f docker-compose-phase8.yml -f docker-compose-adsp-p2-horizontal.yml'
           docker compose $files ps -a > measurements/adsp-p2-node-loss/compose-ps.txt 2>&1
           docker compose $files logs --no-color backend backend_p2_2 backend_p2_3 backend_p2_4 > measurements/adsp-p2-node-loss/backend.log 2>&1
-          docker compose $files exec -T redis redis-cli INFO commandstats > measurements/adsp-p2-node-loss/redis-commandstats.txt 2>&1
+          docker compose $files exec -T redis redis-cli INFO commandstats > measurements/adsp-p2-node-loss/redis-commandstats-final.txt 2>&1
           docker compose $files exec -T redis redis-cli INFO errorstats > measurements/adsp-p2-node-loss/redis-errorstats.txt 2>&1
           cp measurements/adsp-p2/root-entry-r*.jsonl measurements/adsp-p2-node-loss/ 2>/dev/null || true
           cp measurements/adsp-p2/trace-10-r*.jsonl measurements/adsp-p2-node-loss/ 2>/dev/null || true
