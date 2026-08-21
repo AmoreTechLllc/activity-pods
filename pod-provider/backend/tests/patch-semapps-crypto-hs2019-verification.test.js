@@ -5,9 +5,10 @@ const fs = require('fs');
 const Module = require('module');
 const path = require('path');
 
-const { MARKER, patchHttpSignatures } = require('../scripts/patch-semapps-crypto-hs2019-verification');
+const { KEYS_MARKER, MARKER, patchHttpSignatures, patchKeys } = require('../scripts/patch-semapps-crypto-hs2019-verification');
 
 const semappsFile = require.resolve('@semapps/crypto/signature/http-signatures');
+const keysFile = require.resolve('@semapps/crypto/keys/keys');
 
 function loadPatchedService(source) {
   const compiled = new Module(semappsFile, module);
@@ -40,7 +41,33 @@ describe('SemApps hs2019 HTTP signature verification patch', () => {
   const original = fs.readFileSync(semappsFile, 'utf8').replace(
     /\nfunction normalizeHs2019RsaSignatureAlgorithm[\s\S]*?\/\/ activitypods-hs2019-rsa-sha256-verification-v1\n\n/,
     '\n'
-  ).replace('headers: normalizeHs2019RsaSignatureAlgorithm(headers)', 'headers');
+  ).replace(
+    /\nfunction normalizeHs2019RsaSignatureAlgorithm[\s\S]*?\/\/ activitypods-hs2019-rsa-key-binding-verification-v2\n\n/,
+    '\n'
+  ).replace('headers: normalizeHs2019RsaSignatureAlgorithm(headers)', 'headers').replace(
+    /      const keyDocumentUri =[\s\S]*?      return verifiedKey \|\| \{ isValid: false \};/,
+    `      const [actorUri] = keyId.split('#');
+
+      // TODO: Check if keys are outdated
+
+      const publicKeys = await ctx.call('keys.getRemotePublicKeys', { webId: actorUri, keyType: KEY_TYPES.RSA });
+
+      if (!publicKeys) return { isValid: false };
+
+      // Check, if one of the keys is able to verify the signature.
+      const { isValid: keyValid, publicKey: publicKeyPem } = publicKeys
+        .flatMap(key => key.publicKeyPem || [])
+        .map(pubKeyPem => {
+          try {
+            return { isValid: verifySignature(parsedSignature, pubKeyPem), publicKey: pubKeyPem };
+          } catch (e) {
+            return { isValid: false };
+          }
+        })
+        .find(({ isValid }) => isValid) || { isValid: false, publicKey: null };
+
+      return { isValid: keyValid, actorUri, publicKeyPem };`
+  );
 
   test('is wired into postinstall and copied before production dependency installation', () => {
     const packageJson = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
@@ -59,7 +86,11 @@ describe('SemApps hs2019 HTTP signature verification patch', () => {
     const request = signedRequest();
     const result = await service.actions.verifyHttpSignature({
       params: request.params,
-      call: jest.fn().mockResolvedValue([{ publicKeyPem: request.publicKeyPem }])
+      call: jest.fn().mockResolvedValue([{
+        id: 'https://sender.example/users/alice#main-key',
+        controller: 'https://sender.example/users/alice',
+        publicKeyPem: request.publicKeyPem
+      }])
     });
 
     expect(result).toMatchObject({ isValid: true, actorUri: 'https://sender.example/users/alice' });
@@ -73,7 +104,11 @@ describe('SemApps hs2019 HTTP signature verification patch', () => {
 
     await expect(service.actions.verifyHttpSignature({
       params: request.params,
-      call: jest.fn().mockResolvedValue([{ publicKeyPem: request.publicKeyPem }])
+      call: jest.fn().mockResolvedValue([{
+        id: 'https://sender.example/users/alice#main-key',
+        controller: 'https://sender.example/users/alice',
+        publicKeyPem: request.publicKeyPem
+      }])
     })).resolves.toMatchObject({ isValid: false });
   });
 
@@ -107,9 +142,70 @@ describe('SemApps hs2019 HTTP signature verification patch', () => {
     expect(() => patchHttpSignatures(`// ${MARKER}`)).toThrow('complete verification contract');
   });
 
+  test('binds slash-style key IDs to the exact same-origin controller', async () => {
+    const service = loadPatchedService(patchHttpSignatures(original).source);
+    const request = signedRequest();
+    request.params.headers.signature = request.params.headers.signature.replace(
+      'https://sender.example/users/alice#main-key',
+      'https://sender.example/users/alice/main-key'
+    );
+    const call = jest.fn().mockResolvedValue([{
+      id: 'https://sender.example/users/alice/main-key',
+      owner: 'https://sender.example/users/alice',
+      publicKeyPem: request.publicKeyPem
+    }]);
+
+    await expect(service.actions.verifyHttpSignature({ params: request.params, call })).resolves.toMatchObject({
+      isValid: true,
+      actorUri: 'https://sender.example/users/alice'
+    });
+    expect(call).toHaveBeenCalledWith('keys.getRemotePublicKeys', {
+      webId: 'https://sender.example/users/alice/main-key',
+      keyType: expect.any(String)
+    });
+  });
+
+  test('rejects key-ID substitution and cross-origin controller claims', async () => {
+    const service = loadPatchedService(patchHttpSignatures(original).source);
+    const request = signedRequest();
+    const baseKey = { publicKeyPem: request.publicKeyPem };
+
+    await expect(service.actions.verifyHttpSignature({
+      params: request.params,
+      call: jest.fn().mockResolvedValue([{
+        ...baseKey,
+        id: 'https://sender.example/users/alice#other-key',
+        controller: 'https://sender.example/users/alice'
+      }])
+    })).resolves.toEqual({ isValid: false });
+
+    await expect(service.actions.verifyHttpSignature({
+      params: request.params,
+      call: jest.fn().mockResolvedValue([{
+        ...baseKey,
+        id: 'https://sender.example/users/alice#main-key',
+        controller: 'https://victim.example/users/alice'
+      }])
+    })).resolves.toEqual({ isValid: false });
+  });
+
+  test('uses ActivityPub negotiation and accepts an exact direct key document', () => {
+    const source = fs.readFileSync(keysFile, 'utf8')
+      .replace(/const REMOTE_KEY_ACCEPT[^\n]*activitypods-activitypub-remote-key-fetch-v1\n\n/, '')
+      .replaceAll('headers: { Accept: REMOTE_KEY_ACCEPT }', "headers: { Accept: 'application/json' }")
+      .replace(/\n        const directKeyDocument =[\s\S]*?keyObjects = \[actor\];/, '');
+    const result = patchKeys(source);
+    expect(result.changed).toBe(true);
+    expect(result.source).toContain(KEYS_MARKER);
+    expect(result.source.match(/headers: \{ Accept: REMOTE_KEY_ACCEPT \}/g)).toHaveLength(2);
+    expect(result.source).toContain('if (keyObjects.length === 0 && directKeyDocument) keyObjects = [actor];');
+    expect(patchKeys(result.source)).toEqual({ source: result.source, changed: false });
+  });
+
   test('fails closed when the pinned SemApps source contract drifts', () => {
     expect(() => patchHttpSignatures('no service declaration')).toThrow('HTTP signature service declaration');
     expect(() => patchHttpSignatures(original.replace('        headers\n      });', '        requestHeaders: headers\n      });')))
       .toThrow('HTTP signature parser headers');
+    expect(() => patchKeys('no keys service')).toThrow('keys service declaration');
   });
 });
