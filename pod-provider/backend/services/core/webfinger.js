@@ -56,7 +56,10 @@ module.exports = {
       async get(ctx, res) {
         if (!res || !Array.isArray(res.links)) return res;
         try {
-          const intentLinks = await ctx.call('fep-3b86-activity-intents.getLinks', {});
+          // This is public, deterministic provider metadata. Keep the remote
+          // request principal and deadline out of the local service call, and
+          // bound the optional enrichment so WebFinger cannot be held open.
+          const intentLinks = await this.broker.call('fep-3b86-activity-intents.getLinks', {}, { timeout: 1000 });
           if (Array.isArray(intentLinks) && intentLinks.length > 0) {
             res.links.push(...intentLinks);
           }
