@@ -42,11 +42,12 @@ function signedRequest(algorithm = 'hs2019', keyType = 'rsa') {
 describe('SemApps hs2019 HTTP signature verification patch', () => {
   const original = fs.readFileSync(semappsFile, 'utf8').replace(
     /\nfunction normalizeHs2019RsaSignatureAlgorithm[\s\S]*?\/\/ activitypods-hs2019-rsa-sha256-verification-v1\n\n/,
-    '\n'
+    ''
   ).replace(
     /\nfunction normalizeHs2019RsaSignatureAlgorithm[\s\S]*?\/\/ activitypods-hs2019-rsa-key-binding-verification-v2\n\n/,
-    '\n'
-  ).replace('headers: normalizeHs2019RsaSignatureAlgorithm(headers)', 'headers').replace(
+    ''
+  ).replace('\n\nconst HttpSignatureService', '\nconst HttpSignatureService')
+    .replace('headers: normalizeHs2019RsaSignatureAlgorithm(headers)', 'headers').replace(
     /      const keyDocumentUri =[\s\S]*?      return verifiedKey \|\| \{ isValid: false \};/,
     `      const [actorUri] = keyId.split('#');
 

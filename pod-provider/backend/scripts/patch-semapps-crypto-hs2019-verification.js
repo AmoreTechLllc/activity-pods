@@ -10,11 +10,11 @@ const PREVIOUS_MARKER = 'activitypods-hs2019-rsa-key-binding-verification-v2';
 const MARKER = 'activitypods-hs2019-rsa-key-binding-verification-v3';
 const KEYS_MARKER = 'activitypods-activitypub-remote-key-fetch-v1';
 const PRISTINE_HASHES = Object.freeze({
-  httpSignatures: '0de742c2763fd694ad8fc0dffa8af68dc2c9c17f7cb9239513d1efb217d72a20',
+  httpSignatures: '8ddcc0cbdaf11fb5f0c9f599e6da98e7215773e64bc9720940008c1aa6284ece',
   keys: '43a29bc040ad63b9d9f6734fb6e369e63889b136fe350238b878cfa4e6fa925e'
 });
 const PATCHED_HASHES = Object.freeze({
-  httpSignatures: '2924f41469645701d90cee82d7fa81fb7fb2c305c27c55ed0faee1279202683a',
+  httpSignatures: 'f955cc366b0fd0a91c0609fd741f4ae423cb8e5b657f2f85c87c895ffdf9806c',
   keys: '82a9f5b97f028a1958e8c80c6e65043a8f01e588be78bccf382d02121183989e'
 });
 
