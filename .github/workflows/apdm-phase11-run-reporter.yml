@@ -58,6 +58,40 @@ jobs:
               "https://api.github.com/${path}"
           }
 
+          read_comment_bodies() {
+            local path="$1"
+            local out err page body count
+            out="$(mktemp)"
+            err="$(mktemp)"
+            if gh api "${path}" --paginate --jq '.[].body' >"${out}" 2>"${err}"; then
+              cat "${out}"
+              rm -f "${out}" "${err}"
+              return 0
+            fi
+            rm -f "${out}"
+            if ! grep -Fq 'Resource not accessible by integration' "${err}"; then
+              cat "${err}" >&2
+              rm -f "${err}"
+              return 1
+            fi
+            echo "Authenticated paginated comment read blocked by integration policy; retrying all public pages anonymously." >&2
+            rm -f "${err}"
+            for page in $(seq 1 1000); do
+              body="$(curl --fail-with-body --silent --show-error --retry 3 --retry-all-errors \
+                -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                "https://api.github.com/${path}&page=${page}")"
+              jq -e 'type == "array"' >/dev/null <<<"${body}"
+              jq -r '.[].body' <<<"${body}"
+              count="$(jq 'length' <<<"${body}")"
+              if (( count < 100 )); then
+                return 0
+              fi
+            done
+            echo 'Comment pagination exceeded the 1000-page safety bound' >&2
+            return 1
+          }
+
           publish_comment() {
             local body="$1"
             local err
@@ -81,7 +115,7 @@ jobs:
           [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           marker="APDM Phase 11 run reporter: run \`${RUN_ID}\`, exact source \`${SOURCE_SHA}\`, attempt \`${RUN_ATTEMPT}\`, conclusion \`${RUN_CONCLUSION}\`."
           printf '%s\n' "${marker}" >> "${GITHUB_STEP_SUMMARY}"
-          existing="$(read_api "repos/${GITHUB_REPOSITORY}/issues/78/comments?per_page=100" | jq -r '.[].body')"
+          existing="$(read_comment_bodies "repos/${GITHUB_REPOSITORY}/issues/78/comments?per_page=100")"
           if ! grep -Fq "${marker}" <<<"${existing}"; then
             publish_comment "${marker} This report is discovery metadata only; evidence remains authoritative only after the Phase 11 gates are independently inspected."
           fi
@@ -123,6 +157,40 @@ jobs:
               -H 'Accept: application/vnd.github+json' \
               -H 'X-GitHub-Api-Version: 2022-11-28' \
               "https://api.github.com/${path}"
+          }
+
+          read_comment_bodies() {
+            local path="$1"
+            local out err page body count
+            out="$(mktemp)"
+            err="$(mktemp)"
+            if gh api "${path}" --paginate --jq '.[].body' >"${out}" 2>"${err}"; then
+              cat "${out}"
+              rm -f "${out}" "${err}"
+              return 0
+            fi
+            rm -f "${out}"
+            if ! grep -Fq 'Resource not accessible by integration' "${err}"; then
+              cat "${err}" >&2
+              rm -f "${err}"
+              return 1
+            fi
+            echo "Authenticated paginated comment read blocked by integration policy; retrying all public pages anonymously." >&2
+            rm -f "${err}"
+            for page in $(seq 1 1000); do
+              body="$(curl --fail-with-body --silent --show-error --retry 3 --retry-all-errors \
+                -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                "https://api.github.com/${path}&page=${page}")"
+              jq -e 'type == "array"' >/dev/null <<<"${body}"
+              jq -r '.[].body' <<<"${body}"
+              count="$(jq 'length' <<<"${body}")"
+              if (( count < 100 )); then
+                return 0
+              fi
+            done
+            echo 'Comment pagination exceeded the 1000-page safety bound' >&2
+            return 1
           }
 
           publish_comment() {
@@ -173,7 +241,7 @@ jobs:
 
           marker="APDM Phase 11 durable locator: run \`${run_id}\`, exact source \`${run_sha}\`, attempt \`${run_attempt}\`, status \`${run_status}\`, conclusion \`${run_conclusion:-pending}\`."
           printf '%s\n' "${marker}" >> "${GITHUB_STEP_SUMMARY}"
-          existing="$(read_api "repos/${GITHUB_REPOSITORY}/issues/78/comments?per_page=100" | jq -r '.[].body')"
+          existing="$(read_comment_bodies "repos/${GITHUB_REPOSITORY}/issues/78/comments?per_page=100")"
           if ! grep -Fq "${marker}" <<<"${existing}"; then
             publish_comment "${marker} This is a read-only retroactive discovery record for the frozen Phase 11 evidence campaign; it does not modify the evidence branch or benchmark."
           fi
