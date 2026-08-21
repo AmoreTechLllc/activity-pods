@@ -3,6 +3,7 @@ const { literal, namedNode, triple } = require('@rdfjs/data-model');
 const { MIME_TYPES } = require('@semapps/mime-types');
 const { KEY_TYPES } = require('@semapps/crypto/constants');
 const { KeysService } = require('@semapps/crypto');
+const { activityPubRsaKeyId } = require('../../utils/activitypub-rsa-key-id');
 
 const ATPROTO_KEY_TYPE = 'urn:secp256k1-key';
 const VERIFICATION_METHOD_TYPE = 'https://w3id.org/security#VerificationMethod';
@@ -11,14 +12,6 @@ const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvw
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const RDFS_SEE_ALSO = 'http://www.w3.org/2000/01/rdf-schema#seeAlso';
 const SECURITY = 'https://w3id.org/security#';
-
-function activityPubRsaKeyId(actorUri) {
-  const parsed = new URL(actorUri);
-  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.hash) {
-    throw new Error('RSA key owner must be a credential-free HTTP(S) actor URI without a fragment');
-  }
-  return `${actorUri}#main-key`;
-}
 
 function activityPubRsaVerificationMethodTriples(actorUri, publicKeyPem, keyTypes) {
   if (typeof publicKeyPem !== 'string' || publicKeyPem.length === 0) {

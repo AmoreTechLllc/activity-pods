@@ -17,13 +17,13 @@ describe('ActivityPub RSA key publication', () => {
       KEY_TYPES.RSA
     );
 
-    expect(result.keyId).toBe(`${ACTOR_URI}#main-key`);
+    expect(result.keyId).toBe(`${ACTOR_URI}/keys/main`);
     expect(result.triples.map(item => [item.subject.value, item.predicate.value, item.object.value])).toEqual(
       expect.arrayContaining([
-        [`${ACTOR_URI}#main-key`, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', KEY_TYPES.RSA],
-        [`${ACTOR_URI}#main-key`, 'https://w3id.org/security#owner', ACTOR_URI],
-        [`${ACTOR_URI}#main-key`, 'https://w3id.org/security#controller', ACTOR_URI],
-        [`${ACTOR_URI}#main-key`, 'https://w3id.org/security#publicKeyPem', PUBLIC_KEY_PEM]
+        [`${ACTOR_URI}/keys/main`, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', KEY_TYPES.RSA],
+        [`${ACTOR_URI}/keys/main`, 'https://w3id.org/security#owner', ACTOR_URI],
+        [`${ACTOR_URI}/keys/main`, 'https://w3id.org/security#controller', ACTOR_URI],
+        [`${ACTOR_URI}/keys/main`, 'https://w3id.org/security#publicKeyPem', PUBLIC_KEY_PEM]
       ])
     );
   });
@@ -31,10 +31,11 @@ describe('ActivityPub RSA key publication', () => {
   test.each([
     'ftp://activitypods.test/alice',
     'https://user:password@activitypods.test/alice',
+    'https://activitypods.test/alice?view=key',
     'https://activitypods.test/alice#existing'
   ])('rejects unsafe or ambiguous actor URI %s', actorUri => {
     expect(() => keysService.activityPubRsaKeyId(actorUri)).toThrow(
-      'credential-free HTTP(S) actor URI without a fragment'
+      'credential-free HTTP(S) actor URI without query or fragment'
     );
   });
 
@@ -60,7 +61,7 @@ describe('ActivityPub RSA key publication', () => {
 
     const result = await keysService.actions.publishPublicKeyLocally.handler.call(service, ctx);
 
-    expect(result).toBe(`${ACTOR_URI}#main-key`);
+    expect(result).toBe(`${ACTOR_URI}/keys/main`);
     expect(ctx.call).toHaveBeenCalledTimes(3);
     expect(ctx.call).not.toHaveBeenCalledWith('keys.public-container.post', expect.anything());
     expect(ctx.call.mock.calls[0]).toEqual(['ldp.remote.isRemote', { resourceUri: ACTOR_URI }]);
@@ -70,7 +71,7 @@ describe('ActivityPub RSA key publication', () => {
     });
     expect(ctx.call.mock.calls[1][1].query.updates[0].insert[0].triples).toHaveLength(4);
     expect(ctx.call.mock.calls[2][1]).toMatchObject({ resourceUri: PRIVATE_KEY_URI, webId: ACTOR_URI });
-    expect(ctx.call.mock.calls[2][1].triplesToAdd[0].object.value).toBe(`${ACTOR_URI}#main-key`);
+    expect(ctx.call.mock.calls[2][1].triplesToAdd[0].object.value).toBe(`${ACTOR_URI}/keys/main`);
   });
 
   test('refuses direct verification-method insertion for a remote actor', async () => {
