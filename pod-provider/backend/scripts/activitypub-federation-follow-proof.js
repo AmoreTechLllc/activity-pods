@@ -11,6 +11,7 @@ const {
 const DEFAULT_BASE_URL = 'http://127.0.0.1:3000';
 const DEFAULT_TRANSPORTER_URL = 'redis://127.0.0.1:6379/12';
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
+const MAX_PROOF_SUMMARY_BYTES = 64 * 1024;
 const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.handoff-queued';
 
 function normalizeEntityId(value) {
@@ -34,6 +35,20 @@ function positiveInteger(value, fallback, label) {
   const parsed = Number(value === undefined ? fallback : value);
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${label} must be a positive integer`);
   return parsed;
+}
+
+function boundedNonNegativeInteger(value, fallback, maximum, label) {
+  const parsed = Number(value === undefined ? fallback : value);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > maximum) {
+    throw new Error(`${label} must be an integer between 0 and ${maximum}`);
+  }
+  return parsed;
+}
+
+function createProofSummary(bytes) {
+  if (bytes === 0) return undefined;
+  const seed = 'activitypods-sidecar-compression-proof|';
+  return seed.repeat(Math.ceil(bytes / seed.length)).slice(0, bytes);
 }
 
 function createRunnerBroker(transporterUrl, runId) {
@@ -96,6 +111,13 @@ async function run({ remoteActorUri, mode, runId }) {
     DEFAULT_READY_TIMEOUT_MS,
     'ready timeout'
   );
+  const proofSummaryBytes = boundedNonNegativeInteger(
+    process.env.AP_FEDERATION_PROOF_SUMMARY_BYTES,
+    0,
+    MAX_PROOF_SUMMARY_BYTES,
+    'proof summary bytes'
+  );
+  const proofSummary = createProofSummary(proofSummaryBytes);
   const broker = createRunnerBroker(transporterUrl, runId);
   const senderRef = { value: null };
   const latch = createExternalHandoffLatch(broker, senderRef, normalizedRemoteActorUri, readyTimeoutMs);
@@ -122,7 +144,8 @@ async function run({ remoteActorUri, mode, runId }) {
         type: 'Follow',
         actor: sender.webId,
         object: normalizedRemoteActorUri,
-        to: [normalizedRemoteActorUri]
+        to: [normalizedRemoteActorUri],
+        ...(proofSummary === undefined ? {} : { summary: proofSummary })
       },
       {
         meta: { webId: sender.webId, dataset: sender.username },
@@ -141,6 +164,9 @@ async function run({ remoteActorUri, mode, runId }) {
       normalizeEntityId(postResult.object) !== normalizedRemoteActorUri
     ) {
       throw new Error('ActivityPods outbox did not persist the expected Follow activity');
+    }
+    if (proofSummary !== undefined && postResult.summary !== proofSummary) {
+      throw new Error('ActivityPods outbox did not persist the exact federation proof summary');
     }
 
     if (mode === 'external') {
@@ -161,6 +187,7 @@ async function run({ remoteActorUri, mode, runId }) {
       senderUsername: sender.username,
       senderOutbox: sender.outbox,
       remoteActorUri: normalizedRemoteActorUri,
+      proofSummaryBytes,
       durableHandoffQueued: mode === 'external',
       nativeRemotePostSuppressed: mode === 'external'
     };
@@ -187,4 +214,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createRunnerBroker, normalizeEntityId, run, validateRemoteActorUri };
+module.exports = {
+  boundedNonNegativeInteger,
+  createProofSummary,
+  createRunnerBroker,
+  normalizeEntityId,
+  run,
+  validateRemoteActorUri
+};
