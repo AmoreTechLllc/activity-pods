@@ -3,6 +3,9 @@ const CONFIG = require('../../config/config');
 
 module.exports = {
   mixins: [WebfingerService],
+  created() {
+    this.localWebfingerAccounts = new Map();
+  },
   settings: {
     baseUrl: CONFIG.BASE_URL
   },
@@ -19,17 +22,31 @@ module.exports = {
         // remote request principal into the settings-dataset query: signed
         // remote implementations may otherwise couple their key-discovery
         // request context to this local account lookup.
-        const account = await this.broker.call('auth.account.findByUsername', { username });
-        if (account) {
+        let webId = this.localWebfingerAccounts.get(username);
+        if (!webId) {
+          const account = await this.broker.call('auth.account.findByUsername', { username }, { timeout: 2000 })
+            .catch(() => null);
+          webId = account?.webId;
+          if (webId) this.localWebfingerAccounts.set(username, webId);
+        }
+        if (webId) {
           return {
             subject: resource,
-            aliases: [account.webId],
-            links: [{ rel: 'self', type: 'application/activity+json', href: account.webId }]
+            aliases: [webId],
+            links: [{ rel: 'self', type: 'application/activity+json', href: webId }]
           };
         }
       }
 
       ctx.meta.$statusCode = 404;
+    }
+  },
+  events: {
+    'auth.registered'(ctx) {
+      const { accountData, webId } = ctx.params || {};
+      if (typeof accountData?.username === 'string' && typeof webId === 'string') {
+        this.localWebfingerAccounts.set(accountData.username, webId);
+      }
     }
   },
   // FEP-3B86 §3 — append Activity Intent link templates to every WebFinger
