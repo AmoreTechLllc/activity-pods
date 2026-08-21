@@ -7,6 +7,7 @@ const {
   normalizeRunId,
   signupWithCandidateRetries
 } = require('./apdm-phase8-real-measure');
+const { validateDeliveryPlanV1 } = require('../utils/activitypub-delivery-plan');
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:3000';
 const DEFAULT_TRANSPORTER_URL = 'redis://127.0.0.1:6379/12';
@@ -100,6 +101,52 @@ function createExternalHandoffLatch(broker, senderRef, remoteActorUri, timeoutMs
   };
 }
 
+function extractExternalDeliveryTarget({ handoff, postResult, senderWebId, remoteActorUri }) {
+  const deliveryPlan = handoff?.deliveryPlan;
+  if (!validateDeliveryPlanV1(deliveryPlan)) {
+    throw new Error('external mode did not emit a valid authoritative ap.delivery-plan.v1');
+  }
+  if (
+    deliveryPlan.activityId !== postResult.id ||
+    deliveryPlan.activity?.id !== postResult.id ||
+    normalizeEntityId(handoff?.activity?.id) !== postResult.id
+  ) {
+    throw new Error('external Delivery Plan does not match the persisted Follow activity');
+  }
+  if (
+    deliveryPlan.actorUri !== senderWebId ||
+    normalizeEntityId(deliveryPlan.activity?.actor) !== senderWebId ||
+    normalizeEntityId(handoff?.activity?.actor) !== senderWebId
+  ) {
+    throw new Error('external Delivery Plan does not match the sender authority');
+  }
+  if (!Array.isArray(deliveryPlan.localRecipients) || deliveryPlan.localRecipients.length !== 0) {
+    throw new Error('external federation proof unexpectedly planned local recipients');
+  }
+  if (!Array.isArray(deliveryPlan.remoteRecipients) || deliveryPlan.remoteRecipients.length !== 1) {
+    throw new Error('external federation proof requires exactly one authoritative remote recipient');
+  }
+  const target = deliveryPlan.remoteRecipients[0];
+  if (target.actorUri !== remoteActorUri) {
+    throw new Error('external Delivery Plan recipient does not match the requested remote actor');
+  }
+  if (
+    !Array.isArray(handoff?.remoteRecipients) ||
+    handoff.remoteRecipients.length !== 1 ||
+    handoff.remoteRecipients[0] !== remoteActorUri
+  ) {
+    throw new Error('external handoff recipient evidence does not match the authoritative Delivery Plan');
+  }
+
+  return {
+    actorUri: target.actorUri,
+    inboxUrl: target.inboxUrl,
+    ...(target.sharedInboxUrl ? { sharedInboxUrl: target.sharedInboxUrl } : {}),
+    targetDomain: target.targetDomain,
+    deliveryUrl: target.sharedInboxUrl || target.inboxUrl
+  };
+}
+
 async function run({ remoteActorUri, mode, runId }) {
   const normalizedRemoteActorUri = validateRemoteActorUri(remoteActorUri);
   if (!['native', 'external'].includes(mode)) throw new Error(`unsupported mode ${mode}`);
@@ -169,6 +216,7 @@ async function run({ remoteActorUri, mode, runId }) {
       throw new Error('ActivityPods outbox did not persist the exact federation proof summary');
     }
 
+    let remoteDeliveryTarget;
     if (mode === 'external') {
       if (handoff?.deliveryMode !== 'external' || handoff?.durableHandoffQueued !== true) {
         throw new Error('external mode did not prove durable sidecar handoff');
@@ -176,6 +224,12 @@ async function run({ remoteActorUri, mode, runId }) {
       if (handoff?.suppressedNativeRemotePostCount !== 1) {
         throw new Error('external mode did not suppress exactly one native remotePost');
       }
+      remoteDeliveryTarget = extractExternalDeliveryTarget({
+        handoff,
+        postResult,
+        senderWebId: sender.webId,
+        remoteActorUri: normalizedRemoteActorUri
+      });
     }
 
     return {
@@ -189,7 +243,8 @@ async function run({ remoteActorUri, mode, runId }) {
       remoteActorUri: normalizedRemoteActorUri,
       proofSummaryBytes,
       durableHandoffQueued: mode === 'external',
-      nativeRemotePostSuppressed: mode === 'external'
+      nativeRemotePostSuppressed: mode === 'external',
+      ...(remoteDeliveryTarget ? { remoteDeliveryTarget } : {})
     };
   } finally {
     latch.cancel();
@@ -218,6 +273,7 @@ module.exports = {
   boundedNonNegativeInteger,
   createProofSummary,
   createRunnerBroker,
+  extractExternalDeliveryTarget,
   normalizeEntityId,
   run,
   validateRemoteActorUri
