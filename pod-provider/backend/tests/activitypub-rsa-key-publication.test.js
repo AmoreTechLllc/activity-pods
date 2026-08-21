@@ -61,15 +61,43 @@ describe('ActivityPub RSA key publication', () => {
     const result = await keysService.actions.publishPublicKeyLocally.handler.call(service, ctx);
 
     expect(result).toBe(`${ACTOR_URI}#main-key`);
-    expect(ctx.call).toHaveBeenCalledTimes(2);
+    expect(ctx.call).toHaveBeenCalledTimes(3);
     expect(ctx.call).not.toHaveBeenCalledWith('keys.public-container.post', expect.anything());
-    expect(ctx.call.mock.calls[0][0]).toBe('ldp.resource.patch');
-    expect(ctx.call.mock.calls[0][1]).toMatchObject({
-      resourceUri: `${ACTOR_URI}#main-key`,
+    expect(ctx.call.mock.calls[0]).toEqual(['ldp.remote.isRemote', { resourceUri: ACTOR_URI }]);
+    expect(ctx.call.mock.calls[1][0]).toBe('triplestore.update');
+    expect(ctx.call.mock.calls[1][1]).toMatchObject({
       webId: ACTOR_URI
     });
-    expect(ctx.call.mock.calls[1][1]).toMatchObject({ resourceUri: PRIVATE_KEY_URI, webId: ACTOR_URI });
-    expect(ctx.call.mock.calls[1][1].triplesToAdd[0].object.value).toBe(`${ACTOR_URI}#main-key`);
+    expect(ctx.call.mock.calls[1][1].query.updates[0].insert[0].triples).toHaveLength(4);
+    expect(ctx.call.mock.calls[2][1]).toMatchObject({ resourceUri: PRIVATE_KEY_URI, webId: ACTOR_URI });
+    expect(ctx.call.mock.calls[2][1].triplesToAdd[0].object.value).toBe(`${ACTOR_URI}#main-key`);
+  });
+
+  test('refuses direct verification-method insertion for a remote actor', async () => {
+    const ctx = {
+      params: {
+        webId: ACTOR_URI,
+        keyObject: { id: PRIVATE_KEY_URI, '@type': KEY_TYPES.RSA, publicKeyPem: PUBLIC_KEY_PEM }
+      },
+      meta: {},
+      call: jest.fn().mockResolvedValueOnce(true)
+    };
+    const service = {
+      actions: {
+        getPublicKeyObject: jest.fn().mockResolvedValue({
+          '@type': KEY_TYPES.RSA,
+          owner: ACTOR_URI,
+          controller: ACTOR_URI,
+          publicKeyPem: PUBLIC_KEY_PEM
+        })
+      }
+    };
+
+    await expect(keysService.actions.publishPublicKeyLocally.handler.call(service, ctx)).rejects.toThrow(
+      'only be published for a local actor'
+    );
+    expect(ctx.call).toHaveBeenCalledTimes(1);
+    expect(ctx.call).not.toHaveBeenCalledWith('triplestore.update', expect.anything());
   });
 
   test('fails closed when RSA material is not owned and controlled by the actor', async () => {

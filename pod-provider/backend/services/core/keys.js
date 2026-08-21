@@ -75,9 +75,26 @@ module.exports = {
             keyTypes
           );
           publicKeyUri = verificationMethod.keyId;
-          await ctx.call('ldp.resource.patch', {
-            resourceUri: publicKeyUri,
-            triplesToAdd: verificationMethod.triples,
+          const actorIsRemote = await ctx.call('ldp.remote.isRemote', { resourceUri: webId });
+          if (actorIsRemote) {
+            throw new Error('RSA verification methods can only be published for a local actor');
+          }
+          // SemApps 1.1.4 treats a same-document fragment URI as a different
+          // pod in ldp.remote.isRemote because it appends `/` after the hash.
+          // Keep that global remote-resource guard intact: after proving the
+          // fragment's credential-free owner is the local actor above, insert
+          // only the already validated verification-method triples into the
+          // actor's current dataset.
+          await ctx.call('triplestore.update', {
+            query: {
+              type: 'update',
+              updates: [
+                {
+                  updateType: 'insert',
+                  insert: [{ type: 'bgp', triples: verificationMethod.triples }]
+                }
+              ]
+            },
             webId
           });
         } else {
