@@ -5,6 +5,7 @@ const path = require('path');
 
 const {
   ACTOR_MARKER,
+  LEGACY_ACTOR_MARKER,
   OUTBOX_MARKER,
   patchActor,
   patchOutbox
@@ -31,6 +32,7 @@ describe('SemApps remote actor fetch hardening patch', () => {
     expect(result.changed).toBe(true);
     expect(result.source).toContain("Accept: 'application/activity+json, application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"'");
     expect(result.source).toContain("ctx.call('signature.generateSignatureHeaders'");
+    expect(result.source).toContain("new URL(webId).origin !== new URL(actorUri).origin");
     expect(result.source).toContain("url: actorUri, method: 'GET', actorUri: webId");
     expect(result.source).toContain('const response = await fetch(actorUri, { headers });');
     expect(result.source).not.toContain(ORIGINAL_ACTOR_FETCH);
@@ -50,6 +52,22 @@ describe('SemApps remote actor fetch hardening patch', () => {
     expect(patchOutbox(outbox)).toEqual({ source: outbox, changed: false });
     expect(() => patchActor(`// ${ACTOR_MARKER}`)).toThrow('complete hardened contract');
     expect(() => patchOutbox(`// ${OUTBOX_MARKER}`)).toThrow('sender authority');
+  });
+
+  test('upgrades the prior cross-origin-unaware patch without weakening signing', () => {
+    const current = patchActor(ORIGINAL_ACTOR_FETCH).source;
+    const legacy = current
+      .replace(ACTOR_MARKER, LEGACY_ACTOR_MARKER)
+      .replace(
+        "webId !== 'anon' && new URL(webId).origin !== new URL(actorUri).origin",
+        "webId !== 'anon'"
+      );
+    const upgraded = patchActor(legacy);
+    expect(upgraded.changed).toBe(true);
+    expect(upgraded.source).toContain(ACTOR_MARKER);
+    expect(upgraded.source).not.toContain(LEGACY_ACTOR_MARKER);
+    expect(upgraded.source).toContain("new URL(webId).origin !== new URL(actorUri).origin");
+    expect(patchActor(upgraded.source)).toEqual({ source: upgraded.source, changed: false });
   });
 
   test('fails closed when either pinned SemApps source contract drifts', () => {

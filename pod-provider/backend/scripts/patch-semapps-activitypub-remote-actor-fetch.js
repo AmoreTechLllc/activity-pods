@@ -3,7 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const EXPECTED_VERSION = '1.1.4';
-const ACTOR_MARKER = 'activitypods-signed-remote-actor-fetch-v1';
+const LEGACY_ACTOR_MARKER = 'activitypods-signed-remote-actor-fetch-v1';
+const ACTOR_MARKER = 'activitypods-signed-remote-actor-fetch-v2';
 const OUTBOX_MARKER = 'activitypods-remote-fetch-actor-authority-v1';
 
 function replaceOnce(source, search, replacement, label) {
@@ -16,14 +17,25 @@ function patchActor(source) {
   if (source.includes(ACTOR_MARKER)) {
     const valid = source.includes("const headers = { Accept: 'application/activity+json, application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"' }") &&
       source.includes("ctx.call('signature.generateSignatureHeaders'") &&
+      source.includes("new URL(webId).origin !== new URL(actorUri).origin") &&
       source.includes('url: actorUri, method: \'GET\', actorUri: webId') &&
       source.includes('const response = await fetch(actorUri, { headers });');
     if (!valid) throw new Error('Remote actor fetch marker exists without the complete hardened contract');
     return { source, changed: false };
   }
+  if (source.includes(LEGACY_ACTOR_MARKER)) {
+    let upgraded = replaceOnce(source, LEGACY_ACTOR_MARKER, ACTOR_MARKER, 'legacy remote actor marker');
+    upgraded = replaceOnce(
+      upgraded,
+      "        if (webId && webId !== 'system' && webId !== 'anon') {",
+      "        if (webId && webId !== 'system' && webId !== 'anon' && new URL(webId).origin !== new URL(actorUri).origin) {",
+      'legacy remote actor signing scope'
+    );
+    return { source: upgraded, changed: true };
+  }
   return { changed: true, source: replaceOnce(source,
     "        const response = await fetch(actorUri, { headers: { Accept: 'application/json' } });",
-    `        const headers = { Accept: 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"' }; // ${ACTOR_MARKER}\n        if (webId && webId !== 'system' && webId !== 'anon') {\n          Object.assign(headers, await ctx.call('signature.generateSignatureHeaders', {\n            url: actorUri, method: 'GET', actorUri: webId\n          }));\n        }\n        const response = await fetch(actorUri, { headers });`, 'remote actor fetch') };
+    `        const headers = { Accept: 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"' }; // ${ACTOR_MARKER}\n        if (webId && webId !== 'system' && webId !== 'anon' && new URL(webId).origin !== new URL(actorUri).origin) {\n          Object.assign(headers, await ctx.call('signature.generateSignatureHeaders', {\n            url: actorUri, method: 'GET', actorUri: webId\n          }));\n        }\n        const response = await fetch(actorUri, { headers });`, 'remote actor fetch') };
 }
 
 function patchOutbox(source) {
@@ -50,4 +62,4 @@ function applyPatch(root = path.dirname(require.resolve('@semapps/activitypub/pa
 }
 
 if (require.main === module) applyPatch();
-module.exports = { ACTOR_MARKER, OUTBOX_MARKER, patchActor, patchOutbox, applyPatch };
+module.exports = { ACTOR_MARKER, LEGACY_ACTOR_MARKER, OUTBOX_MARKER, patchActor, patchOutbox, applyPatch };
