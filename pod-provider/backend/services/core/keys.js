@@ -76,7 +76,7 @@ module.exports = {
           );
           publicKeyUri = verificationMethod.keyId;
           await ctx.call('ldp.resource.patch', {
-            resourceUri: webId,
+            resourceUri: publicKeyUri,
             triplesToAdd: verificationMethod.triples,
             webId
           });

@@ -64,7 +64,10 @@ describe('ActivityPub RSA key publication', () => {
     expect(ctx.call).toHaveBeenCalledTimes(2);
     expect(ctx.call).not.toHaveBeenCalledWith('keys.public-container.post', expect.anything());
     expect(ctx.call.mock.calls[0][0]).toBe('ldp.resource.patch');
-    expect(ctx.call.mock.calls[0][1]).toMatchObject({ resourceUri: ACTOR_URI, webId: ACTOR_URI });
+    expect(ctx.call.mock.calls[0][1]).toMatchObject({
+      resourceUri: `${ACTOR_URI}#main-key`,
+      webId: ACTOR_URI
+    });
     expect(ctx.call.mock.calls[1][1]).toMatchObject({ resourceUri: PRIVATE_KEY_URI, webId: ACTOR_URI });
     expect(ctx.call.mock.calls[1][1].triplesToAdd[0].object.value).toBe(`${ACTOR_URI}#main-key`);
   });
