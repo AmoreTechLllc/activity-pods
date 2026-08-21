@@ -19,6 +19,7 @@ ADD backend/package.json /app/backend
 ADD backend/yarn.lock /app/backend
 ADD backend/scripts/patch-semapps-activitypub-local-delivery.js /app/backend/scripts/patch-semapps-activitypub-local-delivery.js
 ADD backend/scripts/patch-semapps-activitypub-local-delivery-phase9.js /app/backend/scripts/patch-semapps-activitypub-local-delivery-phase9.js
+ADD backend/scripts/patch-semapps-activitypub-remote-actor-fetch.js /app/backend/scripts/patch-semapps-activitypub-remote-actor-fetch.js
 ADD backend/scripts/patch-semapps-ldp-local-registry-bootstrap.js /app/backend/scripts/patch-semapps-ldp-local-registry-bootstrap.js
 ADD backend/scripts/patch-semapps-ldp-special-endpoint-race.js /app/backend/scripts/patch-semapps-ldp-special-endpoint-race.js
 ADD backend/scripts/patch-semapps-jsonld-distributed-context-cache.js /app/backend/scripts/patch-semapps-jsonld-distributed-context-cache.js
