@@ -58,14 +58,32 @@ jobs:
               "https://api.github.com/${path}"
           }
 
+          publish_comment() {
+            local body="$1"
+            local err
+            err="$(mktemp)"
+            if gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/78/comments" -f body="${body}" >/dev/null 2>"${err}"; then
+              rm -f "${err}"
+              return 0
+            fi
+            if grep -Fq 'Resource not accessible by integration' "${err}"; then
+              echo "::warning::PR #78 locator comment was blocked by GitHub integration policy; the exact locator remains in this job summary."
+              rm -f "${err}"
+              return 0
+            fi
+            cat "${err}" >&2
+            rm -f "${err}"
+            return 1
+          }
+
           [[ "${RUN_ID}" =~ ^[0-9]+$ ]] || exit 1
           [[ "${RUN_ATTEMPT}" =~ ^[0-9]+$ ]] || exit 1
           [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           marker="APDM Phase 11 run reporter: run \`${RUN_ID}\`, exact source \`${SOURCE_SHA}\`, attempt \`${RUN_ATTEMPT}\`, conclusion \`${RUN_CONCLUSION}\`."
+          printf '%s\n' "${marker}" >> "${GITHUB_STEP_SUMMARY}"
           existing="$(read_api "repos/${GITHUB_REPOSITORY}/issues/78/comments?per_page=100" | jq -r '.[].body')"
           if ! grep -Fq "${marker}" <<<"${existing}"; then
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/78/comments" \
-              -f body="${marker} This report is discovery metadata only; evidence remains authoritative only after the Phase 11 gates are independently inspected." >/dev/null
+            publish_comment "${marker} This report is discovery metadata only; evidence remains authoritative only after the Phase 11 gates are independently inspected."
           fi
 
   backfill-frozen-head:
@@ -107,6 +125,24 @@ jobs:
               "https://api.github.com/${path}"
           }
 
+          publish_comment() {
+            local body="$1"
+            local err
+            err="$(mktemp)"
+            if gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/78/comments" -f body="${body}" >/dev/null 2>"${err}"; then
+              rm -f "${err}"
+              return 0
+            fi
+            if grep -Fq 'Resource not accessible by integration' "${err}"; then
+              echo "::warning::PR #78 locator comment was blocked by GitHub integration policy; the exact locator remains in this job summary."
+              rm -f "${err}"
+              return 0
+            fi
+            cat "${err}" >&2
+            rm -f "${err}"
+            return 1
+          }
+
           pr="$(read_api "repos/${GITHUB_REPOSITORY}/pulls/78")"
           current_sha="$(jq -r '.head.sha' <<<"${pr}")"
           current_branch="$(jq -r '.head.ref' <<<"${pr}")"
@@ -136,9 +172,9 @@ jobs:
           [[ "${run_branch}" == "${EXPECTED_BRANCH}" ]] || exit 1
 
           marker="APDM Phase 11 durable locator: run \`${run_id}\`, exact source \`${run_sha}\`, attempt \`${run_attempt}\`, status \`${run_status}\`, conclusion \`${run_conclusion:-pending}\`."
+          printf '%s\n' "${marker}" >> "${GITHUB_STEP_SUMMARY}"
           existing="$(read_api "repos/${GITHUB_REPOSITORY}/issues/78/comments?per_page=100" | jq -r '.[].body')"
           if ! grep -Fq "${marker}" <<<"${existing}"; then
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/78/comments" \
-              -f body="${marker} This is a read-only retroactive discovery record for the frozen Phase 11 evidence campaign; it does not modify the evidence branch or benchmark." >/dev/null
+            publish_comment "${marker} This is a read-only retroactive discovery record for the frozen Phase 11 evidence campaign; it does not modify the evidence branch or benchmark."
           fi
           echo "Located run ${run_id}: status=${run_status} attempt=${run_attempt} conclusion=${run_conclusion:-pending}."
