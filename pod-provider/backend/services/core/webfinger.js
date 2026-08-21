@@ -3,9 +3,6 @@ const CONFIG = require('../../config/config');
 
 module.exports = {
   mixins: [WebfingerService],
-  created() {
-    this.localWebfingerAccounts = new Map();
-  },
   settings: {
     baseUrl: CONFIG.BASE_URL
   },
@@ -18,35 +15,18 @@ module.exports = {
         : null;
 
       if (username && /^[\w._-]+$/u.test(username)) {
-        // WebFinger is a public local-directory lookup. Do not propagate a
-        // remote request principal into the settings-dataset query: signed
-        // remote implementations may otherwise couple their key-discovery
-        // request context to this local account lookup.
-        let webId = this.localWebfingerAccounts.get(username);
-        if (!webId) {
-          const account = await this.broker.call('auth.account.findByUsername', { username }, { timeout: 2000 })
-            .catch(() => null);
-          webId = account?.webId;
-          if (webId) this.localWebfingerAccounts.set(username, webId);
-        }
-        if (webId) {
-          return {
-            subject: resource,
-            aliases: [webId],
-            links: [{ rel: 'self', type: 'application/activity+json', href: webId }]
-          };
-        }
+        // Local actor identifiers are canonical and deterministic. Avoid a
+        // settings-dataset lookup on this public discovery path: the actor
+        // endpoint remains authoritative and returns 404 when no actor exists.
+        const webId = new URL(username, `${this.settings.baseUrl.replace(/\/$/u, '')}/`).href;
+        return {
+          subject: resource,
+          aliases: [webId],
+          links: [{ rel: 'self', type: 'application/activity+json', href: webId }]
+        };
       }
 
       ctx.meta.$statusCode = 404;
-    }
-  },
-  events: {
-    'auth.registered'(ctx) {
-      const { accountData, webId } = ctx.params || {};
-      if (typeof accountData?.username === 'string' && typeof webId === 'string') {
-        this.localWebfingerAccounts.set(accountData.username, webId);
-      }
     }
   },
   // FEP-3B86 §3 — append Activity Intent link templates to every WebFinger
