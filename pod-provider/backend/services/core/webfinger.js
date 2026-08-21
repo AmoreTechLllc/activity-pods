@@ -6,6 +6,32 @@ module.exports = {
   settings: {
     baseUrl: CONFIG.BASE_URL
   },
+  actions: {
+    async get(ctx) {
+      const { resource } = ctx.params;
+      const suffix = `@${this.settings.domainName}`;
+      const username = typeof resource === 'string' && resource.startsWith('acct:') && resource.endsWith(suffix)
+        ? resource.slice('acct:'.length, -suffix.length)
+        : null;
+
+      if (username && /^[\w._-]+$/u.test(username)) {
+        // WebFinger is a public local-directory lookup. Do not propagate a
+        // remote request principal into the settings-dataset query: signed
+        // remote implementations may otherwise couple their key-discovery
+        // request context to this local account lookup.
+        const account = await this.broker.call('auth.account.findByUsername', { username });
+        if (account) {
+          return {
+            subject: resource,
+            aliases: [account.webId],
+            links: [{ rel: 'self', type: 'application/activity+json', href: account.webId }]
+          };
+        }
+      }
+
+      ctx.meta.$statusCode = 404;
+    }
+  },
   // FEP-3B86 §3 — append Activity Intent link templates to every WebFinger
   // response without forking the upstream @semapps/webfinger action.
   hooks: {

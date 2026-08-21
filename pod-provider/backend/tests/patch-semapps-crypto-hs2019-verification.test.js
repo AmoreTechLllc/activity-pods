@@ -18,8 +18,10 @@ function loadPatchedService(source) {
   return compiled.exports;
 }
 
-function signedRequest(algorithm = 'hs2019') {
-  const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+function signedRequest(algorithm = 'hs2019', keyType = 'rsa') {
+  const { privateKey, publicKey } = keyType === 'rsa'
+    ? crypto.generateKeyPairSync('rsa', { modulusLength: 2048 })
+    : crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const date = new Date().toUTCString();
   const signingString = `(request-target): get /actor\nhost: remote.example\ndate: ${date}`;
   const signature = crypto.sign('sha256', Buffer.from(signingString), privateKey).toString('base64');
@@ -112,6 +114,20 @@ describe('SemApps hs2019 HTTP signature verification patch', () => {
     })).resolves.toMatchObject({ isValid: false });
   });
 
+  test('rejects a valid EC signature that declares hs2019 instead of treating it as RSA', async () => {
+    const service = loadPatchedService(patchHttpSignatures(original).source);
+    const request = signedRequest('hs2019', 'ec');
+
+    await expect(service.actions.verifyHttpSignature({
+      params: request.params,
+      call: jest.fn().mockResolvedValue([{
+        id: 'https://sender.example/users/alice#main-key',
+        controller: 'https://sender.example/users/alice',
+        publicKeyPem: request.publicKeyPem
+      }])
+    })).resolves.toEqual({ isValid: false });
+  });
+
   test('does not reinterpret unknown algorithms or ambiguous duplicate declarations', async () => {
     const service = loadPatchedService(patchHttpSignatures(original).source);
     const unknown = signedRequest('not-supported');
@@ -134,12 +150,12 @@ describe('SemApps hs2019 HTTP signature verification patch', () => {
     expect(duplicateError).toMatchObject({ message: 'Multiple HTTP Signature algorithm parameters are not supported' });
   });
 
-  test('is idempotent only while the complete compatibility contract remains present', () => {
+  test('is idempotent only when the complete patched source hash matches', () => {
     const once = patchHttpSignatures(original);
     expect(once.changed).toBe(true);
     expect(once.source).toContain(MARKER);
     expect(patchHttpSignatures(once.source)).toEqual({ source: once.source, changed: false });
-    expect(() => patchHttpSignatures(`// ${MARKER}`)).toThrow('complete verification contract');
+    expect(() => patchHttpSignatures(`// ${MARKER}`)).toThrow('patched HTTP signature source hash mismatch');
   });
 
   test('binds slash-style key IDs to the exact same-origin controller', async () => {
@@ -202,10 +218,20 @@ describe('SemApps hs2019 HTTP signature verification patch', () => {
     expect(patchKeys(result.source)).toEqual({ source: result.source, changed: false });
   });
 
-  test('fails closed when the pinned SemApps source contract drifts', () => {
-    expect(() => patchHttpSignatures('no service declaration')).toThrow('HTTP signature service declaration');
-    expect(() => patchHttpSignatures(original.replace('        headers\n      });', '        requestHeaders: headers\n      });')))
-      .toThrow('HTTP signature parser headers');
-    expect(() => patchKeys('no keys service')).toThrow('keys service declaration');
+  test('fails closed on any complete-file drift before or after patching', () => {
+    expect(() => patchHttpSignatures(`${original}\n`)).toThrow('pristine HTTP signature source hash mismatch');
+    expect(() => patchKeys('no keys service')).toThrow('pristine keys source hash mismatch');
+
+    const patchedHttp = patchHttpSignatures(original).source;
+    expect(() => patchHttpSignatures(patchedHttp.replace('TODO: Check', 'TODO:  Check')))
+      .toThrow('patched HTTP signature source hash mismatch');
+
+    const pristineKeys = fs.readFileSync(keysFile, 'utf8')
+      .replace(/const REMOTE_KEY_ACCEPT[^\n]*activitypods-activitypub-remote-key-fetch-v1\n\n/, '')
+      .replaceAll('headers: { Accept: REMOTE_KEY_ACCEPT }', "headers: { Accept: 'application/json' }")
+      .replace(/\n        const directKeyDocument =[\s\S]*?keyObjects = \[actor\];/, '');
+    const patchedKeys = patchKeys(pristineKeys).source;
+    expect(() => patchKeys(patchedKeys.replace('const KeysService', 'const  KeysService')))
+      .toThrow('patched keys source hash mismatch');
   });
 });
