@@ -5,7 +5,7 @@ const fs = require('fs');
 const Module = require('module');
 const path = require('path');
 
-const { KEYS_MARKER, MARKER, patchHttpSignatures, patchKeys } = require('../scripts/patch-semapps-crypto-hs2019-verification');
+const { KEYS_MARKER, MARKER, PRISTINE_HASHES, sha256, patchHttpSignatures, patchKeys } = require('../scripts/patch-semapps-crypto-hs2019-verification');
 
 const semappsFile = require.resolve('@semapps/crypto/signature/http-signatures');
 const keysFile = require.resolve('@semapps/crypto/keys/keys');
@@ -39,14 +39,13 @@ function signedRequest(algorithm = 'hs2019', keyType = 'rsa') {
   };
 }
 
-describe('SemApps hs2019 HTTP signature verification patch', () => {
-  const original = fs.readFileSync(semappsFile, 'utf8').replace(
-    /\nfunction normalizeHs2019RsaSignatureAlgorithm[\s\S]*?\/\/ activitypods-hs2019-rsa-sha256-verification-v1\n\n/,
+function restorePristineHttpSignatures(source) {
+  return source.replace(
+    /\nfunction normalizeHs2019RsaSignatureAlgorithm[\s\S]*?\/\/ activitypods-hs2019-rsa-(?:sha256|key-binding)-verification-v[123]\n\n/,
     ''
-  ).replace(
-    /\nfunction normalizeHs2019RsaSignatureAlgorithm[\s\S]*?\/\/ activitypods-hs2019-rsa-key-binding-verification-v2\n\n/,
-    ''
-  ).replace('\n\nconst HttpSignatureService', '\nconst HttpSignatureService')
+  ).replace("const { createSign, createHash, createPublicKey } = require('crypto');", "const { createSign, createHash } = require('crypto');")
+    .replace("const { arrayOf } = require('../utils/utils');\n\n\nconst HttpSignatureService", "const { arrayOf } = require('../utils/utils');\n\nconst HttpSignatureService")
+    .replace("const { arrayOf } = require('../utils/utils');\nconst HttpSignatureService", "const { arrayOf } = require('../utils/utils');\n\nconst HttpSignatureService")
     .replace('headers: normalizeHs2019RsaSignatureAlgorithm(headers)', 'headers').replace(
     /      const keyDocumentUri =[\s\S]*?      return verifiedKey \|\| \{ isValid: false \};/,
     `      const [actorUri] = keyId.split('#');
@@ -70,7 +69,16 @@ describe('SemApps hs2019 HTTP signature verification patch', () => {
         .find(({ isValid }) => isValid) || { isValid: false, publicKey: null };
 
       return { isValid: keyValid, actorUri, publicKeyPem };`
-  );
+    );
+}
+
+describe('SemApps hs2019 HTTP signature verification patch', () => {
+  const original = restorePristineHttpSignatures(fs.readFileSync(semappsFile, 'utf8'));
+
+  test('restores the byte-exact pristine source from every supported patched output', () => {
+    expect(sha256(original)).toBe(PRISTINE_HASHES.httpSignatures);
+    expect(restorePristineHttpSignatures(patchHttpSignatures(original).source)).toBe(original);
+  });
 
   test('is wired into postinstall and copied before production dependency installation', () => {
     const packageJson = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'));
