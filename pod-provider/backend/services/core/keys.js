@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { literal, namedNode, triple } = require('@rdfjs/data-model');
 const { MIME_TYPES } = require('@semapps/mime-types');
 const { KEY_TYPES } = require('@semapps/crypto/constants');
 const { KeysService } = require('@semapps/crypto');
@@ -7,6 +8,33 @@ const ATPROTO_KEY_TYPE = 'urn:secp256k1-key';
 const VERIFICATION_METHOD_TYPE = 'https://w3id.org/security#VerificationMethod';
 const SECP256K1_MULTICODEC_PREFIX = Buffer.from([0xe7, 0x01]);
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const RDFS_SEE_ALSO = 'http://www.w3.org/2000/01/rdf-schema#seeAlso';
+const SECURITY = 'https://w3id.org/security#';
+
+function activityPubRsaKeyId(actorUri) {
+  const parsed = new URL(actorUri);
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.hash) {
+    throw new Error('RSA key owner must be a credential-free HTTP(S) actor URI without a fragment');
+  }
+  return `${actorUri}#main-key`;
+}
+
+function activityPubRsaVerificationMethodTriples(actorUri, publicKeyPem, keyTypes) {
+  if (typeof publicKeyPem !== 'string' || publicKeyPem.length === 0) {
+    throw new Error('RSA publicKeyPem is required');
+  }
+  const keyId = activityPubRsaKeyId(actorUri);
+  return {
+    keyId,
+    triples: [
+      ...asArray(keyTypes).map(type => triple(namedNode(keyId), namedNode(RDF_TYPE), namedNode(type))),
+      triple(namedNode(keyId), namedNode(`${SECURITY}owner`), namedNode(actorUri)),
+      triple(namedNode(keyId), namedNode(`${SECURITY}controller`), namedNode(actorUri)),
+      triple(namedNode(keyId), namedNode(`${SECURITY}publicKeyPem`), literal(publicKeyPem))
+    ]
+  };
+}
 
 function asArray(value) {
   if (!value) return [];
@@ -19,6 +47,55 @@ module.exports = {
     podProvider: true
   },
   actions: {
+    publishPublicKeyLocally: {
+      params: {
+        keyId: { type: 'string', optional: true },
+        keyObject: { type: 'object', optional: true },
+        webId: { type: 'string', optional: true }
+      },
+      async handler(ctx) {
+        const webId = ctx.params.webId || ctx.meta.webId;
+        const privateKeyUri = ctx.params.keyId || ctx.params.keyObject?.id || ctx.params.keyObject?.['@id'];
+        if (!privateKeyUri) throw new Error('RSA key publication requires a private key resource URI');
+
+        const keyObject =
+          ctx.params.keyObject ||
+          (await ctx.call('ldp.resource.get', { resourceUri: privateKeyUri, accept: MIME_TYPES.JSON }));
+        const publicKeyObject = await this.actions.getPublicKeyObject({ keyObject }, { parentCtx: ctx });
+        const keyTypes = asArray(publicKeyObject['@type'] || publicKeyObject.type);
+
+        let publicKeyUri;
+        if (keyTypes.includes(KEY_TYPES.RSA)) {
+          if (publicKeyObject.owner !== webId || publicKeyObject.controller !== webId) {
+            throw new Error('RSA verification method must be owned and controlled by its actor');
+          }
+          const verificationMethod = activityPubRsaVerificationMethodTriples(
+            webId,
+            publicKeyObject.publicKeyPem,
+            keyTypes
+          );
+          publicKeyUri = verificationMethod.keyId;
+          await ctx.call('ldp.resource.patch', {
+            resourceUri: webId,
+            triplesToAdd: verificationMethod.triples,
+            webId
+          });
+        } else {
+          publicKeyUri = await ctx.call('keys.public-container.post', {
+            resource: publicKeyObject,
+            contentType: MIME_TYPES.JSON,
+            webId
+          });
+        }
+
+        await ctx.call('ldp.resource.patch', {
+          resourceUri: privateKeyUri,
+          triplesToAdd: [triple(namedNode(privateKeyUri), namedNode(RDFS_SEE_ALSO), namedNode(publicKeyUri))],
+          webId
+        });
+        return publicKeyUri;
+      }
+    },
     generateKey: {
       params: {
         keyType: { type: 'string' }
@@ -181,3 +258,6 @@ module.exports = {
     }
   }
 };
+
+module.exports.activityPubRsaKeyId = activityPubRsaKeyId;
+module.exports.activityPubRsaVerificationMethodTriples = activityPubRsaVerificationMethodTriples;
