@@ -2,6 +2,8 @@
 
 const crypto = require('crypto');
 const { Errors: E } = require('moleculer-web');
+const { MIME_TYPES } = require('@semapps/mime-types');
+const { sanitizeSparqlQuery } = require('@semapps/triplestore');
 const { activityPubRsaKeyId } = require('../../utils/activitypub-rsa-key-id');
 
 function resourceId(value) {
@@ -15,10 +17,15 @@ function asArray(value) {
   return Array.isArray(value) ? value : [value];
 }
 
+function bindingValue(row, name) {
+  const value = row?.[name]?.value;
+  return typeof value === 'string' ? value : null;
+}
+
 module.exports = {
   name: 'activitypub-public-keys',
 
-  dependencies: ['api', 'auth.account', 'activitypub.actor'],
+  dependencies: ['api', 'auth.account', 'activitypub.actor', 'triplestore'],
 
   async started() {
     await this.broker.call('api.addRoute', {
@@ -51,19 +58,37 @@ module.exports = {
         );
         const expectedKeyId = activityPubRsaKeyId(account.webId);
         const matches = asArray(actor?.publicKey).filter(key => resourceId(key) === expectedKeyId);
-        if (matches.length !== 1 || typeof matches[0]?.publicKeyPem !== 'string') throw new E.NotFoundError();
+        if (matches.length !== 1) throw new E.NotFoundError();
+
+        const keyIri = sanitizeSparqlQuery`<${expectedKeyId}>`;
+        const rows = await ctx.call('triplestore.query', {
+          query: `
+            PREFIX sec: <https://w3id.org/security#>
+            SELECT DISTINCT ?owner ?controller ?publicKeyPem
+            WHERE {
+              ${keyIri} sec:owner ?owner ;
+                        sec:controller ?controller ;
+                        sec:publicKeyPem ?publicKeyPem .
+            }
+            LIMIT 2
+          `,
+          accept: MIME_TYPES.SPARQL_JSON,
+          dataset: account.username,
+          webId: 'system'
+        });
+        if (!Array.isArray(rows) || rows.length !== 1) throw new E.NotFoundError();
+        const owner = bindingValue(rows[0], 'owner');
+        const controller = bindingValue(rows[0], 'controller');
+        const publicKeyPem = bindingValue(rows[0], 'publicKeyPem');
+        if (!publicKeyPem || owner !== account.webId || controller !== account.webId) throw new E.NotFoundError();
 
         let parsedKey;
         try {
-          parsedKey = crypto.createPublicKey(matches[0].publicKeyPem);
+          parsedKey = crypto.createPublicKey(publicKeyPem);
         } catch {
           throw new E.NotFoundError();
         }
         if (parsedKey.asymmetricKeyType !== 'rsa') throw new E.NotFoundError();
-        if (matches[0].owner !== account.webId || matches[0].controller !== account.webId) {
-          throw new E.NotFoundError();
-        }
-
         ctx.meta.$responseType = 'application/activity+json';
         ctx.meta.$responseHeaders = { 'Cache-Control': 'no-store' };
         return {
@@ -72,10 +97,10 @@ module.exports = {
             'https://w3id.org/security/v1'
           ],
           id: expectedKeyId,
-          type: matches[0].type || matches[0]['@type'] || 'RsaVerificationKey2018',
+          type: 'RsaVerificationKey2018',
           owner: account.webId,
           controller: account.webId,
-          publicKeyPem: matches[0].publicKeyPem
+          publicKeyPem
         };
       }
     }
