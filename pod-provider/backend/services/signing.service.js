@@ -6,6 +6,7 @@ require('dotenv-flow').config();
 const crypto = require('crypto');
 const { URL } = require('url');
 const { MoleculerError } = require('moleculer').Errors;
+const { MIME_TYPES } = require('@semapps/mime-types');
 const {
   configuredSigningToken,
   isDateWithinSkew,
@@ -18,7 +19,6 @@ const {
   decodeCanonicalBase64
 } = require('../utils/atproto-signing-policy');
 
-const RSA_KEY_TYPE = 'https://www.w3.org/ns/auth/rsa#RSAKey';
 const SECP256K1_N = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
 const SECP256K1_MULTICODEC = Buffer.from([0xe7, 0x01]);
 const BASE58_CHARS = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -739,7 +739,11 @@ module.exports = {
 
       let actor;
       try {
-        actor = await ctx.call('activitypub.actor.get', { actorUri, webId: 'system' });
+        actor = await ctx.call(
+          'activitypub.actor.get',
+          { actorUri, webId: 'system' },
+          { meta: { ...ctx.meta, dataset: account.username, webId: actorUri } }
+        );
       } catch {
         return {
           ok: false,
@@ -771,13 +775,41 @@ module.exports = {
         };
       }
 
+      const attachedPublicKeyIds = [
+        ...new Set(
+          asArray(actor?.publicKey)
+            .map(key => (typeof key === 'string' ? key : getResourceId(key)))
+            .filter(id => typeof id === 'string' && id.length > 0)
+        )
+      ];
+      if (attachedPublicKeyIds.length === 0) {
+        return {
+          ok: false,
+          error: 'KEY_UNAVAILABLE',
+          message: 'no RSA signing key is attached to the actor',
+          retryable: false
+        };
+      }
+
       let keyPairs;
       try {
-        keyPairs = await ctx.call(
-          'keys.getOrCreateWebIdKeys',
-          { webId: actorUri, keyType: RSA_KEY_TYPE },
-          { meta: { ...ctx.meta, dataset, webId: actorUri } }
-        );
+        keyPairs = (
+          await Promise.all(
+            attachedPublicKeyIds.map(async publicKeyUri => {
+              const privateKeyUri = await ctx.call(
+                'keys.findPrivateKeyUri',
+                { publicKeyUri },
+                { meta: { ...ctx.meta, dataset, webId: actorUri } }
+              );
+              if (typeof privateKeyUri !== 'string' || privateKeyUri.length === 0) return null;
+              return await ctx.call(
+                'keys.container.get',
+                { resourceUri: privateKeyUri, accept: MIME_TYPES.JSON, webId: actorUri },
+                { meta: { ...ctx.meta, dataset, webId: actorUri } }
+              );
+            })
+          )
+        ).filter(Boolean);
       } catch {
         return {
           ok: false,
@@ -786,20 +818,7 @@ module.exports = {
           retryable: true
         };
       }
-      if (!Array.isArray(keyPairs)) {
-        return {
-          ok: false,
-          error: 'KEY_UNAVAILABLE',
-          message: 'RSA key lookup returned an invalid result',
-          retryable: false
-        };
-      }
-
-      const attachedPublicKeyIds = new Set(
-        asArray(actor?.publicKey)
-          .map(key => (typeof key === 'string' ? key : getResourceId(key)))
-          .filter(id => typeof id === 'string' && id.length > 0)
-      );
+      const attachedPublicKeyIdSet = new Set(attachedPublicKeyIds);
 
       const candidates = keyPairs.filter(key => {
         const keyId = key?.['rdfs:seeAlso'];
@@ -810,7 +829,7 @@ module.exports = {
           typeof key.privateKeyPem === 'string' &&
           key.privateKeyPem.length > 0 &&
           assertKeyId(keyId) &&
-          attachedPublicKeyIds.has(keyId)
+          attachedPublicKeyIdSet.has(keyId)
         );
       });
 

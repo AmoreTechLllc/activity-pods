@@ -4,8 +4,6 @@ const signingSchema = require('../services/signing.service');
 
 const ACTOR = 'http://localhost:3000/alice';
 const KEY_ID = 'http://localhost:3000/public-key/alice-rsa';
-const RSA_KEY_TYPE = 'https://www.w3.org/ns/auth/rsa#RSAKey';
-
 function makeService(overrides = {}) {
   return {
     settings: signingSchema.settings,
@@ -48,13 +46,17 @@ describe('ActivityPub signing authority boundary', () => {
     ['group account', localAccount({ group: true })]
   ])('accepts an exact local %s only after account and actor proof', async (_label, account) => {
     const ctx = {
-      call: jest.fn(async (action, params) => {
+      meta: { traceId: 'trace-actor' },
+      call: jest.fn(async (action, params, options) => {
         if (action === 'auth.account.findByWebId') {
           expect(params).toEqual({ webId: ACTOR });
           return account;
         }
         if (action === 'activitypub.actor.get') {
           expect(params).toEqual({ actorUri: ACTOR, webId: 'system' });
+          expect(options).toEqual({
+            meta: { traceId: 'trace-actor', dataset: 'alice', webId: ACTOR }
+          });
           return localActor();
         }
         throw new Error(`Unexpected action: ${action}`);
@@ -125,12 +127,21 @@ describe('ActivityPub signing authority boundary', () => {
     const ctx = {
       meta: { traceId: 'trace-1' },
       call: jest.fn(async (action, params, options) => {
-        expect(action).toBe('keys.getOrCreateWebIdKeys');
-        expect(params).toEqual({ webId: ACTOR, keyType: RSA_KEY_TYPE });
-        expect(options).toEqual({
-          meta: { traceId: 'trace-1', dataset: 'alice', webId: ACTOR }
-        });
-        return [rsaPrivateKey()];
+        const expectedMeta = { traceId: 'trace-1', dataset: 'alice', webId: ACTOR };
+        expect(options).toEqual({ meta: expectedMeta });
+        if (action === 'keys.findPrivateKeyUri') {
+          expect(params).toEqual({ publicKeyUri: KEY_ID });
+          return rsaPrivateKey().id;
+        }
+        if (action === 'keys.container.get') {
+          expect(params).toEqual({
+            resourceUri: rsaPrivateKey().id,
+            accept: 'application/ld+json',
+            webId: ACTOR
+          });
+          return rsaPrivateKey();
+        }
+        throw new Error(`Unexpected action: ${action}`);
       })
     };
     await expect(
@@ -145,7 +156,14 @@ describe('ActivityPub signing authority boundary', () => {
     ['unattached key', rsaPrivateKey({ 'rdfs:seeAlso': 'http://localhost:3000/public-key/other' })],
     ['unsafe key identifier', rsaPrivateKey({ 'rdfs:seeAlso': 'https://pods.example/key\"algorithm=none' })]
   ])('rejects signing material with %s', async (_label, key) => {
-    const ctx = { meta: {}, call: jest.fn(async () => [key]) };
+    const ctx = {
+      meta: {},
+      call: jest.fn(async action => {
+        if (action === 'keys.findPrivateKeyUri') return key.id;
+        if (action === 'keys.container.get') return key;
+        throw new Error(`Unexpected action: ${action}`);
+      })
+    };
     const result = await makeService()._resolveActivityPubSigningMaterial(
       ctx,
       ACTOR,
@@ -156,12 +174,25 @@ describe('ActivityPub signing authority boundary', () => {
   });
 
   test('rejects ambiguous actor-controlled keys and marks key outages retryable', async () => {
+    const secondKeyId = 'http://localhost:3000/public-key/alice-rsa-2';
     const ambiguousCtx = {
       meta: {},
-      call: jest.fn(async () => [rsaPrivateKey(), rsaPrivateKey({ id: 'second-key' })])
+      call: jest.fn(async (action, params) => {
+        if (action === 'keys.findPrivateKeyUri') return `${params.publicKeyUri}/private`;
+        if (action === 'keys.container.get') {
+          const keyId = params.resourceUri === `${KEY_ID}/private` ? KEY_ID : secondKeyId;
+          return rsaPrivateKey({ id: params.resourceUri, 'rdfs:seeAlso': keyId });
+        }
+        throw new Error(`Unexpected action: ${action}`);
+      })
     };
     await expect(
-      makeService()._resolveActivityPubSigningMaterial(ambiguousCtx, ACTOR, localAccount(), localActor())
+      makeService()._resolveActivityPubSigningMaterial(
+        ambiguousCtx,
+        ACTOR,
+        localAccount(),
+        localActor({ publicKey: [{ id: KEY_ID }, { id: secondKeyId }] })
+      )
     ).resolves.toMatchObject({ ok: false, error: 'KEY_UNAVAILABLE', retryable: false });
 
     const outageCtx = {
@@ -176,6 +207,24 @@ describe('ActivityPub signing authority boundary', () => {
       message: 'RSA key lookup unavailable',
       retryable: true
     });
+  });
+
+  test('does not create signing material and rejects an actor with no attached key', async () => {
+    const ctx = { meta: {}, call: jest.fn() };
+    await expect(
+      makeService()._resolveActivityPubSigningMaterial(
+        ctx,
+        ACTOR,
+        localAccount(),
+        localActor({ publicKey: undefined })
+      )
+    ).resolves.toEqual({
+      ok: false,
+      error: 'KEY_UNAVAILABLE',
+      message: 'no RSA signing key is attached to the actor',
+      retryable: false
+    });
+    expect(ctx.call).not.toHaveBeenCalled();
   });
 
   test('batch signing traverses only the deployed account, actor and key authority chain', async () => {
@@ -194,7 +243,8 @@ describe('ActivityPub signing authority boundary', () => {
       call: jest.fn(async action => {
         if (action === 'auth.account.findByWebId') return localAccount();
         if (action === 'activitypub.actor.get') return localActor();
-        if (action === 'keys.getOrCreateWebIdKeys') return [rsaPrivateKey()];
+        if (action === 'keys.findPrivateKeyUri') return rsaPrivateKey().id;
+        if (action === 'keys.container.get') return rsaPrivateKey();
         throw new Error(`Unexpected action: ${action}`);
       })
     };
@@ -220,7 +270,8 @@ describe('ActivityPub signing authority boundary', () => {
     expect(ctx.call.mock.calls.map(([name]) => name)).toEqual([
       'auth.account.findByWebId',
       'activitypub.actor.get',
-      'keys.getOrCreateWebIdKeys'
+      'keys.findPrivateKeyUri',
+      'keys.container.get'
     ]);
     expect(ctx.call.mock.calls.some(([name]) => name.startsWith('actors.'))).toBe(false);
     expect(ctx.call.mock.calls.some(([name]) => name === 'ldp.remote.isRemote')).toBe(false);
