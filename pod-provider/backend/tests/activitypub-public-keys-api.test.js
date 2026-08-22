@@ -127,6 +127,7 @@ describe('public ActivityPub key document', () => {
       '@context': ['https://www.w3.org/ns/activitystreams', 'https://w3id.org/security/v1'],
       id: ACTOR,
       type: 'Person',
+      preferredUsername: 'alice',
       inbox: `${ACTOR}/inbox`,
       publicKey: {
         id: KEY_ID,
@@ -153,6 +154,7 @@ describe('public ActivityPub key document', () => {
 
     expect(result.id).toBe(ACTOR);
     expect(result.type).toBe('Person');
+    expect(result.preferredUsername).toBe('alice');
     expect(result.inbox).toBe(`${ACTOR}/inbox`);
     expect(result).not.toHaveProperty('@id');
     expect(result).not.toHaveProperty('@type');

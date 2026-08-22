@@ -147,6 +147,11 @@ module.exports = {
           '@context': withSecurityContext(actor['@context']),
           id: account.webId,
           type: actorType,
+          // Some consumers (including Pixelfed) require the compact
+          // ActivityStreams property when first materializing a remote actor.
+          // The account binding is authoritative here and avoids trusting an
+          // ambiguous expanded/aliased value from the stored actor document.
+          preferredUsername: account.username,
           inbox,
           publicKey: embeddedPublicKey(keyDocument)
         };
