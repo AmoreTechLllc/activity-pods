@@ -24,7 +24,7 @@ function context({ publicKey = {}, rows } = {}) {
           id: ACTOR,
           publicKey: {
             id: KEY_ID,
-            type: 'RsaVerificationKey2018',
+            type: 'CryptographicKey',
             owner: ACTOR,
             controller: ACTOR,
             publicKeyPem: PUBLIC_KEY_PEM,
@@ -76,7 +76,7 @@ function actorContext({ actor = {}, keyDocument = {} } = {}) {
         return {
           '@context': ['https://www.w3.org/ns/activitystreams', 'https://w3id.org/security/v1'],
           id: KEY_ID,
-          type: 'RsaVerificationKey2018',
+          type: 'CryptographicKey',
           owner: ACTOR,
           controller: ACTOR,
           publicKeyPem: PUBLIC_KEY_PEM,
@@ -130,7 +130,7 @@ describe('public ActivityPub key document', () => {
       inbox: `${ACTOR}/inbox`,
       publicKey: {
         id: KEY_ID,
-        type: 'RsaVerificationKey2018',
+        type: 'CryptographicKey',
         owner: ACTOR,
         controller: ACTOR,
         publicKeyPem: PUBLIC_KEY_PEM
@@ -157,7 +157,7 @@ describe('public ActivityPub key document', () => {
     expect(result).toEqual({
       '@context': ['https://www.w3.org/ns/activitystreams', 'https://w3id.org/security/v1'],
       id: KEY_ID,
-      type: 'RsaVerificationKey2018',
+      type: 'CryptographicKey',
       owner: ACTOR,
       controller: ACTOR,
       publicKeyPem: PUBLIC_KEY_PEM

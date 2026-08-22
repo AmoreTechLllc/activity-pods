@@ -98,7 +98,7 @@ module.exports = {
         const keyDocument = await ctx.call('activitypub-public-keys.get', { username: account.username });
         if (
           keyDocument?.id !== activityPubRsaKeyId(account.webId) ||
-          keyDocument.type !== 'RsaVerificationKey2018' ||
+          keyDocument.type !== 'CryptographicKey' ||
           keyDocument.owner !== account.webId ||
           keyDocument.controller !== account.webId ||
           typeof keyDocument.publicKeyPem !== 'string'
@@ -176,7 +176,7 @@ module.exports = {
             'https://w3id.org/security/v1'
           ],
           id: expectedKeyId,
-          type: 'RsaVerificationKey2018',
+          type: 'CryptographicKey',
           owner: account.webId,
           controller: account.webId,
           publicKeyPem
