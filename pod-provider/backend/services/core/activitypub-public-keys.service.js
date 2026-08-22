@@ -12,6 +12,7 @@ const FORBIDDEN_ACTOR_FIELDS = new Set([
   'refreshToken',
   'secretKey'
 ]);
+const ACTIVITYSTREAMS_ACTOR_TYPES = new Set(['Application', 'Group', 'Organization', 'Person', 'Service']);
 
 function resourceId(value) {
   if (typeof value === 'string') return value;
@@ -22,6 +23,26 @@ function resourceId(value) {
 function asArray(value) {
   if (!value) return [];
   return Array.isArray(value) ? value : [value];
+}
+
+function activityStreamsActorType(actor) {
+  const normalized = asArray(actor?.type ?? actor?.['@type'])
+    .map(value => resourceId(value))
+    .filter(Boolean)
+    .map(value => value.replace(/^https:\/\/www\.w3\.org\/ns\/activitystreams#/u, '').replace(/^as:/u, ''))
+    .filter(value => ACTIVITYSTREAMS_ACTOR_TYPES.has(value));
+  const unique = [...new Set(normalized)];
+  return unique.length === 1 ? unique[0] : null;
+}
+
+function sameOriginResource(actorUri, value) {
+  const id = resourceId(value);
+  if (!id) return null;
+  try {
+    return new URL(id).origin === new URL(actorUri).origin ? id : null;
+  } catch {
+    return null;
+  }
 }
 
 function bindingValue(row, name) {
@@ -94,6 +115,9 @@ module.exports = {
         );
         if (!actor || resourceId(actor) !== account.webId) throw new E.NotFoundError();
         if (Object.keys(actor).some(key => FORBIDDEN_ACTOR_FIELDS.has(key))) throw new E.NotFoundError();
+        const actorType = activityStreamsActorType(actor);
+        const inbox = sameOriginResource(account.webId, actor.inbox);
+        if (!actorType || !inbox) throw new E.NotFoundError();
 
         const keyDocument = await ctx.call('activitypub-public-keys.get', { username: account.username });
         if (
@@ -115,9 +139,15 @@ module.exports = {
 
         ctx.meta.$responseType = 'application/activity+json';
         ctx.meta.$responseHeaders = { 'Cache-Control': 'no-store' };
+        const publicActor = { ...actor };
+        delete publicActor['@id'];
+        delete publicActor['@type'];
         return {
-          ...actor,
+          ...publicActor,
           '@context': withSecurityContext(actor['@context']),
+          id: account.webId,
+          type: actorType,
+          inbox,
           publicKey: embeddedPublicKey(keyDocument)
         };
       }
@@ -187,4 +217,6 @@ module.exports = {
 };
 
 module.exports.embeddedPublicKey = embeddedPublicKey;
+module.exports.activityStreamsActorType = activityStreamsActorType;
+module.exports.sameOriginResource = sameOriginResource;
 module.exports.withSecurityContext = withSecurityContext;

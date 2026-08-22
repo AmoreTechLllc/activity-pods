@@ -140,9 +140,29 @@ describe('public ActivityPub key document', () => {
     expect(ctx.meta.$responseHeaders).toEqual({ 'Cache-Control': 'no-store' });
   });
 
+  test('normalizes an expanded JSON-LD actor to an Akkoma-compatible standard actor document', async () => {
+    const ctx = actorContext({
+      actor: {
+        id: undefined,
+        type: undefined,
+        '@id': ACTOR,
+        '@type': ['https://www.w3.org/ns/activitystreams#Person']
+      }
+    });
+    const result = await service.actions.getActor.handler(ctx);
+
+    expect(result.id).toBe(ACTOR);
+    expect(result.type).toBe('Person');
+    expect(result.inbox).toBe(`${ACTOR}/inbox`);
+    expect(result).not.toHaveProperty('@id');
+    expect(result).not.toHaveProperty('@type');
+  });
+
   test.each([
     { actor: { privateKeyPem: 'private' } },
     { actor: { accessToken: 'token' } },
+    { actor: { type: 'Document' } },
+    { actor: { inbox: 'https://mallory.example/inbox' } },
     { keyDocument: { owner: 'https://activitypods.example/mallory' } },
     { keyDocument: { controller: 'https://activitypods.example/mallory' } },
     { keyDocument: { id: `${ACTOR}/keys/other` } },
