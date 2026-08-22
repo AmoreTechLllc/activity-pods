@@ -100,6 +100,46 @@ describe('APDM Phase 3 authoritative delivery planner', () => {
     expect(calls.some(call => call.action === 'activitypub.actor.getCollectionUri')).toBe(false);
   });
 
+  test.each(['Follow', 'https://www.w3.org/ns/activitystreams#Follow'])(
+    'uses the actor inbox for direct %s delivery',
+    async type => {
+      const recipient = 'https://remote.example/users/carol';
+      const plan = await buildDeliveryPlanV1(createRemoteOnlyContext(), {
+        activity: createActivity({
+          id: `${ACTOR}/activities/follow`,
+          type,
+          object: recipient,
+          to: [recipient],
+          cc: []
+        }),
+        remoteRecipientUris: [recipient]
+      });
+
+      expect(plan.remoteRecipients).toEqual([
+        {
+          actorUri: recipient,
+          inboxUrl: `${recipient}/inbox`,
+          targetDomain: 'remote.example'
+        }
+      ]);
+    }
+  );
+
+  test('retains shared-inbox aggregation for ordinary fan-out activities', async () => {
+    const recipient = 'https://remote.example/users/carol';
+    const plan = await buildDeliveryPlanV1(createRemoteOnlyContext(), {
+      activity: createActivity({ to: [recipient], cc: [] }),
+      remoteRecipientUris: [recipient]
+    });
+
+    expect(plan.remoteRecipients[0]).toEqual(
+      expect.objectContaining({
+        inboxUrl: `${recipient}/inbox`,
+        sharedInboxUrl: 'https://remote.example/inbox'
+      })
+    );
+  });
+
   test('followers-only addressing produces concrete remote follower targets, never the collection URI', async () => {
     const remoteFollower = 'https://remote.example/users/follower';
     const activity = createActivity({

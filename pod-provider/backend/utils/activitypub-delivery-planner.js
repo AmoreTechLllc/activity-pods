@@ -18,6 +18,7 @@ const {
 const DEFAULT_TARGET_RESOLUTION_CONCURRENCY = 10;
 const DEFAULT_LOCAL_TARGET_CACHE_MAX_ENTRIES = 4096;
 const DEFAULT_REMOTE_TARGET_CACHE_MAX_ENTRIES = 4096;
+const ACTOR_INBOX_ACTIVITY_TYPES = new Set(['Follow']);
 const remoteTargetCacheAuthorities = new WeakMap();
 const LOCAL_COLLECTION_QUERIES = Object.freeze({
   followers: Object.freeze({
@@ -38,6 +39,24 @@ function normalizeActorUri(value) {
   if (typeof value === 'string' && value.length > 0) return value;
   if (value && typeof value === 'object') return value.id || value['@id'] || null;
   return null;
+}
+
+function requiresActorInboxDelivery(activity) {
+  const values = Array.isArray(activity?.type) ? activity.type : [activity?.type];
+  return values.some(value => {
+    if (typeof value !== 'string') return false;
+    const normalized = value.trim();
+    return (
+      ACTOR_INBOX_ACTIVITY_TYPES.has(normalized) ||
+      ACTOR_INBOX_ACTIVITY_TYPES.has(normalized.replace(/^https:\/\/www\.w3\.org\/ns\/activitystreams#/u, ''))
+    );
+  });
+}
+
+function selectRemoteDeliveryEndpoint(activity, target) {
+  if (!requiresActorInboxDelivery(activity) || !target.sharedInboxUrl) return target;
+  const { sharedInboxUrl: _sharedInboxUrl, ...actorInboxTarget } = target;
+  return actorInboxTarget;
 }
 
 function normalizeAddress(value) {
@@ -374,7 +393,7 @@ async function buildDeliveryPlanV1(
     .map(target => target.value);
   const remoteRecipients = resolvedTargets
     .filter(target => target.classification === 'remote')
-    .map(target => target.value);
+    .map(target => selectRemoteDeliveryEndpoint(activity, target.value));
 
   const visibility = determineVisibility(activity);
   const deliveryActivity = sanitizeDeliveryActivity(activity);
@@ -420,6 +439,7 @@ module.exports = {
   normalizeActorUri,
   normalizeLocalDeliveryTarget,
   normalizeRemoteDeliveryTarget,
+  requiresActorInboxDelivery,
   resolveLocalActorCollectionUri,
   resolveLocalDeliveryTarget,
   resolveLocalDeliveryTargetWithCache,
@@ -427,5 +447,6 @@ module.exports = {
   resolveLocalInboxUri,
   resolveLocalOutboxUri,
   resolveRemoteDeliveryTarget,
-  resolveRemoteDeliveryTargetWithCache
+  resolveRemoteDeliveryTargetWithCache,
+  selectRemoteDeliveryEndpoint
 };
