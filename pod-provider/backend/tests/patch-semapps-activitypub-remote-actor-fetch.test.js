@@ -6,6 +6,7 @@ const path = require('path');
 const {
   ACTOR_MARKER,
   LEGACY_ACTOR_MARKER,
+  OUTBOX_CONTENT_TYPE_MARKER,
   OUTBOX_MARKER,
   patchActor,
   patchOutbox
@@ -13,6 +14,8 @@ const {
 
 const ORIGINAL_ACTOR_FETCH = "        const response = await fetch(actorUri, { headers: { Accept: 'application/json' } });";
 const ORIGINAL_REMOTE_AUTHORITY = "          webId: 'system'\n        });\n\n        if (!recipientInbox)";
+const ORIGINAL_CONTENT_TYPE = "            'Content-Type': 'application/json',";
+const ORIGINAL_OUTBOX = `${ORIGINAL_REMOTE_AUTHORITY}\n${ORIGINAL_CONTENT_TYPE}`;
 
 describe('SemApps remote actor fetch hardening patch', () => {
   test('is wired into postinstall and available before production dependency installation', () => {
@@ -38,20 +41,24 @@ describe('SemApps remote actor fetch hardening patch', () => {
     expect(result.source).not.toContain(ORIGINAL_ACTOR_FETCH);
   });
 
-  test('uses the activity actor as authority when resolving a remote recipient inbox', () => {
-    const result = patchOutbox(`before\n${ORIGINAL_REMOTE_AUTHORITY}\nafter`);
+  test('uses sender authority and an ActivityPub media type for native remote delivery', () => {
+    const result = patchOutbox(`before\n${ORIGINAL_OUTBOX}\nafter`);
     expect(result.changed).toBe(true);
     expect(result.source).toContain(`webId: activity.actor // ${OUTBOX_MARKER}`);
+    expect(result.source).toContain(
+      `'Content-Type': 'application/activity+json', // ${OUTBOX_CONTENT_TYPE_MARKER}`
+    );
     expect(result.source).not.toContain(ORIGINAL_REMOTE_AUTHORITY);
+    expect(result.source).not.toContain(ORIGINAL_CONTENT_TYPE);
   });
 
   test('is idempotent only while both hardened contracts remain complete', () => {
     const actor = patchActor(ORIGINAL_ACTOR_FETCH).source;
-    const outbox = patchOutbox(ORIGINAL_REMOTE_AUTHORITY).source;
+    const outbox = patchOutbox(ORIGINAL_OUTBOX).source;
     expect(patchActor(actor)).toEqual({ source: actor, changed: false });
     expect(patchOutbox(outbox)).toEqual({ source: outbox, changed: false });
     expect(() => patchActor(`// ${ACTOR_MARKER}`)).toThrow('complete hardened contract');
-    expect(() => patchOutbox(`// ${OUTBOX_MARKER}`)).toThrow('sender authority');
+    expect(() => patchOutbox(`// ${OUTBOX_MARKER}\n// ${OUTBOX_CONTENT_TYPE_MARKER}`)).toThrow('sender authority');
   });
 
   test('upgrades the prior cross-origin-unaware patch without weakening signing', () => {
@@ -75,11 +82,17 @@ describe('SemApps remote actor fetch hardening patch', () => {
     expect(() => patchActor(`${ORIGINAL_ACTOR_FETCH}\n${ORIGINAL_ACTOR_FETCH}`)).toThrow(
       'Expected exactly one pinned SemApps remote actor fetch'
     );
-    expect(() => patchOutbox('no remote authority')).toThrow(
+    expect(() => patchOutbox(`no remote authority\n${ORIGINAL_CONTENT_TYPE}`)).toThrow(
       'Expected exactly one pinned SemApps remote recipient actor authority'
     );
-    expect(() => patchOutbox(`${ORIGINAL_REMOTE_AUTHORITY}\n${ORIGINAL_REMOTE_AUTHORITY}`)).toThrow(
+    expect(() => patchOutbox(`${ORIGINAL_REMOTE_AUTHORITY}\n${ORIGINAL_REMOTE_AUTHORITY}\n${ORIGINAL_CONTENT_TYPE}`)).toThrow(
       'Expected exactly one pinned SemApps remote recipient actor authority'
+    );
+    expect(() => patchOutbox(`${ORIGINAL_REMOTE_AUTHORITY}\nno content type`)).toThrow(
+      'Expected exactly one pinned SemApps remote ActivityPub content type'
+    );
+    expect(() => patchOutbox(`${ORIGINAL_OUTBOX}\n${ORIGINAL_CONTENT_TYPE}`)).toThrow(
+      'Expected exactly one pinned SemApps remote ActivityPub content type'
     );
   });
 });

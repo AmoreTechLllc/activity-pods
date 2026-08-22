@@ -6,6 +6,7 @@ const EXPECTED_VERSION = '1.1.4';
 const LEGACY_ACTOR_MARKER = 'activitypods-signed-remote-actor-fetch-v1';
 const ACTOR_MARKER = 'activitypods-signed-remote-actor-fetch-v2';
 const OUTBOX_MARKER = 'activitypods-remote-fetch-actor-authority-v1';
+const OUTBOX_CONTENT_TYPE_MARKER = 'activitypods-remote-post-activitypub-content-type-v1';
 
 function replaceOnce(source, search, replacement, label) {
   const first = source.indexOf(search);
@@ -39,15 +40,36 @@ function patchActor(source) {
 }
 
 function patchOutbox(source) {
+  let patched = source;
+  let changed = false;
   if (source.includes(OUTBOX_MARKER)) {
     if (!source.includes(`webId: activity.actor // ${OUTBOX_MARKER}`)) {
       throw new Error('Remote actor authority marker exists without sender authority');
     }
-    return { source, changed: false };
+  } else {
+    patched = replaceOnce(
+      patched,
+      "          webId: 'system'\n        });\n\n        if (!recipientInbox)",
+      `          webId: activity.actor // ${OUTBOX_MARKER}\n        });\n\n        if (!recipientInbox)`,
+      'remote recipient actor authority'
+    );
+    changed = true;
   }
-  return { changed: true, source: replaceOnce(source,
-    "          webId: 'system'\n        });\n\n        if (!recipientInbox)",
-    `          webId: activity.actor // ${OUTBOX_MARKER}\n        });\n\n        if (!recipientInbox)`, 'remote recipient actor authority') };
+
+  if (patched.includes(OUTBOX_CONTENT_TYPE_MARKER)) {
+    if (!patched.includes(`'Content-Type': 'application/activity+json', // ${OUTBOX_CONTENT_TYPE_MARKER}`)) {
+      throw new Error('Remote ActivityPub content-type marker exists without the hardened media type');
+    }
+  } else {
+    patched = replaceOnce(
+      patched,
+      "            'Content-Type': 'application/json',",
+      `            'Content-Type': 'application/activity+json', // ${OUTBOX_CONTENT_TYPE_MARKER}`,
+      'remote ActivityPub content type'
+    );
+    changed = true;
+  }
+  return { source: patched, changed };
 }
 
 function applyPatch(root = path.dirname(require.resolve('@semapps/activitypub/package.json'))) {
@@ -62,4 +84,12 @@ function applyPatch(root = path.dirname(require.resolve('@semapps/activitypub/pa
 }
 
 if (require.main === module) applyPatch();
-module.exports = { ACTOR_MARKER, LEGACY_ACTOR_MARKER, OUTBOX_MARKER, patchActor, patchOutbox, applyPatch };
+module.exports = {
+  ACTOR_MARKER,
+  LEGACY_ACTOR_MARKER,
+  OUTBOX_CONTENT_TYPE_MARKER,
+  OUTBOX_MARKER,
+  patchActor,
+  patchOutbox,
+  applyPatch
+};
