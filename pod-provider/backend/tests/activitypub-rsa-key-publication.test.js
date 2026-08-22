@@ -10,7 +10,7 @@ const PRIVATE_KEY_URI = `${ACTOR_URI}/data/private-key`;
 const PUBLIC_KEY_PEM = '-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----\n';
 
 describe('ActivityPub RSA key publication', () => {
-  test('uses a stable actor fragment and emits a strict-id verification method', () => {
+  test('uses a stable actor-owned key document and emits a strict-id verification method', () => {
     const result = keysService.activityPubRsaVerificationMethodTriples(
       ACTOR_URI,
       PUBLIC_KEY_PEM,

@@ -5,6 +5,13 @@ const { Errors: E } = require('moleculer-web');
 const { MIME_TYPES } = require('@semapps/mime-types');
 const { sanitizeSparqlQuery } = require('@semapps/triplestore');
 const { activityPubRsaKeyId } = require('../../utils/activitypub-rsa-key-id');
+const FORBIDDEN_ACTOR_FIELDS = new Set([
+  'accessToken',
+  'privateKey',
+  'privateKeyPem',
+  'refreshToken',
+  'secretKey'
+]);
 
 function resourceId(value) {
   if (typeof value === 'string') return value;
@@ -22,12 +29,41 @@ function bindingValue(row, name) {
   return typeof value === 'string' ? value : null;
 }
 
+function withSecurityContext(context) {
+  const values = context === undefined ? [] : Array.isArray(context) ? context : [context];
+  return values.includes('https://w3id.org/security/v1')
+    ? values
+    : [...values, 'https://w3id.org/security/v1'];
+}
+
+function embeddedPublicKey(keyDocument) {
+  return {
+    id: keyDocument.id,
+    type: keyDocument.type,
+    owner: keyDocument.owner,
+    controller: keyDocument.controller,
+    publicKeyPem: keyDocument.publicKeyPem
+  };
+}
+
 module.exports = {
   name: 'activitypub-public-keys',
 
   dependencies: ['api', 'auth.account', 'activitypub.actor', 'triplestore'],
 
   async started() {
+    await this.broker.call('api.addRoute', {
+      route: {
+        name: 'activitypub-public-actor-document',
+        path: '/:username([^/.][^/]+)',
+        authentication: false,
+        authorization: false,
+        aliases: {
+          'GET /': 'activitypub-public-keys.getActor'
+        }
+      },
+      toBottom: false
+    });
     await this.broker.call('api.addRoute', {
       route: {
         name: 'activitypub-public-key-document',
@@ -43,6 +79,49 @@ module.exports = {
   },
 
   actions: {
+    getActor: {
+      params: {
+        username: { type: 'string', min: 1 }
+      },
+      async handler(ctx) {
+        const account = await ctx.call('auth.account.findByUsername', { username: ctx.params.username });
+        if (!account || typeof account.webId !== 'string' || !account.username) throw new E.NotFoundError();
+
+        const actor = await ctx.call(
+          'activitypub.actor.get',
+          { actorUri: account.webId, webId: 'anon' },
+          { meta: { dataset: account.username, webId: 'anon' } }
+        );
+        if (!actor || resourceId(actor) !== account.webId) throw new E.NotFoundError();
+        if (Object.keys(actor).some(key => FORBIDDEN_ACTOR_FIELDS.has(key))) throw new E.NotFoundError();
+
+        const keyDocument = await ctx.call('activitypub-public-keys.get', { username: account.username });
+        if (
+          keyDocument?.id !== activityPubRsaKeyId(account.webId) ||
+          keyDocument.type !== 'RsaVerificationKey2018' ||
+          keyDocument.owner !== account.webId ||
+          keyDocument.controller !== account.webId ||
+          typeof keyDocument.publicKeyPem !== 'string'
+        ) {
+          throw new E.NotFoundError();
+        }
+        let parsedKey;
+        try {
+          parsedKey = crypto.createPublicKey(keyDocument.publicKeyPem);
+        } catch {
+          throw new E.NotFoundError();
+        }
+        if (parsedKey.asymmetricKeyType !== 'rsa') throw new E.NotFoundError();
+
+        ctx.meta.$responseType = 'application/activity+json';
+        ctx.meta.$responseHeaders = { 'Cache-Control': 'no-store' };
+        return {
+          ...actor,
+          '@context': withSecurityContext(actor['@context']),
+          publicKey: embeddedPublicKey(keyDocument)
+        };
+      }
+    },
     get: {
       params: {
         username: { type: 'string', min: 1 }
@@ -106,3 +185,6 @@ module.exports = {
     }
   }
 };
+
+module.exports.embeddedPublicKey = embeddedPublicKey;
+module.exports.withSecurityContext = withSecurityContext;

@@ -50,10 +50,60 @@ function context({ publicKey = {}, rows } = {}) {
   };
 }
 
+function actorContext({ actor = {}, keyDocument = {} } = {}) {
+  return {
+    params: { username: 'alice' },
+    meta: {},
+    call: jest.fn(async (action, params, options) => {
+      if (action === 'auth.account.findByUsername') {
+        expect(params).toEqual({ username: 'alice' });
+        return { username: 'alice', webId: ACTOR };
+      }
+      if (action === 'activitypub.actor.get') {
+        expect(params).toEqual({ actorUri: ACTOR, webId: 'anon' });
+        expect(options).toEqual({ meta: { dataset: 'alice', webId: 'anon' } });
+        return {
+          '@context': 'https://www.w3.org/ns/activitystreams',
+          id: ACTOR,
+          type: 'Person',
+          inbox: `${ACTOR}/inbox`,
+          publicKey: KEY_ID,
+          ...actor
+        };
+      }
+      if (action === 'activitypub-public-keys.get') {
+        expect(params).toEqual({ username: 'alice' });
+        return {
+          '@context': ['https://www.w3.org/ns/activitystreams', 'https://w3id.org/security/v1'],
+          id: KEY_ID,
+          type: 'RsaVerificationKey2018',
+          owner: ACTOR,
+          controller: ACTOR,
+          publicKeyPem: PUBLIC_KEY_PEM,
+          ...keyDocument
+        };
+      }
+      throw new Error(`Unexpected call ${action}`);
+    })
+  };
+}
+
 describe('public ActivityPub key document', () => {
   test('registers an explicitly unauthenticated read-only key route', async () => {
     const broker = { call: jest.fn() };
     await service.started.call({ broker });
+    expect(broker.call).toHaveBeenCalledWith(
+      'api.addRoute',
+      expect.objectContaining({
+        route: expect.objectContaining({
+          path: '/:username([^/.][^/]+)',
+          authentication: false,
+          authorization: false,
+          aliases: { 'GET /': 'activitypub-public-keys.getActor' }
+        }),
+        toBottom: false
+      })
+    );
     expect(broker.call).toHaveBeenCalledWith(
       'api.addRoute',
       expect.objectContaining({
@@ -66,6 +116,39 @@ describe('public ActivityPub key document', () => {
         toBottom: false
       })
     );
+    expect(broker.call).toHaveBeenCalledTimes(2);
+  });
+
+  test('serves the anonymous actor representation with only the validated embedded RSA key', async () => {
+    const ctx = actorContext();
+    const result = await service.actions.getActor.handler(ctx);
+
+    expect(result).toEqual({
+      '@context': ['https://www.w3.org/ns/activitystreams', 'https://w3id.org/security/v1'],
+      id: ACTOR,
+      type: 'Person',
+      inbox: `${ACTOR}/inbox`,
+      publicKey: {
+        id: KEY_ID,
+        type: 'RsaVerificationKey2018',
+        owner: ACTOR,
+        controller: ACTOR,
+        publicKeyPem: PUBLIC_KEY_PEM
+      }
+    });
+    expect(ctx.meta.$responseType).toBe('application/activity+json');
+    expect(ctx.meta.$responseHeaders).toEqual({ 'Cache-Control': 'no-store' });
+  });
+
+  test.each([
+    { actor: { privateKeyPem: 'private' } },
+    { actor: { accessToken: 'token' } },
+    { keyDocument: { owner: 'https://activitypods.example/mallory' } },
+    { keyDocument: { controller: 'https://activitypods.example/mallory' } },
+    { keyDocument: { id: `${ACTOR}/keys/other` } },
+    { keyDocument: { publicKeyPem: 'not a public key' } }
+  ])('fails closed instead of serving unsafe actor/key material (%p)', async fixture => {
+    await expect(service.actions.getActor.handler(actorContext(fixture))).rejects.toMatchObject({ code: 404 });
   });
 
   test('returns only the exact actor-owned RSA public verification method', async () => {
