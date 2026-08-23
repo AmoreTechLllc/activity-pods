@@ -133,6 +133,28 @@ async function resolveTrustDataset(ctx, webId) {
   return account.username;
 }
 
+async function resolveTrustRecipient(ctx, collectionUri) {
+  if (typeof collectionUri !== 'string' || !collectionUri.startsWith('http')) {
+    throw new Error('Authoritative local inbox binding unavailable');
+  }
+
+  const recipientWebId = await ctx.broker.call('activitypub.collection.getOwner', {
+    collectionUri,
+    collectionKey: 'inbox'
+  });
+
+  try {
+    const recipientUrl = new URL(recipientWebId);
+    if (!['http:', 'https:'].includes(recipientUrl.protocol)) {
+      throw new Error('unsupported protocol');
+    }
+  } catch {
+    throw new Error('Authoritative local inbox binding unavailable');
+  }
+
+  return recipientWebId;
+}
+
 // --- Core evaluation --------------------------------------------------
 
 /**
@@ -146,10 +168,8 @@ async function resolveTrustDataset(ctx, webId) {
  * }|null>}
  */
 async function evaluateActivity(ctx, blockThreshold) {
-  const webId = ctx.meta.webId;
-  if (!webId || webId === 'anon') return null;
-
   const { collectionUri, ...activity } = ctx.params;
+  const webId = await resolveTrustRecipient(ctx, collectionUri);
   const activityId = activity.id || activity['@id'];
   const actorUri = typeof activity.actor === 'string' ? activity.actor : activity.actor?.id || activity.actor?.['@id'];
   const activityType = normalizeType(activity.type || activity['@type']);
@@ -309,3 +329,4 @@ const TrustEvaluatorMiddleware = ({
 module.exports = TrustEvaluatorMiddleware;
 module.exports.evaluateActivity = evaluateActivity;
 module.exports.resolveTrustDataset = resolveTrustDataset;
+module.exports.resolveTrustRecipient = resolveTrustRecipient;
