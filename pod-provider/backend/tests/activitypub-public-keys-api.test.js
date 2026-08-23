@@ -128,6 +128,7 @@ describe('public ActivityPub key document', () => {
       id: ACTOR,
       type: 'Person',
       preferredUsername: 'alice',
+      name: 'alice',
       inbox: `${ACTOR}/inbox`,
       publicKey: {
         id: KEY_ID,
@@ -155,9 +156,15 @@ describe('public ActivityPub key document', () => {
     expect(result.id).toBe(ACTOR);
     expect(result.type).toBe('Person');
     expect(result.preferredUsername).toBe('alice');
+    expect(result.name).toBe('alice');
     expect(result.inbox).toBe(`${ACTOR}/inbox`);
     expect(result).not.toHaveProperty('@id');
     expect(result).not.toHaveProperty('@type');
+  });
+
+  test('preserves an existing non-empty local actor display name', async () => {
+    const result = await service.actions.getActor.handler(actorContext({ actor: { name: 'Alice Example' } }));
+    expect(result.name).toBe('Alice Example');
   });
 
   test.each([

@@ -142,6 +142,10 @@ module.exports = {
         const publicActor = { ...actor };
         delete publicActor['@id'];
         delete publicActor['@type'];
+        const displayName =
+          typeof publicActor.name === 'string' && publicActor.name.trim().length > 0
+            ? publicActor.name
+            : account.username;
         return {
           ...publicActor,
           '@context': withSecurityContext(actor['@context']),
@@ -152,6 +156,11 @@ module.exports = {
           // The account binding is authoritative here and avoids trusting an
           // ambiguous expanded/aliased value from the stored actor document.
           preferredUsername: account.username,
+          // ActivityStreams permits name to be omitted, but Castopod 1.9
+          // persists it into a non-null display_name column when first
+          // materializing a remote actor. Use only the authenticated local
+          // account name as the deterministic compatibility fallback.
+          name: displayName,
           inbox,
           publicKey: embeddedPublicKey(keyDocument)
         };
