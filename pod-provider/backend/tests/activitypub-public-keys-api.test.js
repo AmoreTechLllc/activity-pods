@@ -179,6 +179,31 @@ describe('public ActivityPub key document', () => {
     expect(result['@context']).not.toContain('https://activitypods.example/.well-known/context.jsonld');
   });
 
+  test('publishes an allowlisted actor document instead of leaking stored provider fields', async () => {
+    const result = await service.actions.getActor.handler(actorContext({
+      actor: {
+        summary: 'stored profile field',
+        outbox: `${ACTOR}/outbox`,
+        providerInternalState: { enabled: true },
+        'https://activitypods.example/ns#privateSetting': 'private'
+      }
+    }));
+
+    expect(Object.keys(result).sort()).toEqual([
+      '@context',
+      'id',
+      'inbox',
+      'name',
+      'preferredUsername',
+      'publicKey',
+      'type'
+    ]);
+    expect(result).not.toHaveProperty('summary');
+    expect(result).not.toHaveProperty('outbox');
+    expect(result).not.toHaveProperty('providerInternalState');
+    expect(result).not.toHaveProperty('https://activitypods.example/ns#privateSetting');
+  });
+
   test('preserves an existing non-empty local actor display name', async () => {
     const result = await service.actions.getActor.handler(actorContext({ actor: { name: 'Alice Example' } }));
     expect(result.name).toBe('Alice Example');

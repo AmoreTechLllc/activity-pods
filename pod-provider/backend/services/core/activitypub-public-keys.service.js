@@ -141,15 +141,11 @@ module.exports = {
 
         ctx.meta.$responseType = 'application/activity+json';
         ctx.meta.$responseHeaders = { 'Cache-Control': 'no-store' };
-        const publicActor = { ...actor };
-        delete publicActor['@id'];
-        delete publicActor['@type'];
         const displayName =
-          typeof publicActor.name === 'string' && publicActor.name.trim().length > 0
-            ? publicActor.name
+          typeof actor.name === 'string' && actor.name.trim().length > 0
+            ? actor.name
             : account.username;
         return {
-          ...publicActor,
           '@context': publicActivityPubContext(),
           id: account.webId,
           type: actorType,
