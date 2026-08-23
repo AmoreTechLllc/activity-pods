@@ -183,7 +183,7 @@ describe('public ActivityPub key document', () => {
     const result = await service.actions.getActor.handler(actorContext({
       actor: {
         summary: 'stored profile field',
-        outbox: `${ACTOR}/outbox`,
+        outbox: 'https://mallory.example/outbox',
         providerInternalState: { enabled: true },
         'https://activitypods.example/ns#privateSetting': 'private'
       }
@@ -202,6 +202,22 @@ describe('public ActivityPub key document', () => {
     expect(result).not.toHaveProperty('outbox');
     expect(result).not.toHaveProperty('providerInternalState');
     expect(result).not.toHaveProperty('https://activitypods.example/ns#privateSetting');
+  });
+
+  test('publishes only validated same-origin standard actor collections', async () => {
+    const result = await service.actions.getActor.handler(actorContext({
+      actor: {
+        outbox: `${ACTOR}/outbox`,
+        followers: { id: `${ACTOR}/followers` },
+        following: { '@id': `${ACTOR}/following` }
+      }
+    }));
+
+    expect(result).toMatchObject({
+      outbox: `${ACTOR}/outbox`,
+      followers: `${ACTOR}/followers`,
+      following: `${ACTOR}/following`
+    });
   });
 
   test('preserves an existing non-empty local actor display name', async () => {

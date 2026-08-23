@@ -120,6 +120,11 @@ module.exports = {
         const actorType = activityStreamsActorType(actor);
         const inbox = sameOriginResource(account.webId, actor.inbox);
         if (!actorType || !inbox) throw new E.NotFoundError();
+        const standardCollections = Object.fromEntries(
+          ['outbox', 'followers', 'following']
+            .map(field => [field, sameOriginResource(account.webId, actor[field])])
+            .filter(([, value]) => value !== null)
+        );
 
         const keyDocument = await ctx.call('activitypub-public-keys.get', { username: account.username });
         if (
@@ -160,6 +165,7 @@ module.exports = {
           // account name as the deterministic compatibility fallback.
           name: displayName,
           inbox,
+          ...standardCollections,
           publicKey: embeddedPublicKey(keyDocument)
         };
       }
