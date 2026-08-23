@@ -205,16 +205,23 @@ module.exports = {
         if (parsedKey.asymmetricKeyType !== 'rsa') throw new E.NotFoundError();
         ctx.meta.$responseType = 'application/activity+json';
         ctx.meta.$responseHeaders = { 'Cache-Control': 'no-store' };
+        const publicKey = embeddedPublicKey({
+          id: expectedKeyId,
+          type: 'CryptographicKey',
+          owner,
+          controller,
+          publicKeyPem
+        });
         return {
           '@context': [
             'https://www.w3.org/ns/activitystreams',
             'https://w3id.org/security/v1'
           ],
-          id: expectedKeyId,
-          type: 'CryptographicKey',
-          owner: account.webId,
-          controller: account.webId,
-          publicKeyPem
+          ...publicKey,
+          // Castopod 1.9 dereferences keyId correctly, but reads the PEM from
+          // an embedded publicKey. Repeat only the already-validated exact
+          // verification method; never substitute another owner or key.
+          publicKey
         };
       }
     }

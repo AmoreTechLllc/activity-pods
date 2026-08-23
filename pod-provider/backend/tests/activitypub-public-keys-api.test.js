@@ -173,7 +173,7 @@ describe('public ActivityPub key document', () => {
     await expect(service.actions.getActor.handler(actorContext(fixture))).rejects.toMatchObject({ code: 404 });
   });
 
-  test('returns only the exact actor-owned RSA public verification method', async () => {
+  test('returns only the exact actor-owned RSA public verification method in direct and compatible embedded form', async () => {
     const ctx = context();
     const result = await service.actions.get.handler(ctx);
     expect(result).toEqual({
@@ -182,7 +182,14 @@ describe('public ActivityPub key document', () => {
       type: 'CryptographicKey',
       owner: ACTOR,
       controller: ACTOR,
-      publicKeyPem: PUBLIC_KEY_PEM
+      publicKeyPem: PUBLIC_KEY_PEM,
+      publicKey: {
+        id: KEY_ID,
+        type: 'CryptographicKey',
+        owner: ACTOR,
+        controller: ACTOR,
+        publicKeyPem: PUBLIC_KEY_PEM
+      }
     });
     expect(ctx.meta.$responseType).toBe('application/activity+json');
     expect(ctx.meta.$responseHeaders).toEqual({ 'Cache-Control': 'no-store' });
