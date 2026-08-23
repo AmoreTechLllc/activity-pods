@@ -50,11 +50,13 @@ function bindingValue(row, name) {
   return typeof value === 'string' ? value : null;
 }
 
-function withSecurityContext(context) {
-  const values = context === undefined ? [] : Array.isArray(context) ? context : [context];
-  return values.includes('https://w3id.org/security/v1')
-    ? values
-    : [...values, 'https://w3id.org/security/v1'];
+function publicActivityPubContext() {
+  // The stored Solid actor can carry provider-local contexts. Publishing
+  // those here makes remote JSON-LD processors dereference private vocabulary
+  // authorities before they can materialize an otherwise standard actor.
+  // This endpoint emits only ActivityStreams fields plus the RSA verification
+  // method, so its public processing context is intentionally closed.
+  return ['https://www.w3.org/ns/activitystreams', 'https://w3id.org/security/v1'];
 }
 
 function embeddedPublicKey(keyDocument) {
@@ -148,7 +150,7 @@ module.exports = {
             : account.username;
         return {
           ...publicActor,
-          '@context': withSecurityContext(actor['@context']),
+          '@context': publicActivityPubContext(),
           id: account.webId,
           type: actorType,
           // Some consumers (including Pixelfed) require the compact
@@ -240,4 +242,4 @@ module.exports = {
 module.exports.embeddedPublicKey = embeddedPublicKey;
 module.exports.activityStreamsActorType = activityStreamsActorType;
 module.exports.sameOriginResource = sameOriginResource;
-module.exports.withSecurityContext = withSecurityContext;
+module.exports.publicActivityPubContext = publicActivityPubContext;

@@ -162,6 +162,23 @@ describe('public ActivityPub key document', () => {
     expect(result).not.toHaveProperty('@type');
   });
 
+  test('does not publish provider-local JSON-LD contexts to remote actor consumers', async () => {
+    const result = await service.actions.getActor.handler(actorContext({
+      actor: {
+        '@context': [
+          'https://www.w3.org/ns/activitystreams',
+          'https://activitypods.example/.well-known/context.jsonld'
+        ]
+      }
+    }));
+
+    expect(result['@context']).toEqual([
+      'https://www.w3.org/ns/activitystreams',
+      'https://w3id.org/security/v1'
+    ]);
+    expect(result['@context']).not.toContain('https://activitypods.example/.well-known/context.jsonld');
+  });
+
   test('preserves an existing non-empty local actor display name', async () => {
     const result = await service.actions.getActor.handler(actorContext({ actor: { name: 'Alice Example' } }));
     expect(result.name).toBe('Alice Example');
