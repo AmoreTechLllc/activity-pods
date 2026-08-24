@@ -49,6 +49,11 @@ module.exports = {
   methods: {
     async authenticate(ctx, route, req, res) {
       if (req.headers.signature || (typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Signature '))) {
+        if (!req.headers.signature && typeof req.headers.authorization === 'string') {
+          req.headers.signature = req.headers.authorization.startsWith('Signature ')
+            ? req.headers.authorization.slice(10)
+            : req.headers.authorization;
+        }
         return ctx.call('signature.authenticate', { route, req, res });
       }
       const token = req.headers.authorization?.split(' ')[1];
@@ -67,6 +72,11 @@ module.exports = {
     },
     async authorize(ctx, route, req, res) {
       if (req.headers.signature || (typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Signature '))) {
+        if (!req.headers.signature && typeof req.headers.authorization === 'string') {
+          req.headers.signature = req.headers.authorization.startsWith('Signature ')
+            ? req.headers.authorization.slice(10)
+            : req.headers.authorization;
+        }
         return ctx.call('signature.authorize', { route, req, res });
       }
       const token = req.headers.authorization?.split(' ')[1];
