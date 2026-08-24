@@ -30,7 +30,9 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
     expect(result.source).toContain(
       'const authenticatedActorUri = ctx.meta.httpSignatureActorUri || ctx.meta.webId;'
     );
-    expect(result.source).toContain("if (activityActorId(activity.actor) !== authenticatedActorUri)");
+    expect(result.source).toContain('const activityActorUri = activityActorId(activity.actor);');
+    expect(result.source).toContain('if (activityActorUri !== authenticatedActorUri)');
+    expect(result.source).toContain('Rejected ActivityPub inbox actor/signature mismatch');
     expect(result.source).toContain("if (!value || typeof value !== 'object' || Array.isArray(value)) return null;");
     expect(result.source).toContain("if (id && atId && id !== atId) return null;");
     expect(sha256(result.source)).toBe(PATCHED_HASH);
@@ -103,7 +105,9 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
       })
     };
 
-    await expect(inbox.actions.post.call({ settings: { podProvider: true } }, ctx)).rejects.toMatchObject({
+    await expect(
+      inbox.actions.post.call({ settings: { podProvider: true }, logger: { warn: jest.fn() } }, ctx)
+    ).rejects.toMatchObject({
       type: 'INVALID_ACTOR'
     });
     expect(ctx.call).toHaveBeenCalledTimes(1);
@@ -124,9 +128,14 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
       call: jest.fn().mockResolvedValue(true)
     };
 
-    await expect(inbox.actions.post.call({ settings: { podProvider: true } }, ctx)).rejects.toMatchObject({
+    const logger = { warn: jest.fn() };
+    await expect(inbox.actions.post.call({ settings: { podProvider: true }, logger }, ctx)).rejects.toMatchObject({
       type: 'INVALID_ACTOR'
     });
     expect(ctx.call).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith('Rejected ActivityPub inbox actor/signature mismatch', {
+      authenticatedActorUri: 'https://remote.example/bob',
+      activityActorUri: 'https://remote.example/mallory'
+    });
   });
 });

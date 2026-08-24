@@ -5,13 +5,15 @@ const path = require('path');
 const { createHash } = require('crypto');
 
 const EXPECTED_VERSION = '1.1.4';
-const MARKER = 'activitypods-activitypub-inbox-actor-id-v3';
-const PREVIOUS_MARKER = 'activitypods-activitypub-inbox-actor-id-v2';
+const MARKER = 'activitypods-activitypub-inbox-actor-id-v4';
+const PREVIOUS_MARKER = 'activitypods-activitypub-inbox-actor-id-v3';
+const OLDER_MARKER = 'activitypods-activitypub-inbox-actor-id-v2';
 const LEGACY_MARKER = 'activitypods-activitypub-inbox-actor-id-v1';
 const PRISTINE_HASH = '99386b74357a63b70b025b210925dc031c614315b147b4f91bc76a911f38fbbc';
 const LEGACY_PATCHED_HASH = 'a141c4fc22e34d0cddb323c36a491594649f8072724618d9ffc7e32fcad88057';
-const PREVIOUS_PATCHED_HASH = '8c349b9d18ea11f996e22860025dd9a78f01b75bf66cb46745062cf6203f10b3';
-const PATCHED_HASH = 'fef56adcc165c4d990e255afdab93538a2d96363bc12d6aba95b673bf6136290';
+const OLDER_PATCHED_HASH = '8c349b9d18ea11f996e22860025dd9a78f01b75bf66cb46745062cf6203f10b3';
+const PREVIOUS_PATCHED_HASH = 'fef56adcc165c4d990e255afdab93538a2d96363bc12d6aba95b673bf6136290';
+const PATCHED_HASH = '8d40d956a047174c4a15b2103a90a18afaad2a03cbae066717a29d60f460e310';
 
 function sha256(source) {
   return createHash('sha256').update(source).digest('hex');
@@ -43,9 +45,40 @@ function patchInbox(source) {
     let upgraded = replaceOnce(source, PREVIOUS_MARKER, MARKER, 'previous inbox actor identifier marker');
     upgraded = replaceOnce(
       upgraded,
+      `      if (activityActorId(activity.actor) !== authenticatedActorUri) {
+        throw new E.UnAuthorizedError('INVALID_ACTOR', 'Activity actor is not the same as the posting actor');
+      }`,
+      `      const activityActorUri = activityActorId(activity.actor);
+      if (activityActorUri !== authenticatedActorUri) {
+        this.logger.warn('Rejected ActivityPub inbox actor/signature mismatch', { authenticatedActorUri, activityActorUri });
+        throw new E.UnAuthorizedError('INVALID_ACTOR', 'Activity actor is not the same as the posting actor');
+      }`,
+      'actor mismatch diagnostics'
+    );
+    requireHash(upgraded, PATCHED_HASH, 'patched ActivityPub inbox source');
+    return { source: upgraded, changed: true };
+  }
+
+  if (source.includes(OLDER_MARKER)) {
+    requireHash(source, OLDER_PATCHED_HASH, 'older patched ActivityPub inbox source');
+    let upgraded = replaceOnce(source, OLDER_MARKER, MARKER, 'older inbox actor identifier marker');
+    upgraded = replaceOnce(
+      upgraded,
       '      const authenticatedActorUri = ctx.meta.webId;',
       '      const authenticatedActorUri = ctx.meta.httpSignatureActorUri || ctx.meta.webId;',
       'request-scoped HTTP signature principal'
+    );
+    upgraded = replaceOnce(
+      upgraded,
+      `      if (activityActorId(activity.actor) !== authenticatedActorUri) {
+        throw new E.UnAuthorizedError('INVALID_ACTOR', 'Activity actor is not the same as the posting actor');
+      }`,
+      `      const activityActorUri = activityActorId(activity.actor);
+      if (activityActorUri !== authenticatedActorUri) {
+        this.logger.warn('Rejected ActivityPub inbox actor/signature mismatch', { authenticatedActorUri, activityActorUri });
+        throw new E.UnAuthorizedError('INVALID_ACTOR', 'Activity actor is not the same as the posting actor');
+      }`,
+      'actor mismatch diagnostics'
     );
     requireHash(upgraded, PATCHED_HASH, 'patched ActivityPub inbox source');
     return { source: upgraded, changed: true };
@@ -64,7 +97,9 @@ function patchInbox(source) {
     upgraded = replaceOnce(
       upgraded,
       '      if (activityActorId(activity.actor) !== ctx.meta.webId) {',
-      '      if (activityActorId(activity.actor) !== authenticatedActorUri) {',
+      `      const activityActorUri = activityActorId(activity.actor);
+      if (activityActorUri !== authenticatedActorUri) {
+        this.logger.warn('Rejected ActivityPub inbox actor/signature mismatch', { authenticatedActorUri, activityActorUri });`,
       'immutable authenticated actor comparison'
     );
     requireHash(upgraded, PATCHED_HASH, 'patched ActivityPub inbox source');
@@ -97,7 +132,9 @@ function activityActorId(value) {
   patched = replaceOnce(
     patched,
     '      if (activity.actor !== ctx.meta.webId) {',
-    '      if (activityActorId(activity.actor) !== authenticatedActorUri) {',
+    `      const activityActorUri = activityActorId(activity.actor);
+      if (activityActorUri !== authenticatedActorUri) {
+        this.logger.warn('Rejected ActivityPub inbox actor/signature mismatch', { authenticatedActorUri, activityActorUri });`,
     'inbox authenticated actor comparison'
   );
   requireHash(patched, PATCHED_HASH, 'patched ActivityPub inbox source');
@@ -118,9 +155,11 @@ module.exports = {
   EXPECTED_VERSION,
   MARKER,
   PREVIOUS_MARKER,
+  OLDER_MARKER,
   LEGACY_MARKER,
   PRISTINE_HASH,
   LEGACY_PATCHED_HASH,
+  OLDER_PATCHED_HASH,
   PREVIOUS_PATCHED_HASH,
   PATCHED_HASH,
   sha256,
