@@ -12,6 +12,7 @@ const FORBIDDEN_ACTOR_FIELDS = new Set([
   'refreshToken',
   'secretKey'
 ]);
+const ACTIVITYSTREAMS_ACTOR_TYPES = new Set(['Application', 'Group', 'Organization', 'Person', 'Service']);
 const RDF_MEDIA_TYPES = new Set([
   'text/turtle',
   'application/n-triples',
