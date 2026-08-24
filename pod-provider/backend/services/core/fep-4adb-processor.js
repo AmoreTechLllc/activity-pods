@@ -50,7 +50,18 @@ module.exports = {
       }
 
       // Use safe JSON serialization for deep copying
-      const processed = JSON.parse(JSON.stringify(object));
+      const seen = new WeakSet();
+      const safeStringify = (val) => {
+        return JSON.stringify(val, (key, value) => {
+          if (typeof value === 'object' && value !== null) {
+            if (value.socket || value.parser || key === 'req' || key === 'res') return undefined;
+            if (seen.has(value)) return undefined;
+            seen.add(value);
+          }
+          return value;
+        });
+      };
+      const processed = JSON.parse(safeStringify(object));
       const docDomain = this.extractDomainFromObject(processed, contextDomain);
 
       // Process each identifier property

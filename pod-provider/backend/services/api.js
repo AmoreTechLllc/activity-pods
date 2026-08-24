@@ -54,7 +54,17 @@ module.exports = {
             ? req.headers.authorization.slice(10)
             : req.headers.authorization;
         }
-        return ctx.call('signature.authenticate', { route, req, res });
+        const { isValid, actorUri } = await ctx.call('signature.verifyHttpSignature', {
+          path: req.originalUrl,
+          method: req.method,
+          headers: req.headers
+        });
+        if (isValid) {
+          ctx.meta.webId = actorUri;
+          return null;
+        }
+        ctx.meta.webId = 'anon';
+        throw new E.UnAuthorizedError(E.ERR_INVALID_TOKEN);
       }
       const token = req.headers.authorization?.split(' ')[1];
       if (token) {
@@ -77,7 +87,17 @@ module.exports = {
             ? req.headers.authorization.slice(10)
             : req.headers.authorization;
         }
-        return ctx.call('signature.authorize', { route, req, res });
+        const { isValid, actorUri } = await ctx.call('signature.verifyHttpSignature', {
+          path: req.originalUrl,
+          method: req.method,
+          headers: req.headers
+        });
+        if (isValid) {
+          ctx.meta.webId = actorUri;
+          return null;
+        }
+        ctx.meta.webId = 'anon';
+        throw new E.UnAuthorizedError(E.ERR_INVALID_TOKEN);
       }
       const token = req.headers.authorization?.split(' ')[1];
       if (token) {
