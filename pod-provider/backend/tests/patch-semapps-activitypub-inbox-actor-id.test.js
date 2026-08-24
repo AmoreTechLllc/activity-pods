@@ -27,9 +27,60 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
     const result = patchInbox(installed);
     expect(result.changed).toBe(false);
     expect(result.source).toContain(MARKER);
-    expect(result.source).toContain("if (activityActorId(activity.actor) !== ctx.meta.webId)");
+    expect(result.source).toContain('const authenticatedActorUri = ctx.meta.webId;');
+    expect(result.source).toContain("if (activityActorId(activity.actor) !== authenticatedActorUri)");
     expect(result.source).toContain("if (!value || typeof value !== 'object' || Array.isArray(value)) return null;");
     expect(result.source).toContain("if (id && atId && id !== atId) return null;");
     expect(sha256(result.source)).toBe(PATCHED_HASH);
+  });
+
+  test('binds actor authorization to the authenticated principal before awaited broker calls', async () => {
+    jest.resetModules();
+    const inbox = require(inboxPath);
+    const afterActorCheck = new Error('after actor authorization');
+    const ctx = {
+      params: {
+        collectionUri: 'https://local.example/alice/inbox',
+        actor: 'https://remote.example/bob'
+      },
+      meta: { webId: 'https://remote.example/bob' },
+      call: jest.fn(async action => {
+        if (action === 'ldp.resource.exist') {
+          // Moleculer child calls share metadata and may update it while awaited.
+          ctx.meta.webId = 'system';
+          return true;
+        }
+        if (action === 'activitypub.collection.getOwner') throw afterActorCheck;
+        throw new Error(`Unexpected action ${action}`);
+      })
+    };
+
+    await expect(inbox.actions.post.call({ settings: { podProvider: true } }, ctx)).rejects.toBe(afterActorCheck);
+    expect(ctx.call).toHaveBeenNthCalledWith(2, 'activitypub.collection.getOwner', {
+      collectionUri: 'https://local.example/alice/inbox',
+      collectionKey: 'inbox'
+    });
+  });
+
+  test('still rejects an activity actor that differs from the captured principal', async () => {
+    jest.resetModules();
+    const inbox = require(inboxPath);
+    const ctx = {
+      params: {
+        collectionUri: 'https://local.example/alice/inbox',
+        actor: 'https://remote.example/mallory'
+      },
+      meta: { webId: 'https://remote.example/bob' },
+      call: jest.fn(async action => {
+        if (action !== 'ldp.resource.exist') throw new Error(`Unexpected action ${action}`);
+        ctx.meta.webId = 'https://remote.example/mallory';
+        return true;
+      })
+    };
+
+    await expect(inbox.actions.post.call({ settings: { podProvider: true } }, ctx)).rejects.toMatchObject({
+      type: 'INVALID_ACTOR'
+    });
+    expect(ctx.call).toHaveBeenCalledTimes(1);
   });
 });

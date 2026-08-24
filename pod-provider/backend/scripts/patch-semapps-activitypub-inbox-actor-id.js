@@ -5,9 +5,11 @@ const path = require('path');
 const { createHash } = require('crypto');
 
 const EXPECTED_VERSION = '1.1.4';
-const MARKER = 'activitypods-activitypub-inbox-actor-id-v1';
+const MARKER = 'activitypods-activitypub-inbox-actor-id-v2';
+const LEGACY_MARKER = 'activitypods-activitypub-inbox-actor-id-v1';
 const PRISTINE_HASH = '99386b74357a63b70b025b210925dc031c614315b147b4f91bc76a911f38fbbc';
-const PATCHED_HASH = 'a141c4fc22e34d0cddb323c36a491594649f8072724618d9ffc7e32fcad88057';
+const LEGACY_PATCHED_HASH = 'a141c4fc22e34d0cddb323c36a491594649f8072724618d9ffc7e32fcad88057';
+const PATCHED_HASH = '8c349b9d18ea11f996e22860025dd9a78f01b75bf66cb46745062cf6203f10b3';
 
 function sha256(source) {
   return createHash('sha256').update(source).digest('hex');
@@ -34,6 +36,26 @@ function patchInbox(source) {
     return { source, changed: false };
   }
 
+  if (source.includes(LEGACY_MARKER)) {
+    requireHash(source, LEGACY_PATCHED_HASH, 'legacy patched ActivityPub inbox source');
+    let upgraded = replaceOnce(source, LEGACY_MARKER, MARKER, 'legacy inbox actor identifier marker');
+    upgraded = replaceOnce(
+      upgraded,
+      '      const { collectionUri, ...activity } = ctx.params;',
+      `      const { collectionUri, ...activity } = ctx.params;
+      const authenticatedActorUri = ctx.meta.webId;`,
+      'authenticated actor snapshot'
+    );
+    upgraded = replaceOnce(
+      upgraded,
+      '      if (activityActorId(activity.actor) !== ctx.meta.webId) {',
+      '      if (activityActorId(activity.actor) !== authenticatedActorUri) {',
+      'immutable authenticated actor comparison'
+    );
+    requireHash(upgraded, PATCHED_HASH, 'patched ActivityPub inbox source');
+    return { source: upgraded, changed: true };
+  }
+
   requireHash(source, PRISTINE_HASH, 'pristine ActivityPub inbox source');
   let patched = replaceOnce(
     source,
@@ -52,8 +74,15 @@ function activityActorId(value) {
   );
   patched = replaceOnce(
     patched,
+    '      const { collectionUri, ...activity } = ctx.params;',
+    `      const { collectionUri, ...activity } = ctx.params;
+      const authenticatedActorUri = ctx.meta.webId;`,
+    'authenticated actor snapshot'
+  );
+  patched = replaceOnce(
+    patched,
     '      if (activity.actor !== ctx.meta.webId) {',
-    '      if (activityActorId(activity.actor) !== ctx.meta.webId) {',
+    '      if (activityActorId(activity.actor) !== authenticatedActorUri) {',
     'inbox authenticated actor comparison'
   );
   requireHash(patched, PATCHED_HASH, 'patched ActivityPub inbox source');
@@ -70,4 +99,14 @@ function applyPatch(root = path.dirname(require.resolve('@semapps/activitypub/pa
 }
 
 if (require.main === module) applyPatch();
-module.exports = { EXPECTED_VERSION, MARKER, PRISTINE_HASH, PATCHED_HASH, sha256, patchInbox, applyPatch };
+module.exports = {
+  EXPECTED_VERSION,
+  MARKER,
+  LEGACY_MARKER,
+  PRISTINE_HASH,
+  LEGACY_PATCHED_HASH,
+  PATCHED_HASH,
+  sha256,
+  patchInbox,
+  applyPatch
+};
