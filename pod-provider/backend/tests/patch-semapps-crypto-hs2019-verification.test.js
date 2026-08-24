@@ -6,6 +6,7 @@ const Module = require('module');
 const path = require('path');
 
 const { KEYS_MARKER, MARKER, PRISTINE_HASHES, sha256, patchHttpSignatures, patchKeys } = require('../scripts/patch-semapps-crypto-hs2019-verification');
+const { KEY_TYPES } = require('@semapps/crypto/constants');
 
 const semappsFile = require.resolve('@semapps/crypto/signature/http-signatures');
 const keysFile = require.resolve('@semapps/crypto/keys/keys');
@@ -15,6 +16,16 @@ function loadPatchedService(source) {
   compiled.filename = semappsFile;
   compiled.paths = Module._nodeModulePaths(path.dirname(semappsFile));
   compiled._compile(source, semappsFile);
+  return compiled.exports;
+}
+
+function loadPatchedKeys(source, fetchImpl) {
+  const compiled = new Module(keysFile, module);
+  compiled.filename = keysFile;
+  compiled.paths = Module._nodeModulePaths(path.dirname(keysFile));
+  const normalRequire = compiled.require.bind(compiled);
+  compiled.require = request => request === 'node-fetch' ? fetchImpl : normalRequire(request);
+  compiled._compile(source, keysFile);
   return compiled.exports;
 }
 
@@ -70,6 +81,15 @@ function restorePristineHttpSignatures(source) {
 
       return { isValid: keyValid, actorUri, publicKeyPem };`
     );
+}
+
+function restorePristineKeys(source) {
+  return source
+    .replace("const { generateKeyPair, createPublicKey } = require('crypto');", "const { generateKeyPair } = require('crypto');")
+    .replace(/const REMOTE_KEY_ACCEPT[^\n]*activitypods-activitypub-remote-key-fetch-v1\n\nfunction hasRsaPublicKeyMaterial[\s\S]*?\n}\n\n/, '')
+    .replaceAll('headers: { Accept: REMOTE_KEY_ACCEPT }', "headers: { Accept: 'application/json' }")
+    .replace(/\n        const directKeyDocument =[\s\S]*?keyObjects = \[actor\];/, '')
+    .replace(' || hasRsaPublicKeyMaterial(key)', '');
 }
 
 describe('SemApps hs2019 HTTP signature verification patch', () => {
@@ -248,16 +268,49 @@ describe('SemApps hs2019 HTTP signature verification patch', () => {
   });
 
   test('uses ActivityPub negotiation and accepts an exact direct key document', () => {
-    const source = fs.readFileSync(keysFile, 'utf8')
-      .replace(/const REMOTE_KEY_ACCEPT[^\n]*activitypods-activitypub-remote-key-fetch-v1\n\n/, '')
-      .replaceAll('headers: { Accept: REMOTE_KEY_ACCEPT }', "headers: { Accept: 'application/json' }")
-      .replace(/\n        const directKeyDocument =[\s\S]*?keyObjects = \[actor\];/, '');
+    const source = restorePristineKeys(fs.readFileSync(keysFile, 'utf8'));
     const result = patchKeys(source);
     expect(result.changed).toBe(true);
     expect(result.source).toContain(KEYS_MARKER);
     expect(result.source.match(/headers: \{ Accept: REMOTE_KEY_ACCEPT \}/g)).toHaveLength(2);
     expect(result.source).toContain('if (keyObjects.length === 0 && directKeyDocument) keyObjects = [actor];');
     expect(patchKeys(result.source)).toEqual({ source: result.source, changed: false });
+  });
+
+  test('accepts a generic ActivityPub Key only when its PEM is cryptographically RSA', async () => {
+    const source = restorePristineKeys(fs.readFileSync(keysFile, 'utf8'));
+    const fetch = jest.fn();
+    const service = loadPatchedKeys(patchKeys(source).source, fetch);
+    const { publicKey: rsaPublicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const { publicKey: ecPublicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const actorUri = 'https://sender.example/users/alice';
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        id: actorUri,
+        publicKey: [
+          {
+            id: `${actorUri}#main-key`,
+            type: 'Key',
+            owner: actorUri,
+            publicKeyPem: rsaPublicKey.export({ type: 'spki', format: 'pem' })
+          },
+          {
+            id: `${actorUri}#ec-key`,
+            type: 'Key',
+            owner: actorUri,
+            publicKeyPem: ecPublicKey.export({ type: 'spki', format: 'pem' })
+          },
+          { id: `${actorUri}#invalid`, type: 'Key', owner: actorUri, publicKeyPem: 'not a key' }
+        ]
+      })
+    });
+
+    await expect(service.actions.getRemotePublicKeys.handler({
+      params: { webId: actorUri, keyType: KEY_TYPES.RSA }
+    })).resolves.toEqual([
+      expect.objectContaining({ id: `${actorUri}#main-key`, type: 'Key' })
+    ]);
   });
 
   test('fails closed on any complete-file drift before or after patching', () => {
@@ -268,10 +321,7 @@ describe('SemApps hs2019 HTTP signature verification patch', () => {
     expect(() => patchHttpSignatures(patchedHttp.replace('TODO: Check', 'TODO:  Check')))
       .toThrow('patched HTTP signature source hash mismatch');
 
-    const pristineKeys = fs.readFileSync(keysFile, 'utf8')
-      .replace(/const REMOTE_KEY_ACCEPT[^\n]*activitypods-activitypub-remote-key-fetch-v1\n\n/, '')
-      .replaceAll('headers: { Accept: REMOTE_KEY_ACCEPT }', "headers: { Accept: 'application/json' }")
-      .replace(/\n        const directKeyDocument =[\s\S]*?keyObjects = \[actor\];/, '');
+    const pristineKeys = restorePristineKeys(fs.readFileSync(keysFile, 'utf8'));
     const patchedKeys = patchKeys(pristineKeys).source;
     expect(() => patchKeys(patchedKeys.replace('const KeysService', 'const  KeysService')))
       .toThrow('patched keys source hash mismatch');

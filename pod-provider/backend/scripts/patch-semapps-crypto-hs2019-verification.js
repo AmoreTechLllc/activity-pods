@@ -15,7 +15,7 @@ const PRISTINE_HASHES = Object.freeze({
 });
 const PATCHED_HASHES = Object.freeze({
   httpSignatures: 'a266e375c25a8e0099e3aa84d4f8c268e0f358ecdb9cbdf0aa24ca2712556a25',
-  keys: '82a9f5b97f028a1958e8c80c6e65043a8f01e588be78bccf382d02121183989e'
+  keys: '8545664eb35396b4c3da1eebe107c0934c564eaf57e3fb134e745464442b19af'
 });
 
 function sha256(source) {
@@ -99,8 +99,25 @@ function patchKeys(source) {
   requireHash(source, PRISTINE_HASHES.keys, 'pristine keys source');
   let patched = replaceOnce(
     source,
+    "const { generateKeyPair } = require('crypto');",
+    "const { generateKeyPair, createPublicKey } = require('crypto');",
+    'keys crypto import'
+  );
+  patched = replaceOnce(
+    patched,
     "const KeysService = {",
-    `const REMOTE_KEY_ACCEPT = 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"'; // ${KEYS_MARKER}\n\nconst KeysService = {`,
+    `const REMOTE_KEY_ACCEPT = 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams"'; // ${KEYS_MARKER}
+
+function hasRsaPublicKeyMaterial(key) {
+  if (typeof key?.publicKeyPem !== 'string') return false;
+  try {
+    return createPublicKey(key.publicKeyPem).asymmetricKeyType === 'rsa';
+  } catch {
+    return false;
+  }
+}
+
+const KeysService = {`,
     'keys service declaration'
   );
   const occurrences = patched.split("headers: { Accept: 'application/json' }").length - 1;
@@ -111,6 +128,12 @@ function patchKeys(source) {
     `        let keyObjects = arrayOf(actor?.publicKey).concat(arrayOf(actor?.assertionMethod));`,
     `        let keyObjects = arrayOf(actor?.publicKey).concat(arrayOf(actor?.assertionMethod));\n        const directKeyDocument = (actor?.id || actor?.['@id']) === webId &&\n          typeof actor?.publicKeyPem === 'string' &&\n          typeof (actor?.controller || actor?.owner) === 'string';\n        if (keyObjects.length === 0 && directKeyDocument) keyObjects = [actor];`,
     'direct remote key document handling'
+  );
+  patched = replaceOnce(
+    patched,
+    `              return types.length === 0 || types.includes(KEY_TYPES.RSA);`,
+    `              return types.length === 0 || types.includes(KEY_TYPES.RSA) || hasRsaPublicKeyMaterial(key);`,
+    'generic ActivityPub Key RSA material validation'
   );
   requireHash(patched, PATCHED_HASHES.keys, 'patched keys source');
   return { source: patched, changed: true };
