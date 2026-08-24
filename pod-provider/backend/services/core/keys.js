@@ -3,7 +3,7 @@ const { literal, namedNode, triple } = require('@rdfjs/data-model');
 const { MIME_TYPES } = require('@semapps/mime-types');
 const { KEY_TYPES } = require('@semapps/crypto/constants');
 const { KeysService } = require('@semapps/crypto');
-const { activityPubRsaKeyId } = require('../../utils/activitypub-rsa-key-id');
+const { activityPubRsaKeyId, activityPubRsaSigningKeyId } = require('../../utils/activitypub-rsa-key-id');
 
 const ATPROTO_KEY_TYPE = 'urn:secp256k1-key';
 const VERIFICATION_METHOD_TYPE = 'https://w3id.org/security#VerificationMethod';
@@ -270,4 +270,5 @@ module.exports = {
 };
 
 module.exports.activityPubRsaKeyId = activityPubRsaKeyId;
+module.exports.activityPubRsaSigningKeyId = activityPubRsaSigningKeyId;
 module.exports.activityPubRsaVerificationMethodTriples = activityPubRsaVerificationMethodTriples;

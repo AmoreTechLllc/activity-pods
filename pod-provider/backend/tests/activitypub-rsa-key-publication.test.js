@@ -28,6 +28,11 @@ describe('ActivityPub RSA key publication', () => {
     );
   });
 
+  test('derives a deterministic actor-fragment signing alias without changing stored key authority', () => {
+    expect(keysService.activityPubRsaSigningKeyId(ACTOR_URI)).toBe(`${ACTOR_URI}#main-key`);
+    expect(keysService.activityPubRsaKeyId(ACTOR_URI)).toBe(`${ACTOR_URI}/keys/main`);
+  });
+
   test.each([
     'ftp://activitypods.test/alice',
     'https://user:password@activitypods.test/alice',
@@ -35,6 +40,9 @@ describe('ActivityPub RSA key publication', () => {
     'https://activitypods.test/alice#existing'
   ])('rejects unsafe or ambiguous actor URI %s', actorUri => {
     expect(() => keysService.activityPubRsaKeyId(actorUri)).toThrow(
+      'credential-free HTTP(S) actor URI without query or fragment'
+    );
+    expect(() => keysService.activityPubRsaSigningKeyId(actorUri)).toThrow(
       'credential-free HTTP(S) actor URI without query or fragment'
     );
   });

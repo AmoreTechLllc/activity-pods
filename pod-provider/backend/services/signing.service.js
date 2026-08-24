@@ -18,6 +18,7 @@ const {
   assertAuthorizedPlcGenesis,
   decodeCanonicalBase64
 } = require('../utils/atproto-signing-policy');
+const { activityPubRsaSigningKeyId } = require('../utils/activitypub-rsa-key-id');
 
 const SECP256K1_N = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
 const SECP256K1_MULTICODEC = Buffer.from([0xe7, 0x01]);
@@ -307,7 +308,7 @@ module.exports = {
           }
 
           for (const item of items) {
-            results.push(await this._signOne(actorUri, material.keyId, material.privateKeyPem, item));
+            results.push(await this._signOne(actorUri, material.signatureKeyId, material.privateKeyPem, item));
           }
         }
         return { results };
@@ -848,6 +849,7 @@ module.exports = {
       return {
         ok: true,
         keyId: candidates[0]['rdfs:seeAlso'],
+        signatureKeyId: activityPubRsaSigningKeyId(actorUri),
         privateKeyPem: candidates[0].privateKeyPem
       };
     },

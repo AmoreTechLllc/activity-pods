@@ -6,6 +6,7 @@ const { acceptsActivityPubRepresentation } = service;
 
 const ACTOR = 'https://activitypods.example/alice';
 const KEY_ID = `${ACTOR}/keys/main`;
+const SIGNING_KEY_ID = `${ACTOR}#main-key`;
 const { publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
 const PUBLIC_KEY_PEM = publicKey.export({ type: 'spki', format: 'pem' });
 
@@ -211,7 +212,7 @@ describe('public ActivityPub key document', () => {
       name: 'alice',
       inbox: `${ACTOR}/inbox`,
       publicKey: {
-        id: KEY_ID,
+        id: SIGNING_KEY_ID,
         type: 'CryptographicKey',
         owner: ACTOR,
         controller: ACTOR,

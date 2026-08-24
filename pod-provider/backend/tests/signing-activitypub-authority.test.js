@@ -4,6 +4,7 @@ const signingSchema = require('../services/signing.service');
 
 const ACTOR = 'http://localhost:3000/alice';
 const KEY_ID = 'http://localhost:3000/public-key/alice-rsa';
+const SIGNING_KEY_ID = `${ACTOR}#main-key`;
 function makeService(overrides = {}) {
   return {
     settings: signingSchema.settings,
@@ -146,7 +147,12 @@ describe('ActivityPub signing authority boundary', () => {
     };
     await expect(
       makeService()._resolveActivityPubSigningMaterial(ctx, ACTOR, localAccount(), localActor())
-    ).resolves.toEqual({ ok: true, keyId: KEY_ID, privateKeyPem: 'PRIVATE' });
+    ).resolves.toEqual({
+      ok: true,
+      keyId: KEY_ID,
+      signatureKeyId: SIGNING_KEY_ID,
+      privateKeyPem: 'PRIVATE'
+    });
   });
 
   test.each([
@@ -263,10 +269,10 @@ describe('ActivityPub signing authority boundary', () => {
       requestId: 'req-1',
       ok: true,
       actorUri: ACTOR,
-      keyId: KEY_ID,
+      keyId: SIGNING_KEY_ID,
       privateKeyPem: 'PRIVATE'
     }]);
-    expect(signOne).toHaveBeenCalledWith(ACTOR, KEY_ID, 'PRIVATE', request);
+    expect(signOne).toHaveBeenCalledWith(ACTOR, SIGNING_KEY_ID, 'PRIVATE', request);
     expect(ctx.call.mock.calls.map(([name]) => name)).toEqual([
       'auth.account.findByWebId',
       'activitypub.actor.get',

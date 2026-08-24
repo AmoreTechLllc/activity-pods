@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { Errors: E } = require('moleculer-web');
 const { MIME_TYPES } = require('@semapps/mime-types');
 const { sanitizeSparqlQuery } = require('@semapps/triplestore');
-const { activityPubRsaKeyId } = require('../../utils/activitypub-rsa-key-id');
+const { activityPubRsaKeyId, activityPubRsaSigningKeyId } = require('../../utils/activitypub-rsa-key-id');
 const FORBIDDEN_ACTOR_FIELDS = new Set([
   'accessToken',
   'privateKey',
@@ -32,25 +32,28 @@ function acceptsActivityPubRepresentation(value) {
     if (!mediaType) continue;
 
     let quality = 1;
+    let validQuality = true;
     for (const rawParameter of rawParameters) {
       const separator = rawParameter.indexOf('=');
       if (separator < 0) continue;
       const name = rawParameter.slice(0, separator).trim().toLowerCase();
       if (name !== 'q') continue;
-      const parsedQuality = Number(rawParameter.slice(separator + 1).trim());
-      if (Number.isFinite(parsedQuality) && parsedQuality >= 0 && parsedQuality <= 1) {
-        quality = parsedQuality;
+      const rawQuality = rawParameter.slice(separator + 1).trim();
+      if (!/^(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/u.test(rawQuality)) {
+        validQuality = false;
+        break;
       }
+      quality = Number(rawQuality);
     }
-    if (quality <= 0) continue;
+    if (!validQuality || quality <= 0) continue;
 
     if (RDF_MEDIA_TYPES.has(mediaType)) {
       if (quality > bestRdfQuality) bestRdfQuality = quality;
     } else if (
       mediaType === 'application/activity+json' ||
-      mediaType === 'application/ld+json' ||
-      mediaType === 'application/json' ||
-      mediaType === '*/*'
+      (mediaType === 'application/ld+json' && rawParameters.some(parameter =>
+        /^\s*profile\s*=\s*"?https:\/\/www\.w3\.org\/ns\/activitystreams"?\s*$/iu.test(parameter)
+      ))
     ) {
       if (quality > bestApQuality) bestApQuality = quality;
     }
@@ -232,7 +235,14 @@ module.exports = {
           name: displayName,
           inbox,
           ...standardCollections,
-          publicKey: embeddedPublicKey(keyDocument)
+          // Publish a fragment verification method for broad ActivityPub
+          // interoperability. The persisted slash-style key remains the sole
+          // private-material authority; this deterministic alias carries only
+          // the already-validated public key and exact actor controller.
+          publicKey: embeddedPublicKey({
+            ...keyDocument,
+            id: activityPubRsaSigningKeyId(account.webId)
+          })
         };
       }
     },

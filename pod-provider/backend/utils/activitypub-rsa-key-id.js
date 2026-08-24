@@ -15,4 +15,19 @@ function activityPubRsaKeyId(actorUri) {
   return parsed.toString();
 }
 
-module.exports = { activityPubRsaKeyId };
+function activityPubRsaSigningKeyId(actorUri) {
+  const parsed = new URL(actorUri);
+  if (
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    throw new Error('RSA key owner must be a credential-free HTTP(S) actor URI without query or fragment');
+  }
+  parsed.hash = 'main-key';
+  return parsed.toString();
+}
+
+module.exports = { activityPubRsaKeyId, activityPubRsaSigningKeyId };
