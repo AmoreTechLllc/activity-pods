@@ -1,6 +1,7 @@
 'use strict';
 
 const {
+  assertPublicActorReady,
   boundedNonNegativeInteger,
   createProofSummary,
   extractExternalDeliveryTarget
@@ -49,6 +50,31 @@ function createExternalHandoff() {
 }
 
 describe('ActivityPub real federation proof payload', () => {
+  test('requires an exact bounded ActivityPub actor through the public authority', async () => {
+    const response = new Response(JSON.stringify({ id: ACTOR_URI, type: 'Person' }), {
+      status: 200,
+      headers: { 'content-type': 'application/activity+json' }
+    });
+    const fetchImpl = jest.fn(async () => response);
+
+    await expect(assertPublicActorReady(ACTOR_URI, { fetchImpl, attempts: 1 })).resolves.toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledWith(ACTOR_URI, expect.objectContaining({
+      method: 'GET',
+      redirect: 'error',
+      headers: { accept: 'application/activity+json' }
+    }));
+  });
+
+  test('fails closed when the public document claims a different actor', async () => {
+    const fetchImpl = async () => new Response(JSON.stringify({ id: 'https://activitypods.example/mallory' }), {
+      status: 200,
+      headers: { 'content-type': 'application/activity+json' }
+    });
+    await expect(assertPublicActorReady(ACTOR_URI, { fetchImpl, attempts: 1 })).rejects.toThrow(
+      /identifier did not match/u
+    );
+  });
+
   test('keeps the normal proof unpadded by default', () => {
     expect(boundedNonNegativeInteger(undefined, 0, 64 * 1024, 'proof summary bytes')).toBe(0);
     expect(createProofSummary(0)).toBeUndefined();

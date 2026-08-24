@@ -13,6 +13,7 @@ const DEFAULT_BASE_URL = 'http://127.0.0.1:3000';
 const DEFAULT_TRANSPORTER_URL = 'redis://127.0.0.1:6379/12';
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const MAX_PROOF_SUMMARY_BYTES = 64 * 1024;
+const MAX_PUBLIC_ACTOR_BYTES = 1024 * 1024;
 const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.handoff-queued';
 
 function normalizeEntityId(value) {
@@ -50,6 +51,53 @@ function createProofSummary(bytes) {
   if (bytes === 0) return undefined;
   const seed = 'activitypods-sidecar-compression-proof|';
   return seed.repeat(Math.ceil(bytes / seed.length)).slice(0, bytes);
+}
+
+async function readBoundedResponse(response, maximumBytes) {
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of response.body || []) {
+    const buffer = Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > maximumBytes) throw new Error('public actor response exceeded the byte limit');
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+async function assertPublicActorReady(actorUri, options = {}) {
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const delay = options.delay || (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)));
+  const attempts = positiveInteger(options.attempts, 10, 'public actor readiness attempts');
+  if (typeof fetchImpl !== 'function') throw new Error('public actor readiness requires fetch');
+
+  const parsed = new URL(actorUri);
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash) {
+    throw new Error('public actor readiness requires a credential-free HTTPS actor URI');
+  }
+
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetchImpl(actorUri, {
+        method: 'GET',
+        headers: { accept: 'application/activity+json' },
+        redirect: 'error',
+        signal: AbortSignal.timeout(10_000)
+      });
+      const contentType = response.headers.get('content-type') || '';
+      if (response.status !== 200 || !/^(application\/(?:activity\+json|ld\+json))(?:\s*;|$)/iu.test(contentType)) {
+        throw new Error(`public actor returned status ${response.status} with an invalid content type`);
+      }
+      const document = JSON.parse(await readBoundedResponse(response, MAX_PUBLIC_ACTOR_BYTES));
+      if (normalizeEntityId(document) !== actorUri) throw new Error('public actor identifier did not match its authority');
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await delay(Math.min(8_000, 500 * (2 ** (attempt - 1))));
+    }
+  }
+  throw new Error(`public actor authority was not ready after ${attempts} attempts: ${lastError?.message || 'unknown error'}`);
 }
 
 function createRunnerBroker(transporterUrl, runId) {
@@ -182,6 +230,10 @@ async function run({ remoteActorUri, mode, runId }) {
     await awaitActorBootstrap(broker, sender, 'outbox', readyTimeoutMs);
     senderRef.value = sender.webId;
 
+    if (process.env.AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY === 'true') {
+      await assertPublicActorReady(sender.webId);
+    }
+
     if (mode === 'external') latch.arm();
 
     const postPromise = broker.call(
@@ -271,6 +323,7 @@ if (require.main === module) {
 
 module.exports = {
   boundedNonNegativeInteger,
+  assertPublicActorReady,
   createProofSummary,
   createRunnerBroker,
   extractExternalDeliveryTarget,
