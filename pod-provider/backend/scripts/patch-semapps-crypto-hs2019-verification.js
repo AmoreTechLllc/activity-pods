@@ -6,15 +6,15 @@ const { createHash } = require('crypto');
 
 const EXPECTED_VERSION = '1.1.4';
 const LEGACY_MARKER = 'activitypods-hs2019-rsa-sha256-verification-v1';
-const PREVIOUS_MARKER = 'activitypods-hs2019-rsa-key-binding-verification-v2';
-const MARKER = 'activitypods-hs2019-rsa-key-binding-verification-v3';
+const PREVIOUS_MARKER = 'activitypods-hs2019-rsa-key-binding-verification-v3';
+const MARKER = 'activitypods-hs2019-rsa-key-binding-verification-v4';
 const KEYS_MARKER = 'activitypods-activitypub-remote-key-fetch-v1';
 const PRISTINE_HASHES = Object.freeze({
   httpSignatures: '8ddcc0cbdaf11fb5f0c9f599e6da98e7215773e64bc9720940008c1aa6284ece',
   keys: '43a29bc040ad63b9d9f6734fb6e369e63889b136fe350238b878cfa4e6fa925e'
 });
 const PATCHED_HASHES = Object.freeze({
-  httpSignatures: 'f955cc366b0fd0a91c0609fd741f4ae423cb8e5b657f2f85c87c895ffdf9806c',
+  httpSignatures: 'f71ca3018a40a9a5ad17a63cea4b28e91ff6cc7bb5b0922a2880c75e4619deb4',
   keys: '82a9f5b97f028a1958e8c80c6e65043a8f01e588be78bccf382d02121183989e'
 });
 
@@ -83,7 +83,7 @@ function patchHttpSignatures(source) {
   patched = replaceOnce(
     patched,
     `      const [actorUri] = keyId.split('#');\n\n      // TODO: Check if keys are outdated\n\n      const publicKeys = await ctx.call('keys.getRemotePublicKeys', { webId: actorUri, keyType: KEY_TYPES.RSA });\n\n      if (!publicKeys) return { isValid: false };\n\n      // Check, if one of the keys is able to verify the signature.\n      const { isValid: keyValid, publicKey: publicKeyPem } = publicKeys\n        .flatMap(key => key.publicKeyPem || [])\n        .map(pubKeyPem => {\n          try {\n            return { isValid: verifySignature(parsedSignature, pubKeyPem), publicKey: pubKeyPem };\n          } catch (e) {\n            return { isValid: false };\n          }\n        })\n        .find(({ isValid }) => isValid) || { isValid: false, publicKey: null };\n\n      return { isValid: keyValid, actorUri, publicKeyPem };`,
-    `      const keyDocumentUri = keyId.includes('#') ? keyId.split('#')[0] : keyId;\n\n      // TODO: Check if keys are outdated\n\n      const publicKeys = await ctx.call('keys.getRemotePublicKeys', { webId: keyDocumentUri, keyType: KEY_TYPES.RSA });\n      if (!publicKeys) return { isValid: false };\n\n      // Bind verification to the exact requested key and its same-origin controller.\n      const verifiedKey = publicKeys\n        .filter(key => (key.id || key['@id']) === keyId && typeof key.publicKeyPem === 'string')\n        .map(key => {\n          const actorUri = key.controller || key.owner;\n          if (typeof actorUri !== 'string') return { isValid: false };\n          try {\n            if (new URL(actorUri).origin !== new URL(keyId).origin) return { isValid: false };\n            if (keyId.includes('#') && actorUri !== keyDocumentUri) return { isValid: false };\n            return {\n              isValid: createPublicKey(key.publicKeyPem).asymmetricKeyType === 'rsa' && verifySignature(parsedSignature, key.publicKeyPem),\n              actorUri,\n              publicKeyPem: key.publicKeyPem\n            };\n          } catch (e) {\n            return { isValid: false };\n          }\n        })\n        .find(({ isValid }) => isValid);\n\n      return verifiedKey || { isValid: false };`,
+    `      const keyDocumentUri = keyId.includes('#') ? keyId.split('#')[0] : keyId;\n\n      // TODO: Check if keys are outdated\n\n      let publicKeys = await ctx.call('keys.getRemotePublicKeys', { webId: keyDocumentUri, keyType: KEY_TYPES.RSA });\n      if ((!publicKeys || publicKeys.length === 0) && !keyId.includes('#')) {\n        const fallbackParentUri = keyId.replace(/\\/[^/]+$/, '');\n        if (fallbackParentUri !== keyId) {\n          publicKeys = await ctx.call('keys.getRemotePublicKeys', { webId: fallbackParentUri, keyType: KEY_TYPES.RSA });\n        }\n      }\n      if (!publicKeys) return { isValid: false };\n\n      // Bind verification to the exact requested key and its same-origin controller.\n      const verifiedKey = publicKeys\n        .filter(key => (key.id || key['@id']) === keyId && typeof key.publicKeyPem === 'string')\n        .map(key => {\n          const actorUri = key.controller || key.owner;\n          if (typeof actorUri !== 'string') return { isValid: false };\n          try {\n            if (new URL(actorUri).origin !== new URL(keyId).origin) return { isValid: false };\n            if (keyId.includes('#') && actorUri !== keyDocumentUri) return { isValid: false };\n            const parsedPublicKey = createPublicKey(key.publicKeyPem);\n            if (parsedPublicKey.asymmetricKeyType !== 'rsa') return { isValid: false };\n            return {\n              isValid: verifySignature(parsedSignature, key.publicKeyPem),\n              actorUri,\n              publicKeyPem: key.publicKeyPem\n            };\n          } catch (e) {\n            return { isValid: false };\n          }\n        })\n        .find(({ isValid }) => isValid);\n\n      return verifiedKey || { isValid: false };`,
     'HTTP signature exact key binding'
   );
   patched = replaceOnce(

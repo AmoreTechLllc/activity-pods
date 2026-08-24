@@ -41,7 +41,7 @@ function signedRequest(algorithm = 'hs2019', keyType = 'rsa') {
 
 function restorePristineHttpSignatures(source) {
   return source.replace(
-    /\nfunction normalizeHs2019RsaSignatureAlgorithm[\s\S]*?\/\/ activitypods-hs2019-rsa-(?:sha256|key-binding)-verification-v[123]\n\n/,
+    /\nfunction normalizeHs2019RsaSignatureAlgorithm[\s\S]*?\/\/ activitypods-hs2019-rsa-(?:sha256|key-binding)-verification-v[1234]\n\n/,
     ''
   ).replace("const { createSign, createHash, createPublicKey } = require('crypto');", "const { createSign, createHash } = require('crypto');")
     .replace("const { arrayOf } = require('../utils/utils');\n\n\nconst HttpSignatureService", "const { arrayOf } = require('../utils/utils');\n\nconst HttpSignatureService")
@@ -186,6 +186,39 @@ describe('SemApps hs2019 HTTP signature verification patch', () => {
     });
     expect(call).toHaveBeenCalledWith('keys.getRemotePublicKeys', {
       webId: 'https://sender.example/users/alice/main-key',
+      keyType: expect.any(String)
+    });
+  });
+
+  test('resolves slash-style key IDs by falling back to parent actor document when direct key URL returns empty', async () => {
+    const service = loadPatchedService(patchHttpSignatures(original).source);
+    const request = signedRequest();
+    request.params.headers.signature = request.params.headers.signature.replace(
+      'https://sender.example/users/alice#main-key',
+      'https://sender.example/users/alice/main-key'
+    );
+    const call = jest.fn().mockImplementation((action, params) => {
+      if (params.webId === 'https://sender.example/users/alice/main-key') return Promise.resolve([]);
+      if (params.webId === 'https://sender.example/users/alice') {
+        return Promise.resolve([{
+          id: 'https://sender.example/users/alice/main-key',
+          owner: 'https://sender.example/users/alice',
+          publicKeyPem: request.publicKeyPem
+        }]);
+      }
+      return Promise.resolve([]);
+    });
+
+    await expect(service.actions.verifyHttpSignature({ params: request.params, call })).resolves.toMatchObject({
+      isValid: true,
+      actorUri: 'https://sender.example/users/alice'
+    });
+    expect(call).toHaveBeenCalledWith('keys.getRemotePublicKeys', {
+      webId: 'https://sender.example/users/alice/main-key',
+      keyType: expect.any(String)
+    });
+    expect(call).toHaveBeenCalledWith('keys.getRemotePublicKeys', {
+      webId: 'https://sender.example/users/alice',
       keyType: expect.any(String)
     });
   });
