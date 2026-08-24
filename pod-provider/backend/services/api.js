@@ -48,6 +48,10 @@ module.exports = {
   },
   methods: {
     async authenticate(ctx, route, req, res) {
+      // Keep the HTTP-signature principal separate from Moleculer's shared
+      // webId metadata. Downstream action middleware may make system-authority
+      // child calls before the inbox actor check runs.
+      delete ctx.meta.httpSignatureActorUri;
       if (req.headers.signature || (typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Signature '))) {
         if (!req.headers.signature && typeof req.headers.authorization === 'string') {
           req.headers.signature = req.headers.authorization.startsWith('Signature ')
@@ -61,6 +65,7 @@ module.exports = {
         });
         if (isValid) {
           ctx.meta.webId = actorUri;
+          ctx.meta.httpSignatureActorUri = actorUri;
           return null;
         }
         ctx.meta.webId = 'anon';
@@ -81,6 +86,7 @@ module.exports = {
       return null;
     },
     async authorize(ctx, route, req, res) {
+      delete ctx.meta.httpSignatureActorUri;
       if (req.headers.signature || (typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Signature '))) {
         if (!req.headers.signature && typeof req.headers.authorization === 'string') {
           req.headers.signature = req.headers.authorization.startsWith('Signature ')
@@ -94,6 +100,7 @@ module.exports = {
         });
         if (isValid) {
           ctx.meta.webId = actorUri;
+          ctx.meta.httpSignatureActorUri = actorUri;
           return null;
         }
         ctx.meta.webId = 'anon';

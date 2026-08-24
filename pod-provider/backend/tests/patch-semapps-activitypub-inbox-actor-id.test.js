@@ -27,7 +27,9 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
     const result = patchInbox(installed);
     expect(result.changed).toBe(false);
     expect(result.source).toContain(MARKER);
-    expect(result.source).toContain('const authenticatedActorUri = ctx.meta.webId;');
+    expect(result.source).toContain(
+      'const authenticatedActorUri = ctx.meta.httpSignatureActorUri || ctx.meta.webId;'
+    );
     expect(result.source).toContain("if (activityActorId(activity.actor) !== authenticatedActorUri)");
     expect(result.source).toContain("if (!value || typeof value !== 'object' || Array.isArray(value)) return null;");
     expect(result.source).toContain("if (id && atId && id !== atId) return null;");
@@ -62,6 +64,29 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
     });
   });
 
+  test('prefers the request-scoped HTTP signature principal over mutated shared metadata', async () => {
+    jest.resetModules();
+    const inbox = require(inboxPath);
+    const afterActorCheck = new Error('after actor authorization');
+    const ctx = {
+      params: {
+        collectionUri: 'https://local.example/alice/inbox',
+        actor: 'https://remote.example/bob'
+      },
+      meta: {
+        webId: 'system',
+        httpSignatureActorUri: 'https://remote.example/bob'
+      },
+      call: jest.fn(async action => {
+        if (action === 'ldp.resource.exist') return true;
+        if (action === 'activitypub.collection.getOwner') throw afterActorCheck;
+        throw new Error(`Unexpected action ${action}`);
+      })
+    };
+
+    await expect(inbox.actions.post.call({ settings: { podProvider: true } }, ctx)).rejects.toBe(afterActorCheck);
+  });
+
   test('still rejects an activity actor that differs from the captured principal', async () => {
     jest.resetModules();
     const inbox = require(inboxPath);
@@ -76,6 +101,27 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
         ctx.meta.webId = 'https://remote.example/mallory';
         return true;
       })
+    };
+
+    await expect(inbox.actions.post.call({ settings: { podProvider: true } }, ctx)).rejects.toMatchObject({
+      type: 'INVALID_ACTOR'
+    });
+    expect(ctx.call).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not fall back to a mutated webId when a verified signature principal is present', async () => {
+    jest.resetModules();
+    const inbox = require(inboxPath);
+    const ctx = {
+      params: {
+        collectionUri: 'https://local.example/alice/inbox',
+        actor: 'https://remote.example/mallory'
+      },
+      meta: {
+        webId: 'https://remote.example/mallory',
+        httpSignatureActorUri: 'https://remote.example/bob'
+      },
+      call: jest.fn().mockResolvedValue(true)
     };
 
     await expect(inbox.actions.post.call({ settings: { podProvider: true } }, ctx)).rejects.toMatchObject({
