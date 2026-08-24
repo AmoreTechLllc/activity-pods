@@ -86,12 +86,6 @@ function patchHttpSignatures(source) {
     `      const keyDocumentUri = keyId.includes('#') ? keyId.split('#')[0] : keyId;\n\n      // TODO: Check if keys are outdated\n\n      let publicKeys = await ctx.call('keys.getRemotePublicKeys', { webId: keyDocumentUri, keyType: KEY_TYPES.RSA });\n      if ((!publicKeys || publicKeys.length === 0) && !keyId.includes('#')) {\n        const fallbackParentUri = keyId.replace(/\\/[^/]+$/, '');\n        if (fallbackParentUri !== keyId) {\n          publicKeys = await ctx.call('keys.getRemotePublicKeys', { webId: fallbackParentUri, keyType: KEY_TYPES.RSA });\n        }\n      }\n      if (!publicKeys) return { isValid: false };\n\n      // Bind verification to the exact requested key and its same-origin controller.\n      const verifiedKey = publicKeys\n        .filter(key => (key.id || key['@id']) === keyId && typeof key.publicKeyPem === 'string')\n        .map(key => {\n          const actorUri = key.controller || key.owner;\n          if (typeof actorUri !== 'string') return { isValid: false };\n          try {\n            if (new URL(actorUri).origin !== new URL(keyId).origin) return { isValid: false };\n            if (keyId.includes('#') && actorUri !== keyDocumentUri) return { isValid: false };\n            const parsedPublicKey = createPublicKey(key.publicKeyPem);\n            if (parsedPublicKey.asymmetricKeyType !== 'rsa') return { isValid: false };\n            return {\n              isValid: verifySignature(parsedSignature, key.publicKeyPem),\n              actorUri,\n              publicKeyPem: key.publicKeyPem\n            };\n          } catch (e) {\n            return { isValid: false };\n          }\n        })\n        .find(({ isValid }) => isValid);\n\n      return verifiedKey || { isValid: false };`,
     'HTTP signature exact key binding'
   );
-  patched = replaceOnce(
-    patched,
-    `            return {\n              isValid: createPublicKey(key.publicKeyPem).asymmetricKeyType === 'rsa' && verifySignature(parsedSignature, key.publicKeyPem),`,
-    `            const parsedPublicKey = createPublicKey(key.publicKeyPem);\n            if (parsedPublicKey.asymmetricKeyType !== 'rsa') return { isValid: false };\n            return {\n              isValid: verifySignature(parsedSignature, key.publicKeyPem),`,
-    'RSA public key type enforcement'
-  );
   requireHash(patched, PATCHED_HASHES.httpSignatures, 'patched HTTP signature source');
   return { source: patched, changed: true };
 }
