@@ -113,6 +113,7 @@ describe('public ActivityPub key document', () => {
           path: '/:username([^/.][^/]+)/keys/main',
           authentication: false,
           authorization: false,
+          onBeforeCall: expect.any(Function),
           aliases: { 'GET /': 'activitypub-public-keys.get' }
         }),
         toBottom: false
@@ -165,6 +166,32 @@ describe('public ActivityPub key document', () => {
         meta: expect.objectContaining({
           activityPubActorRequest: false,
           activityPubActorAccept: 'text/turtle',
+          headers: { prefer: 'return=representation', accept: 'text/turtle' },
+          originalHeaders: { accept: 'text/turtle' }
+        })
+      }
+    );
+  });
+
+  test('preserves RDF negotiation on the direct key URI', async () => {
+    const broker = { call: jest.fn() };
+    await service.started.call({ broker });
+    const keyRoute = broker.call.mock.calls[1][1].route;
+    const ctx = {
+      params: { username: 'alice' },
+      meta: { headers: { prefer: 'return=representation' } },
+      call: jest.fn().mockResolvedValue('key turtle')
+    };
+    keyRoute.onBeforeCall(ctx, keyRoute, { headers: { accept: 'text/turtle' } });
+
+    await expect(service.actions.get.handler(ctx)).resolves.toBe('key turtle');
+    expect(ctx.call).toHaveBeenCalledWith(
+      'ldp.api.get',
+      { username: 'alice', slugParts: ['keys', 'main'] },
+      {
+        meta: expect.objectContaining({
+          activityPubKeyRequest: false,
+          activityPubKeyAccept: 'text/turtle',
           headers: { prefer: 'return=representation', accept: 'text/turtle' },
           originalHeaders: { accept: 'text/turtle' }
         })

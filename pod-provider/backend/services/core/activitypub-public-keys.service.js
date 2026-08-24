@@ -121,6 +121,10 @@ module.exports = {
         path: '/:username([^/.][^/]+)/keys/main',
         authentication: false,
         authorization: false,
+        onBeforeCall(ctx, _route, req) {
+          ctx.meta.activityPubKeyRequest = acceptsActivityPubRepresentation(req.headers?.accept);
+          ctx.meta.activityPubKeyAccept = typeof req.headers?.accept === 'string' ? req.headers.accept : null;
+        },
         aliases: {
           'GET /': 'activitypub-public-keys.get'
         }
@@ -216,6 +220,18 @@ module.exports = {
         username: { type: 'string', min: 1 }
       },
       async handler(ctx) {
+        // As with the actor root, do not shadow the established LDP/RDF
+        // representation of this resource for Solid clients.
+        if (ctx.meta.activityPubKeyRequest === false) {
+          const accept = ctx.meta.activityPubKeyAccept || MIME_TYPES.JSON;
+          return ctx.call('ldp.api.get', { username: ctx.params.username, slugParts: ['keys', 'main'] }, {
+            meta: {
+              ...ctx.meta,
+              headers: { ...(ctx.meta.headers || {}), accept },
+              originalHeaders: { ...(ctx.meta.originalHeaders || {}), accept }
+            }
+          });
+        }
         const account = await ctx.call('auth.account.findByUsername', { username: ctx.params.username });
         if (!account || typeof account.webId !== 'string' || !account.username) throw new E.NotFoundError();
 
