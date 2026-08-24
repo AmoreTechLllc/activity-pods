@@ -49,9 +49,8 @@ module.exports = {
         throw new Error('Object is required');
       }
 
-      // Use structuredClone for efficient deep copying (Node 17+)
-      const processed =
-        typeof structuredClone === 'function' ? structuredClone(object) : JSON.parse(JSON.stringify(object));
+      // Use safe JSON serialization for deep copying
+      const processed = JSON.parse(JSON.stringify(object));
       const docDomain = this.extractDomainFromObject(processed, contextDomain);
 
       // Process each identifier property

@@ -12,14 +12,23 @@ const FORBIDDEN_ACTOR_FIELDS = new Set([
   'refreshToken',
   'secretKey'
 ]);
-const ACTIVITYSTREAMS_ACTOR_TYPES = new Set(['Application', 'Group', 'Organization', 'Person', 'Service']);
+const RDF_MEDIA_TYPES = new Set([
+  'text/turtle',
+  'application/n-triples',
+  'application/trig',
+  'application/n-quads',
+  'application/sparql-results+json'
+]);
 
 function acceptsActivityPubRepresentation(value) {
   if (typeof value !== 'string' || value.trim().length === 0) return false;
-  return value.split(',').some(rawRange => {
+  let bestApQuality = -1;
+  let bestRdfQuality = -1;
+
+  for (const rawRange of value.split(',')) {
     const [rawMediaType, ...rawParameters] = rawRange.split(';');
     const mediaType = rawMediaType.trim().toLowerCase();
-    if (!mediaType) return false;
+    if (!mediaType) continue;
 
     let quality = 1;
     for (const rawParameter of rawParameters) {
@@ -28,14 +37,25 @@ function acceptsActivityPubRepresentation(value) {
       const name = rawParameter.slice(0, separator).trim().toLowerCase();
       if (name !== 'q') continue;
       const parsedQuality = Number(rawParameter.slice(separator + 1).trim());
-      if (!Number.isFinite(parsedQuality) || parsedQuality < 0 || parsedQuality > 1) return false;
-      quality = parsedQuality;
+      if (Number.isFinite(parsedQuality) && parsedQuality >= 0 && parsedQuality <= 1) {
+        quality = parsedQuality;
+      }
     }
-    if (quality === 0) return false;
+    if (quality <= 0) continue;
 
-    if (mediaType === 'application/activity+json') return true;
-    return mediaType === 'application/ld+json' && rawRange.toLowerCase().includes('https://www.w3.org/ns/activitystreams');
-  });
+    if (RDF_MEDIA_TYPES.has(mediaType)) {
+      if (quality > bestRdfQuality) bestRdfQuality = quality;
+    } else if (
+      mediaType === 'application/activity+json' ||
+      mediaType === 'application/ld+json' ||
+      mediaType === 'application/json' ||
+      mediaType === '*/*'
+    ) {
+      if (quality > bestApQuality) bestApQuality = quality;
+    }
+  }
+
+  return bestApQuality > bestRdfQuality;
 }
 
 function resourceId(value) {
