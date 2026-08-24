@@ -14,6 +14,30 @@ const FORBIDDEN_ACTOR_FIELDS = new Set([
 ]);
 const ACTIVITYSTREAMS_ACTOR_TYPES = new Set(['Application', 'Group', 'Organization', 'Person', 'Service']);
 
+function acceptsActivityPubRepresentation(value) {
+  if (typeof value !== 'string' || value.trim().length === 0) return false;
+  return value.split(',').some(rawRange => {
+    const [rawMediaType, ...rawParameters] = rawRange.split(';');
+    const mediaType = rawMediaType.trim().toLowerCase();
+    if (!mediaType) return false;
+
+    let quality = 1;
+    for (const rawParameter of rawParameters) {
+      const separator = rawParameter.indexOf('=');
+      if (separator < 0) continue;
+      const name = rawParameter.slice(0, separator).trim().toLowerCase();
+      if (name !== 'q') continue;
+      const parsedQuality = Number(rawParameter.slice(separator + 1).trim());
+      if (!Number.isFinite(parsedQuality) || parsedQuality < 0 || parsedQuality > 1) return false;
+      quality = parsedQuality;
+    }
+    if (quality === 0) return false;
+
+    if (mediaType === 'application/activity+json') return true;
+    return mediaType === 'application/ld+json' && rawRange.toLowerCase().includes('https://www.w3.org/ns/activitystreams');
+  });
+}
+
 function resourceId(value) {
   if (typeof value === 'string') return value;
   if (value && typeof value === 'object' && !Array.isArray(value)) return value.id || value['@id'] || null;
@@ -81,6 +105,10 @@ module.exports = {
         path: '/:username([^/.][^/]+)',
         authentication: false,
         authorization: false,
+        onBeforeCall(ctx, _route, req) {
+          ctx.meta.activityPubActorRequest = acceptsActivityPubRepresentation(req.headers?.accept);
+          ctx.meta.activityPubActorAccept = typeof req.headers?.accept === 'string' ? req.headers.accept : null;
+        },
         aliases: {
           'GET /': 'activitypub-public-keys.getActor'
         }
@@ -107,6 +135,19 @@ module.exports = {
         username: { type: 'string', min: 1 }
       },
       async handler(ctx) {
+        // This front-inserted route exists only to provide the deliberately
+        // reduced ActivityPub actor document. Preserve the established LDP
+        // WebID route for Solid/OIDC and other RDF representations.
+        if (ctx.meta.activityPubActorRequest === false) {
+          const accept = ctx.meta.activityPubActorAccept || MIME_TYPES.JSON;
+          return ctx.call('ldp.api.get', { username: ctx.params.username, slugParts: [] }, {
+            meta: {
+              ...ctx.meta,
+              headers: { ...(ctx.meta.headers || {}), accept },
+              originalHeaders: { ...(ctx.meta.originalHeaders || {}), accept }
+            }
+          });
+        }
         const account = await ctx.call('auth.account.findByUsername', { username: ctx.params.username });
         if (!account || typeof account.webId !== 'string' || !account.username) throw new E.NotFoundError();
 
@@ -240,6 +281,8 @@ module.exports = {
     }
   }
 };
+
+module.exports.acceptsActivityPubRepresentation = acceptsActivityPubRepresentation;
 
 module.exports.embeddedPublicKey = embeddedPublicKey;
 module.exports.activityStreamsActorType = activityStreamsActorType;

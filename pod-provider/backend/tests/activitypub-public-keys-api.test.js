@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const service = require('../services/core/activitypub-public-keys.service');
+const { acceptsActivityPubRepresentation } = service;
 
 const ACTOR = 'https://activitypods.example/alice';
 const KEY_ID = `${ACTOR}/keys/main`;
@@ -99,6 +100,7 @@ describe('public ActivityPub key document', () => {
           path: '/:username([^/.][^/]+)',
           authentication: false,
           authorization: false,
+          onBeforeCall: expect.any(Function),
           aliases: { 'GET /': 'activitypub-public-keys.getActor' }
         }),
         toBottom: false
@@ -117,6 +119,57 @@ describe('public ActivityPub key document', () => {
       })
     );
     expect(broker.call).toHaveBeenCalledTimes(2);
+  });
+
+  test('selects the reduced actor only for explicit ActivityPub media types', () => {
+    expect(acceptsActivityPubRepresentation('application/activity+json')).toBe(true);
+    expect(acceptsActivityPubRepresentation('application/ld+json; profile="https://www.w3.org/ns/activitystreams"')).toBe(true);
+    expect(acceptsActivityPubRepresentation('text/turtle, application/activity+json;q=0')).toBe(false);
+    expect(acceptsActivityPubRepresentation('application/activity+json; q = 0.000')).toBe(false);
+    expect(acceptsActivityPubRepresentation('application/activity+jsonx')).toBe(false);
+    expect(acceptsActivityPubRepresentation('application/activity+json;q=bogus')).toBe(false);
+    expect(acceptsActivityPubRepresentation('application/ld+json')).toBe(false);
+    expect(acceptsActivityPubRepresentation('text/turtle')).toBe(false);
+    expect(acceptsActivityPubRepresentation('*/*')).toBe(false);
+    expect(acceptsActivityPubRepresentation(undefined)).toBe(false);
+  });
+
+  test('records HTTP content negotiation without trusting route parameters', async () => {
+    const broker = { call: jest.fn() };
+    await service.started.call({ broker });
+    const actorRoute = broker.call.mock.calls[0][1].route;
+    const ctx = { meta: {} };
+    actorRoute.onBeforeCall(ctx, actorRoute, { headers: { accept: 'text/turtle' } });
+    expect(ctx.meta).toEqual({
+      activityPubActorRequest: false,
+      activityPubActorAccept: 'text/turtle'
+    });
+  });
+
+  test('delegates non-ActivityPub requests to the established WebID LDP handler', async () => {
+    const ctx = {
+      params: { username: 'alice' },
+      meta: {
+        activityPubActorRequest: false,
+        activityPubActorAccept: 'text/turtle',
+        headers: { prefer: 'return=representation' }
+      },
+      call: jest.fn().mockResolvedValue('webid turtle')
+    };
+
+    await expect(service.actions.getActor.handler(ctx)).resolves.toBe('webid turtle');
+    expect(ctx.call).toHaveBeenCalledWith(
+      'ldp.api.get',
+      { username: 'alice', slugParts: [] },
+      {
+        meta: expect.objectContaining({
+          activityPubActorRequest: false,
+          activityPubActorAccept: 'text/turtle',
+          headers: { prefer: 'return=representation', accept: 'text/turtle' },
+          originalHeaders: { accept: 'text/turtle' }
+        })
+      }
+    );
   });
 
   test('serves the anonymous actor representation with only the validated embedded RSA key', async () => {
