@@ -14,7 +14,7 @@ const PRISTINE_HASHES = Object.freeze({
   keys: '43a29bc040ad63b9d9f6734fb6e369e63889b136fe350238b878cfa4e6fa925e'
 });
 const PATCHED_HASHES = Object.freeze({
-  httpSignatures: 'f71ca3018a40a9a5ad17a63cea4b28e91ff6cc7bb5b0922a2880c75e4619deb4',
+  httpSignatures: 'a266e375c25a8e0099e3aa84d4f8c268e0f358ecdb9cbdf0aa24ca2712556a25',
   keys: '82a9f5b97f028a1958e8c80c6e65043a8f01e588be78bccf382d02121183989e'
 });
 
