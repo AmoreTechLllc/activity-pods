@@ -33,7 +33,10 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
     expect(result.source).toContain('const activityActorUri = activityActorId(activity.actor);');
     expect(result.source).toContain('if (activityActorUri !== authenticatedActorUri)');
     expect(result.source).toContain('Rejected ActivityPub inbox actor/signature mismatch');
-    expect(result.source).toContain("if (!value || typeof value !== 'object' || Array.isArray(value)) return null;");
+    expect(result.source).toContain(
+      "if (Array.isArray(value)) return value.length === 1 ? activityActorId(value[0]) : null;"
+    );
+    expect(result.source).toContain("if (!value || typeof value !== 'object') return null;");
     expect(result.source).toContain("if (id && atId && id !== atId) return null;");
     expect(sha256(result.source)).toBe(PATCHED_HASH);
   });
@@ -87,6 +90,45 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
     };
 
     await expect(inbox.actions.post.call({ settings: { podProvider: true } }, ctx)).rejects.toBe(afterActorCheck);
+  });
+
+  test.each([
+    ['singleton string array', ['https://remote.example/bob']],
+    ['singleton object array', [{ id: 'https://remote.example/bob' }]],
+    ['singleton JSON-LD object array', [{ '@id': 'https://remote.example/bob' }]]
+  ])('accepts the exact authenticated actor in a %s', async (_label, actor) => {
+    jest.resetModules();
+    const inbox = require(inboxPath);
+    const afterActorCheck = new Error('after actor authorization');
+    const ctx = {
+      params: { collectionUri: 'https://local.example/alice/inbox', actor },
+      meta: { httpSignatureActorUri: 'https://remote.example/bob', webId: 'system' },
+      call: jest.fn(async action => {
+        if (action === 'ldp.resource.exist') return true;
+        if (action === 'activitypub.collection.getOwner') throw afterActorCheck;
+        throw new Error(`Unexpected action ${action}`);
+      })
+    };
+
+    await expect(inbox.actions.post.call({ settings: { podProvider: true } }, ctx)).rejects.toBe(afterActorCheck);
+  });
+
+  test.each([
+    ['empty actor array', []],
+    ['multi-actor array', ['https://remote.example/bob', 'https://remote.example/mallory']],
+    ['conflicting singleton object', [{ id: 'https://remote.example/bob', '@id': 'https://remote.example/mallory' }]]
+  ])('rejects a %s', async (_label, actor) => {
+    jest.resetModules();
+    const inbox = require(inboxPath);
+    const ctx = {
+      params: { collectionUri: 'https://local.example/alice/inbox', actor },
+      meta: { httpSignatureActorUri: 'https://remote.example/bob', webId: 'system' },
+      call: jest.fn().mockResolvedValue(true)
+    };
+    await expect(
+      inbox.actions.post.call({ settings: { podProvider: true }, logger: { warn: jest.fn() } }, ctx)
+    ).rejects.toMatchObject({ type: 'INVALID_ACTOR' });
+    expect(ctx.call).toHaveBeenCalledTimes(1);
   });
 
   test('still rejects an activity actor that differs from the captured principal', async () => {

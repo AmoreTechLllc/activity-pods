@@ -5,7 +5,8 @@ const path = require('path');
 const { createHash } = require('crypto');
 
 const EXPECTED_VERSION = '1.1.4';
-const MARKER = 'activitypods-activitypub-inbox-actor-id-v4';
+const MARKER = 'activitypods-activitypub-inbox-actor-id-v5';
+const SINGLETON_UNSUPPORTED_MARKER = 'activitypods-activitypub-inbox-actor-id-v4';
 const PREVIOUS_MARKER = 'activitypods-activitypub-inbox-actor-id-v3';
 const OLDER_MARKER = 'activitypods-activitypub-inbox-actor-id-v2';
 const LEGACY_MARKER = 'activitypods-activitypub-inbox-actor-id-v1';
@@ -13,7 +14,8 @@ const PRISTINE_HASH = '99386b74357a63b70b025b210925dc031c614315b147b4f91bc76a911
 const LEGACY_PATCHED_HASH = 'a141c4fc22e34d0cddb323c36a491594649f8072724618d9ffc7e32fcad88057';
 const OLDER_PATCHED_HASH = '8c349b9d18ea11f996e22860025dd9a78f01b75bf66cb46745062cf6203f10b3';
 const PREVIOUS_PATCHED_HASH = 'fef56adcc165c4d990e255afdab93538a2d96363bc12d6aba95b673bf6136290';
-const PATCHED_HASH = '8d40d956a047174c4a15b2103a90a18afaad2a03cbae066717a29d60f460e310';
+const SINGLETON_UNSUPPORTED_PATCHED_HASH = '8d40d956a047174c4a15b2103a90a18afaad2a03cbae066717a29d60f460e310';
+const PATCHED_HASH = '62742f613905853192ed8bf16268392b159dfa7d4b60aebc27d28921d89d9a17';
 
 function sha256(source) {
   return createHash('sha256').update(source).digest('hex');
@@ -34,10 +36,33 @@ function replaceOnce(source, search, replacement, label) {
   return source.replace(search, replacement);
 }
 
+function addSingletonActorArraySupport(source) {
+  return replaceOnce(
+    source,
+    `  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;`,
+    `  if (Array.isArray(value)) return value.length === 1 ? activityActorId(value[0]) : null;
+  if (!value || typeof value !== 'object') return null;`,
+    'singleton actor array normalization'
+  );
+}
+
 function patchInbox(source) {
   if (source.includes(MARKER)) {
     requireHash(source, PATCHED_HASH, 'patched ActivityPub inbox source');
     return { source, changed: false };
+  }
+
+  if (source.includes(SINGLETON_UNSUPPORTED_MARKER)) {
+    requireHash(source, SINGLETON_UNSUPPORTED_PATCHED_HASH, 'singleton-unsupported patched ActivityPub inbox source');
+    let upgraded = replaceOnce(
+      source,
+      SINGLETON_UNSUPPORTED_MARKER,
+      MARKER,
+      'singleton-unsupported inbox actor identifier marker'
+    );
+    upgraded = addSingletonActorArraySupport(upgraded);
+    requireHash(upgraded, PATCHED_HASH, 'patched ActivityPub inbox source');
+    return { source: upgraded, changed: true };
   }
 
   if (source.includes(PREVIOUS_MARKER)) {
@@ -55,6 +80,7 @@ function patchInbox(source) {
       }`,
       'actor mismatch diagnostics'
     );
+    upgraded = addSingletonActorArraySupport(upgraded);
     requireHash(upgraded, PATCHED_HASH, 'patched ActivityPub inbox source');
     return { source: upgraded, changed: true };
   }
@@ -80,6 +106,7 @@ function patchInbox(source) {
       }`,
       'actor mismatch diagnostics'
     );
+    upgraded = addSingletonActorArraySupport(upgraded);
     requireHash(upgraded, PATCHED_HASH, 'patched ActivityPub inbox source');
     return { source: upgraded, changed: true };
   }
@@ -102,6 +129,7 @@ function patchInbox(source) {
         this.logger.warn('Rejected ActivityPub inbox actor/signature mismatch', { authenticatedActorUri, activityActorUri });`,
       'immutable authenticated actor comparison'
     );
+    upgraded = addSingletonActorArraySupport(upgraded);
     requireHash(upgraded, PATCHED_HASH, 'patched ActivityPub inbox source');
     return { source: upgraded, changed: true };
   }
@@ -114,7 +142,8 @@ function patchInbox(source) {
 
 function activityActorId(value) {
   if (typeof value === 'string' && value.length > 0) return value;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (Array.isArray(value)) return value.length === 1 ? activityActorId(value[0]) : null;
+  if (!value || typeof value !== 'object') return null;
   const id = typeof value.id === 'string' && value.id.length > 0 ? value.id : null;
   const atId = typeof value['@id'] === 'string' && value['@id'].length > 0 ? value['@id'] : null;
   if (id && atId && id !== atId) return null;
@@ -154,10 +183,12 @@ if (require.main === module) applyPatch();
 module.exports = {
   EXPECTED_VERSION,
   MARKER,
+  SINGLETON_UNSUPPORTED_MARKER,
   PREVIOUS_MARKER,
   OLDER_MARKER,
   LEGACY_MARKER,
   PRISTINE_HASH,
+  SINGLETON_UNSUPPORTED_PATCHED_HASH,
   LEGACY_PATCHED_HASH,
   OLDER_PATCHED_HASH,
   PREVIOUS_PATCHED_HASH,
