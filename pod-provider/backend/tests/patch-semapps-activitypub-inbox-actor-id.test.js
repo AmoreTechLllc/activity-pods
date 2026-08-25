@@ -6,6 +6,7 @@ const {
   MARKER,
   PATCHED_API_HASH,
   PATCHED_HASH,
+  PRISTINE_API_HASH,
   sha256,
   patchApi,
   patchInbox
@@ -18,6 +19,10 @@ const inboxPath = path.join(
 const apiPath = path.join(
   path.dirname(require.resolve('@semapps/activitypub/package.json')),
   'services/activitypub/subservices/api.js'
+);
+const pristineApiPath = path.join(
+  __dirname,
+  '../../../tests/node_modules/@semapps/activitypub/services/activitypub/subservices/api.js'
 );
 
 describe('SemApps ActivityPub inbox actor identifier compatibility patch', () => {
@@ -84,6 +89,22 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
     );
   });
 
+  test('patches a pristine pinned API source exactly once', () => {
+    const pristine = fs.readFileSync(pristineApiPath, 'utf8');
+    expect(sha256(pristine)).toBe(PRISTINE_API_HASH);
+
+    const result = patchApi(pristine);
+    const occurrenceCount = needle => result.source.split(needle).length - 1;
+    expect(result.changed).toBe(true);
+    expect(sha256(result.source)).toBe(PATCHED_API_HASH);
+    expect(occurrenceCount(API_MARKER)).toBe(1);
+    expect(occurrenceCount('function normalizeActivityPubContentType(')).toBe(1);
+    expect(occurrenceCount('function normalizeActivityPubAccept(')).toBe(1);
+    expect(occurrenceCount('        normalizeActivityPubContentType,')).toBe(1);
+    expect(occurrenceCount('        normalizeActivityPubAccept,')).toBe(1);
+    expect(occurrenceCount('        negotiateAccept,')).toBe(1);
+  });
+
   test('parses parameterized ActivityPub JSON without changing exact signed headers', async () => {
     jest.resetModules();
     const api = require(apiPath);
@@ -101,21 +122,54 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
     req.parsedUrl = '/alice/inbox';
     req.query = {};
     req.headers = {
-      'content-type': 'application/ld+json; profile="https://www.w3.org/ns/activitystreams"'
+      'content-type': 'application/ld+json; profile="https://www.w3.org/ns/activitystreams"',
+      accept: 'application/ld+json; profile="https://www.w3.org/ns/activitystreams"'
     };
     req.$ctx = { meta: {} };
     req.$params = {};
     const run = fn => new Promise((resolve, reject) => {
       Promise.resolve(fn(req, {}, error => error ? reject(error) : resolve())).catch(reject);
     });
-    for (const fn of middleware.slice(0, 7)) await run(fn);
+    for (const fn of middleware.slice(0, 8)) await run(fn);
 
     expect(req.$ctx.meta.originalHeaders['content-type']).toBe(
       'application/ld+json; profile="https://www.w3.org/ns/activitystreams"'
     );
     expect(req.$ctx.meta.headers['content-type']).toBe('application/ld+json');
+    expect(req.$ctx.meta.originalHeaders.accept).toBe(
+      'application/ld+json; profile="https://www.w3.org/ns/activitystreams"'
+    );
+    expect(req.$ctx.meta.headers.accept).toBe('application/ld+json');
     expect(req.$ctx.meta.rawBody).toBe(body);
     expect(req.$params.actor).toBe('https://remote.example/bob');
+  });
+
+  test('does not normalize unrelated JSON-LD profiles or disabled ActivityPub preferences', async () => {
+    jest.resetModules();
+    const api = require(apiPath);
+    const route = api.methods.getBoxesRoute.call({ settings: { podProvider: true } }, '/:username');
+    const middleware = route.aliases['POST /inbox'].filter(item => typeof item === 'function');
+    for (const accept of [
+      'application/ld+json; profile="https://example.com/not-activitystreams"',
+      'application/activity+json;q=0'
+    ]) {
+      const req = Readable.from([Buffer.from('{}')]);
+      req.method = 'POST';
+      req.originalUrl = '/alice/inbox';
+      req.parsedUrl = '/alice/inbox';
+      req.query = {};
+      req.headers = { 'content-type': 'application/activity+json', accept };
+      req.$ctx = { meta: {} };
+      req.$params = {};
+      const run = fn => new Promise((resolve, reject) => {
+        Promise.resolve(fn(req, {}, error => error ? reject(error) : resolve())).catch(reject);
+      });
+      await expect((async () => {
+        for (const fn of middleware.slice(0, 8)) await run(fn);
+      })()).rejects.toMatchObject({ code: 400, type: 'ACCEPT_NOT_SUPPORTED' });
+      expect(req.$ctx.meta.originalHeaders.accept).toBe(accept);
+      expect(req.$ctx.meta.headers.accept).toBe(accept);
+    }
   });
 
   test('binds actor authorization to the authenticated principal before awaited broker calls', async () => {
