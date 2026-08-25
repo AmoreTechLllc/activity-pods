@@ -1,15 +1,22 @@
 const fs = require('fs');
 const path = require('path');
 const {
+  API_MARKER,
   MARKER,
+  PATCHED_API_HASH,
   PATCHED_HASH,
   sha256,
+  patchApi,
   patchInbox
 } = require('../scripts/patch-semapps-activitypub-inbox-actor-id');
 
 const inboxPath = path.join(
   path.dirname(require.resolve('@semapps/activitypub/package.json')),
   'services/activitypub/subservices/inbox.js'
+);
+const apiPath = path.join(
+  path.dirname(require.resolve('@semapps/activitypub/package.json')),
+  'services/activitypub/subservices/api.js'
 );
 
 describe('SemApps ActivityPub inbox actor identifier compatibility patch', () => {
@@ -31,7 +38,9 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
       'const authenticatedActorUri = ctx.meta.httpSignatureActorUri || ctx.meta.webId;'
     );
     expect(result.source).toContain('const parsedActivityActorUri = activityActorId(activity.actor);');
-    expect(result.source).toContain('const rawActivityActorUri = rawActivityActorId(ctx.meta.rawBody);');
+    expect(result.source).toContain('const directRawActivityActorUri = rawActivityActorId(ctx.meta.rawBody);');
+    expect(result.source).toContain('const capturedRawActivityActorUri = activityActorId(ctx.meta.signedRawActivityActorUri);');
+    expect(result.source).toContain('const rawActivityActorUri = directRawActivityActorUri || capturedRawActivityActorUri;');
     expect(result.source).toContain('parsedActivityActorUri !== rawActivityActorUri');
     expect(result.source).toContain('const activityActorUri = parsedActivityActorUri || rawActivityActorUri;');
     expect(result.source).toContain('if (activityActorUri !== authenticatedActorUri)');
@@ -42,6 +51,36 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
     expect(result.source).toContain("if (!value || typeof value !== 'object') return null;");
     expect(result.source).toContain("if (id && atId && id !== atId) return null;");
     expect(sha256(result.source)).toBe(PATCHED_HASH);
+  });
+
+  test('captures the signed raw actor at the HTTP action boundary and propagates exact child metadata', async () => {
+    const installed = fs.readFileSync(apiPath, 'utf8');
+    const result = patchApi(installed);
+    expect(result.changed).toBe(false);
+    expect(result.source).toContain(API_MARKER);
+    expect(sha256(result.source)).toBe(PATCHED_API_HASH);
+
+    jest.resetModules();
+    const api = require(apiPath);
+    const ctx = {
+      params: { actorSlug: 'alice', type: 'Accept' },
+      meta: {
+        requestUrl: '/alice/inbox',
+        rawBody: JSON.stringify({ type: 'Accept', actor: 'https://remote.example/bob' }),
+        httpSignatureActorUri: 'https://remote.example/bob'
+      },
+      call: jest.fn().mockResolvedValue(undefined)
+    };
+    await api.actions.inbox.call({ settings: { baseUri: 'https://local.example/' } }, ctx);
+    expect(ctx.call).toHaveBeenCalledWith(
+      'activitypub.inbox.post',
+      { collectionUri: 'https://local.example/alice/inbox', type: 'Accept' },
+      { meta: expect.objectContaining({
+        rawBody: ctx.meta.rawBody,
+        signedRawActivityActorUri: 'https://remote.example/bob',
+        httpSignatureActorUri: 'https://remote.example/bob'
+      }) }
+    );
   });
 
   test('binds actor authorization to the authenticated principal before awaited broker calls', async () => {
@@ -135,6 +174,50 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
     };
 
     await expect(inbox.actions.post.call({ settings: { podProvider: true } }, ctx)).rejects.toBe(afterActorCheck);
+  });
+
+  test('restores the request-bound raw actor when child-action metadata drops the raw body', async () => {
+    jest.resetModules();
+    const inbox = require(inboxPath);
+    const afterActorCheck = new Error('after actor authorization');
+    const ctx = {
+      params: { collectionUri: 'https://local.example/alice/inbox', type: 'Accept' },
+      meta: {
+        httpSignatureActorUri: 'https://remote.example/bob',
+        webId: 'system',
+        signedRawActivityActorUri: 'https://remote.example/bob'
+      },
+      call: jest.fn(async action => {
+        if (action === 'ldp.resource.exist') return true;
+        if (action === 'activitypub.collection.getOwner') throw afterActorCheck;
+        throw new Error(`Unexpected action ${action}`);
+      })
+    };
+
+    await expect(inbox.actions.post.call({ settings: { podProvider: true } }, ctx)).rejects.toBe(afterActorCheck);
+  });
+
+  test('rejects disagreement between direct raw bytes and the request-bound raw actor snapshot', async () => {
+    jest.resetModules();
+    const inbox = require(inboxPath);
+    const logger = { warn: jest.fn() };
+    const ctx = {
+      params: { collectionUri: 'https://local.example/alice/inbox', type: 'Accept' },
+      meta: {
+        httpSignatureActorUri: 'https://remote.example/bob',
+        signedRawActivityActorUri: 'https://remote.example/bob',
+        rawBody: JSON.stringify({ type: 'Accept', actor: 'https://remote.example/mallory' })
+      },
+      call: jest.fn().mockResolvedValue(true)
+    };
+    await expect(inbox.actions.post.call({ settings: { podProvider: true }, logger }, ctx)).rejects.toMatchObject({
+      type: 'INVALID_ACTOR'
+    });
+    expect(logger.warn).toHaveBeenCalledWith('Rejected ActivityPub inbox raw actor metadata mismatch', {
+      authenticatedActorUri: 'https://remote.example/bob',
+      directRawActivityActorUri: 'https://remote.example/mallory',
+      capturedRawActivityActorUri: 'https://remote.example/bob'
+    });
   });
 
   test('rejects when the action actor conflicts with the exact signed raw-body actor', async () => {

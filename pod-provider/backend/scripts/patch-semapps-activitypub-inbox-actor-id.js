@@ -5,7 +5,8 @@ const path = require('path');
 const { createHash } = require('crypto');
 
 const EXPECTED_VERSION = '1.1.4';
-const MARKER = 'activitypods-activitypub-inbox-actor-id-v6';
+const MARKER = 'activitypods-activitypub-inbox-actor-id-v7';
+const CHILD_META_UNSUPPORTED_MARKER = 'activitypods-activitypub-inbox-actor-id-v6';
 const RAW_ACTOR_UNSUPPORTED_MARKER = 'activitypods-activitypub-inbox-actor-id-v5';
 const SINGLETON_UNSUPPORTED_MARKER = 'activitypods-activitypub-inbox-actor-id-v4';
 const PREVIOUS_MARKER = 'activitypods-activitypub-inbox-actor-id-v3';
@@ -17,7 +18,11 @@ const OLDER_PATCHED_HASH = '8c349b9d18ea11f996e22860025dd9a78f01b75bf66cb4674506
 const PREVIOUS_PATCHED_HASH = 'fef56adcc165c4d990e255afdab93538a2d96363bc12d6aba95b673bf6136290';
 const SINGLETON_UNSUPPORTED_PATCHED_HASH = '8d40d956a047174c4a15b2103a90a18afaad2a03cbae066717a29d60f460e310';
 const RAW_ACTOR_UNSUPPORTED_PATCHED_HASH = '62742f613905853192ed8bf16268392b159dfa7d4b60aebc27d28921d89d9a17';
-const PATCHED_HASH = 'bcb616f782453ebea7ee5955185495b8b863bbdfd7a3316a9ec78d47b5aa66b6';
+const CHILD_META_UNSUPPORTED_PATCHED_HASH = 'bcb616f782453ebea7ee5955185495b8b863bbdfd7a3316a9ec78d47b5aa66b6';
+const PATCHED_HASH = 'a8bdca4d3534b4f842f828552eef4d2761f60e2684f0a098f77ebb3037a3d4dc';
+const API_MARKER = 'activitypods-activitypub-inbox-raw-actor-meta-v1';
+const PRISTINE_API_HASH = 'cd259b9ace2bf4ad822197d5cfcbc063f287076bc7fcf0ecdaaef6c4853952d6';
+const PATCHED_API_HASH = '190950cf538b69a684c77be7fd5634d93829e460a708ec809098ed659e978ff1';
 
 function sha256(source) {
   return createHash('sha256').update(source).digest('hex');
@@ -49,11 +54,16 @@ function addSingletonActorArraySupport(source) {
 }
 
 function addRawActorBinding(source) {
-  let upgraded = replaceOnce(source, RAW_ACTOR_UNSUPPORTED_MARKER, MARKER, 'raw-actor-unsupported marker');
+  let upgraded = replaceOnce(
+    source,
+    RAW_ACTOR_UNSUPPORTED_MARKER,
+    CHILD_META_UNSUPPORTED_MARKER,
+    'raw-actor-unsupported marker'
+  );
   upgraded = replaceOnce(
     upgraded,
     `  return id || atId;
-} // ${MARKER}`,
+} // ${CHILD_META_UNSUPPORTED_MARKER}`,
     `  return id || atId;
 }
 
@@ -66,7 +76,7 @@ function rawActivityActorId(rawBody) {
   } catch {
     return null;
   }
-} // ${MARKER}`,
+} // ${CHILD_META_UNSUPPORTED_MARKER}`,
     'signed raw activity actor helper'
   );
   upgraded = replaceOnce(
@@ -94,6 +104,27 @@ function rawActivityActorId(rawBody) {
       if (!parsedActivityActorUri) activity.actor = rawActivityActorUri;`,
     'signed raw/action actor binding'
   );
+  return addChildMetaRawActorBinding(upgraded);
+}
+
+function addChildMetaRawActorBinding(source) {
+  let upgraded = replaceOnce(source, CHILD_META_UNSUPPORTED_MARKER, MARKER, 'child-meta-unsupported marker');
+  upgraded = replaceOnce(
+    upgraded,
+    '      const rawActivityActorUri = rawActivityActorId(ctx.meta.rawBody);',
+    `      const directRawActivityActorUri = rawActivityActorId(ctx.meta.rawBody);
+      const capturedRawActivityActorUri = activityActorId(ctx.meta.signedRawActivityActorUri);
+      if (directRawActivityActorUri && capturedRawActivityActorUri && directRawActivityActorUri !== capturedRawActivityActorUri) {
+        this.logger.warn('Rejected ActivityPub inbox raw actor metadata mismatch', {
+          authenticatedActorUri,
+          directRawActivityActorUri,
+          capturedRawActivityActorUri
+        });
+        throw new E.UnAuthorizedError('INVALID_ACTOR', 'Signed activity actor metadata changed during request processing');
+      }
+      const rawActivityActorUri = directRawActivityActorUri || capturedRawActivityActorUri;`,
+    'signed raw actor child metadata binding'
+  );
   return upgraded;
 }
 
@@ -101,6 +132,13 @@ function patchInbox(source) {
   if (source.includes(MARKER)) {
     requireHash(source, PATCHED_HASH, 'patched ActivityPub inbox source');
     return { source, changed: false };
+  }
+
+  if (source.includes(CHILD_META_UNSUPPORTED_MARKER)) {
+    requireHash(source, CHILD_META_UNSUPPORTED_PATCHED_HASH, 'child-meta-unsupported patched ActivityPub inbox source');
+    const upgraded = addChildMetaRawActorBinding(source);
+    requireHash(upgraded, PATCHED_HASH, 'patched ActivityPub inbox source');
+    return { source: upgraded, changed: true };
   }
 
   if (source.includes(RAW_ACTOR_UNSUPPORTED_MARKER)) {
@@ -237,7 +275,17 @@ function rawActivityActorId(rawBody) {
         throw new E.UnAuthorizedError('INVALID_ACTOR', 'Activity actor is not the same as the posting actor');
       }`,
     `      const parsedActivityActorUri = activityActorId(activity.actor);
-      const rawActivityActorUri = rawActivityActorId(ctx.meta.rawBody);
+      const directRawActivityActorUri = rawActivityActorId(ctx.meta.rawBody);
+      const capturedRawActivityActorUri = activityActorId(ctx.meta.signedRawActivityActorUri);
+      if (directRawActivityActorUri && capturedRawActivityActorUri && directRawActivityActorUri !== capturedRawActivityActorUri) {
+        this.logger.warn('Rejected ActivityPub inbox raw actor metadata mismatch', {
+          authenticatedActorUri,
+          directRawActivityActorUri,
+          capturedRawActivityActorUri
+        });
+        throw new E.UnAuthorizedError('INVALID_ACTOR', 'Signed activity actor metadata changed during request processing');
+      }
+      const rawActivityActorUri = directRawActivityActorUri || capturedRawActivityActorUri;
       if (parsedActivityActorUri && rawActivityActorUri && parsedActivityActorUri !== rawActivityActorUri) {
         this.logger.warn('Rejected ActivityPub inbox raw/action actor mismatch', {
           authenticatedActorUri,
@@ -258,12 +306,62 @@ function rawActivityActorId(rawBody) {
   return { source: patched, changed: true };
 }
 
+function patchApi(source) {
+  if (source.includes(API_MARKER)) {
+    requireHash(source, PATCHED_API_HASH, 'patched ActivityPub API source');
+    return { source, changed: false };
+  }
+  requireHash(source, PRISTINE_API_HASH, 'pristine ActivityPub API source');
+  let patched = replaceOnce(
+    source,
+    `const { FULL_ACTOR_TYPES } = require('../../../constants');`,
+    `const { FULL_ACTOR_TYPES } = require('../../../constants');
+
+function signedRawActivityActorId(rawBody) {
+  if (typeof rawBody !== 'string' && !Buffer.isBuffer(rawBody)) return null;
+  try {
+    const document = JSON.parse(Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : rawBody);
+    const actor = document && typeof document === 'object' && !Array.isArray(document) ? document.actor : null;
+    if (typeof actor === 'string' && actor.length > 0) return actor;
+    if (Array.isArray(actor)) return actor.length === 1 ? signedRawActivityActorId(JSON.stringify({ actor: actor[0] })) : null;
+    if (!actor || typeof actor !== 'object') return null;
+    const id = typeof actor.id === 'string' && actor.id.length > 0 ? actor.id : null;
+    const atId = typeof actor['@id'] === 'string' && actor['@id'].length > 0 ? actor['@id'] : null;
+    return id && atId && id !== atId ? null : id || atId;
+  } catch {
+    return null;
+  }
+} // ${API_MARKER}`,
+    'API signed raw actor helper'
+  );
+  patched = replaceOnce(
+    patched,
+    `      await ctx.call('activitypub.inbox.post', {
+        collectionUri: urlJoin(origin, requestUrl),
+        ...activity
+      });`,
+    `      const signedRawActivityActorUri = signedRawActivityActorId(ctx.meta.rawBody);
+      await ctx.call('activitypub.inbox.post', {
+        collectionUri: urlJoin(origin, requestUrl),
+        ...activity
+      }, {
+        meta: { ...ctx.meta, signedRawActivityActorUri }
+      });`,
+    'API inbox raw actor metadata propagation'
+  );
+  requireHash(patched, PATCHED_API_HASH, 'patched ActivityPub API source');
+  return { source: patched, changed: true };
+}
+
 function applyPatch(root = path.dirname(require.resolve('@semapps/activitypub/package.json'))) {
   const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
   if (version !== EXPECTED_VERSION) throw new Error(`Expected @semapps/activitypub@${EXPECTED_VERSION}, found ${version}`);
-  const file = path.join(root, 'services/activitypub/subservices/inbox.js');
-  const result = patchInbox(fs.readFileSync(file, 'utf8'));
-  if (result.changed) fs.writeFileSync(file, result.source);
+  const inboxFile = path.join(root, 'services/activitypub/subservices/inbox.js');
+  const inboxResult = patchInbox(fs.readFileSync(inboxFile, 'utf8'));
+  if (inboxResult.changed) fs.writeFileSync(inboxFile, inboxResult.source);
+  const apiFile = path.join(root, 'services/activitypub/subservices/api.js');
+  const apiResult = patchApi(fs.readFileSync(apiFile, 'utf8'));
+  if (apiResult.changed) fs.writeFileSync(apiFile, apiResult.source);
   process.stdout.write('[ActivityPods] SemApps ActivityPub inbox actor identifier compatibility applied\n');
 }
 
@@ -271,12 +369,17 @@ if (require.main === module) applyPatch();
 module.exports = {
   EXPECTED_VERSION,
   MARKER,
+  CHILD_META_UNSUPPORTED_MARKER,
+  API_MARKER,
   RAW_ACTOR_UNSUPPORTED_MARKER,
   SINGLETON_UNSUPPORTED_MARKER,
   PREVIOUS_MARKER,
   OLDER_MARKER,
   LEGACY_MARKER,
   PRISTINE_HASH,
+  PRISTINE_API_HASH,
+  PATCHED_API_HASH,
+  CHILD_META_UNSUPPORTED_PATCHED_HASH,
   RAW_ACTOR_UNSUPPORTED_PATCHED_HASH,
   SINGLETON_UNSUPPORTED_PATCHED_HASH,
   LEGACY_PATCHED_HASH,
@@ -285,5 +388,6 @@ module.exports = {
   PATCHED_HASH,
   sha256,
   patchInbox,
+  patchApi,
   applyPatch
 };
