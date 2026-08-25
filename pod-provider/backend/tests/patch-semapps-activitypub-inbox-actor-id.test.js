@@ -30,7 +30,10 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
     expect(result.source).toContain(
       'const authenticatedActorUri = ctx.meta.httpSignatureActorUri || ctx.meta.webId;'
     );
-    expect(result.source).toContain('const activityActorUri = activityActorId(activity.actor);');
+    expect(result.source).toContain('const parsedActivityActorUri = activityActorId(activity.actor);');
+    expect(result.source).toContain('const rawActivityActorUri = rawActivityActorId(ctx.meta.rawBody);');
+    expect(result.source).toContain('parsedActivityActorUri !== rawActivityActorUri');
+    expect(result.source).toContain('const activityActorUri = parsedActivityActorUri || rawActivityActorUri;');
     expect(result.source).toContain('if (activityActorUri !== authenticatedActorUri)');
     expect(result.source).toContain('Rejected ActivityPub inbox actor/signature mismatch');
     expect(result.source).toContain(
@@ -111,6 +114,54 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
     };
 
     await expect(inbox.actions.post.call({ settings: { podProvider: true } }, ctx)).rejects.toBe(afterActorCheck);
+  });
+
+  test('restores an exact signed raw-body actor when action middleware loses its representation', async () => {
+    jest.resetModules();
+    const inbox = require(inboxPath);
+    const afterActorCheck = new Error('after actor authorization');
+    const ctx = {
+      params: { collectionUri: 'https://local.example/alice/inbox', type: 'Accept' },
+      meta: {
+        httpSignatureActorUri: 'https://remote.example/bob',
+        webId: 'system',
+        rawBody: JSON.stringify({ type: 'Accept', actor: 'https://remote.example/bob' })
+      },
+      call: jest.fn(async action => {
+        if (action === 'ldp.resource.exist') return true;
+        if (action === 'activitypub.collection.getOwner') throw afterActorCheck;
+        throw new Error(`Unexpected action ${action}`);
+      })
+    };
+
+    await expect(inbox.actions.post.call({ settings: { podProvider: true } }, ctx)).rejects.toBe(afterActorCheck);
+  });
+
+  test('rejects when the action actor conflicts with the exact signed raw-body actor', async () => {
+    jest.resetModules();
+    const inbox = require(inboxPath);
+    const logger = { warn: jest.fn() };
+    const ctx = {
+      params: {
+        collectionUri: 'https://local.example/alice/inbox',
+        actor: 'https://remote.example/bob'
+      },
+      meta: {
+        httpSignatureActorUri: 'https://remote.example/bob',
+        rawBody: JSON.stringify({ type: 'Accept', actor: 'https://remote.example/mallory' })
+      },
+      call: jest.fn().mockResolvedValue(true)
+    };
+
+    await expect(inbox.actions.post.call({ settings: { podProvider: true }, logger }, ctx)).rejects.toMatchObject({
+      type: 'INVALID_ACTOR'
+    });
+    expect(ctx.call).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith('Rejected ActivityPub inbox raw/action actor mismatch', {
+      authenticatedActorUri: 'https://remote.example/bob',
+      parsedActivityActorUri: 'https://remote.example/bob',
+      rawActivityActorUri: 'https://remote.example/mallory'
+    });
   });
 
   test.each([

@@ -2,6 +2,7 @@
 
 const {
   assertPublicActorReady,
+  fetchPublicActorWithCurl,
   boundedNonNegativeInteger,
   createProofSummary,
   extractExternalDeliveryTarget
@@ -73,6 +74,42 @@ describe('ActivityPub real federation proof payload', () => {
     await expect(assertPublicActorReady(ACTOR_URI, { fetchImpl, attempts: 1 })).rejects.toThrow(
       /identifier did not match/u
     );
+  });
+
+  test('curl readiness uses the exact HTTPS URL without redirects and validates the actor', async () => {
+    const execFileImpl = jest.fn(async (_command, args) => {
+      const writeOut = args[args.indexOf('--write-out') + 1];
+      const marker = writeOut.match(/\n([^\t]+)\t/u)[1];
+      return {
+        stdout: Buffer.from(`${JSON.stringify({ id: ACTOR_URI, type: 'Person' })}\n${marker}\t200\tapplication/activity+json\t${ACTOR_URI}`)
+      };
+    });
+
+    await expect(assertPublicActorReady(ACTOR_URI, {
+      transport: 'curl', execFileImpl, attempts: 1
+    })).resolves.toBeUndefined();
+    expect(execFileImpl).toHaveBeenCalledWith('curl', expect.arrayContaining([
+      '--proto', '=https', '--max-redirs', '0', ACTOR_URI
+    ]), expect.objectContaining({ encoding: 'buffer' }));
+  });
+
+  test('curl readiness rejects effective URL drift even when the document claims the expected actor', async () => {
+    const execFileImpl = async (_command, args) => {
+      const writeOut = args[args.indexOf('--write-out') + 1];
+      const marker = writeOut.match(/\n([^\t]+)\t/u)[1];
+      return {
+        stdout: Buffer.from(`${JSON.stringify({ id: ACTOR_URI })}\n${marker}\t200\tapplication/activity+json\thttps://other.example/alice`)
+      };
+    };
+    await expect(assertPublicActorReady(ACTOR_URI, {
+      transport: 'curl', execFileImpl, attempts: 1
+    })).rejects.toThrow(/changed authority or URL/u);
+  });
+
+  test('curl parser rejects malformed status evidence', async () => {
+    await expect(fetchPublicActorWithCurl(ACTOR_URI, {
+      execFileImpl: async () => ({ stdout: Buffer.from('{}') })
+    })).rejects.toThrow(/missing its status marker/u);
   });
 
   test('keeps the normal proof unpadded by default', () => {

@@ -1,6 +1,8 @@
 'use strict';
 
 const crypto = require('crypto');
+const { execFile: execFileCallback } = require('child_process');
+const { promisify } = require('util');
 const { ServiceBroker } = require('moleculer');
 const {
   awaitActorBootstrap,
@@ -15,6 +17,7 @@ const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const MAX_PROOF_SUMMARY_BYTES = 64 * 1024;
 const MAX_PUBLIC_ACTOR_BYTES = 1024 * 1024;
 const REMOTE_DELIVERY_PLANNED_EVENT = 'activitypub.outbox.remote-delivery.handoff-queued';
+const execFile = promisify(execFileCallback);
 
 function normalizeEntityId(value) {
   if (typeof value === 'string' && value.length > 0) return value;
@@ -65,11 +68,48 @@ async function readBoundedResponse(response, maximumBytes) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+async function fetchPublicActorWithCurl(actorUri, options = {}) {
+  const execFileImpl = options.execFileImpl || execFile;
+  const marker = `activitypods-public-actor-${crypto.randomBytes(16).toString('hex')}`;
+  const { stdout } = await execFileImpl('curl', [
+    '--silent',
+    '--show-error',
+    '--proto', '=https',
+    '--max-redirs', '0',
+    '--connect-timeout', '5',
+    '--max-time', '10',
+    '--max-filesize', String(MAX_PUBLIC_ACTOR_BYTES),
+    '--header', 'Accept: application/activity+json',
+    '--write-out', `\n${marker}\t%{http_code}\t%{content_type}\t%{url_effective}`,
+    actorUri
+  ], {
+    encoding: 'buffer',
+    maxBuffer: MAX_PUBLIC_ACTOR_BYTES + 4096,
+    timeout: 12_000
+  });
+  const output = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
+  const separator = Buffer.from(`\n${marker}\t`);
+  const markerIndex = output.lastIndexOf(separator);
+  if (markerIndex < 0) throw new Error('curl public actor response was missing its status marker');
+  const body = output.subarray(0, markerIndex);
+  if (body.length > MAX_PUBLIC_ACTOR_BYTES) throw new Error('public actor response exceeded the byte limit');
+  const metadata = output.subarray(markerIndex + separator.length).toString('utf8').split('\t');
+  if (metadata.length !== 3) throw new Error('curl public actor response had malformed status metadata');
+  return {
+    status: Number(metadata[0]),
+    contentType: metadata[1],
+    effectiveUrl: metadata[2],
+    body: body.toString('utf8')
+  };
+}
+
 async function assertPublicActorReady(actorUri, options = {}) {
+  const transport = options.transport || 'node';
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const delay = options.delay || (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)));
   const attempts = positiveInteger(options.attempts, 10, 'public actor readiness attempts');
-  if (typeof fetchImpl !== 'function') throw new Error('public actor readiness requires fetch');
+  if (!['node', 'curl'].includes(transport)) throw new Error(`unsupported public actor readiness transport ${transport}`);
+  if (transport === 'node' && typeof fetchImpl !== 'function') throw new Error('public actor readiness requires fetch');
 
   const parsed = new URL(actorUri);
   if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash) {
@@ -79,17 +119,28 @@ async function assertPublicActorReady(actorUri, options = {}) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const response = await fetchImpl(actorUri, {
-        method: 'GET',
-        headers: { accept: 'application/activity+json' },
-        redirect: 'error',
-        signal: AbortSignal.timeout(10_000)
-      });
-      const contentType = response.headers.get('content-type') || '';
-      if (response.status !== 200 || !/^(application\/(?:activity\+json|ld\+json))(?:\s*;|$)/iu.test(contentType)) {
-        throw new Error(`public actor returned status ${response.status} with an invalid content type`);
+      let status;
+      let contentType;
+      let body;
+      if (transport === 'curl') {
+        const response = await fetchPublicActorWithCurl(actorUri, options);
+        ({ status, contentType, body } = response);
+        if (response.effectiveUrl !== actorUri) throw new Error('public actor readiness changed authority or URL');
+      } else {
+        const response = await fetchImpl(actorUri, {
+          method: 'GET',
+          headers: { accept: 'application/activity+json' },
+          redirect: 'error',
+          signal: AbortSignal.timeout(10_000)
+        });
+        status = response.status;
+        contentType = response.headers.get('content-type') || '';
+        body = await readBoundedResponse(response, MAX_PUBLIC_ACTOR_BYTES);
       }
-      const document = JSON.parse(await readBoundedResponse(response, MAX_PUBLIC_ACTOR_BYTES));
+      if (status !== 200 || !/^(application\/(?:activity\+json|ld\+json))(?:\s*;|$)/iu.test(contentType)) {
+        throw new Error(`public actor returned status ${status} with an invalid content type`);
+      }
+      const document = JSON.parse(body);
       if (normalizeEntityId(document) !== actorUri) throw new Error('public actor identifier did not match its authority');
       return;
     } catch (error) {
@@ -231,7 +282,9 @@ async function run({ remoteActorUri, mode, runId }) {
     senderRef.value = sender.webId;
 
     if (process.env.AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY === 'true') {
-      await assertPublicActorReady(sender.webId);
+      await assertPublicActorReady(sender.webId, {
+        transport: process.env.AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT || 'node'
+      });
     }
 
     if (mode === 'external') latch.arm();
@@ -324,6 +377,7 @@ if (require.main === module) {
 module.exports = {
   boundedNonNegativeInteger,
   assertPublicActorReady,
+  fetchPublicActorWithCurl,
   createProofSummary,
   createRunnerBroker,
   extractExternalDeliveryTarget,
