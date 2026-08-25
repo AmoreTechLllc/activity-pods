@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { Readable } = require('stream');
 const {
   API_MARKER,
   MARKER,
@@ -81,6 +82,40 @@ describe('SemApps ActivityPub inbox actor identifier compatibility patch', () =>
         httpSignatureActorUri: 'https://remote.example/bob'
       }) }
     );
+  });
+
+  test('parses parameterized ActivityPub JSON without changing exact signed headers', async () => {
+    jest.resetModules();
+    const api = require(apiPath);
+    const route = api.methods.getBoxesRoute.call({ settings: { podProvider: true } }, '/:username');
+    const middleware = route.aliases['POST /inbox'].filter(item => typeof item === 'function');
+    const body = JSON.stringify({
+      '@context': 'https://www.w3.org/ns/activitystreams',
+      id: 'https://remote.example/accepts/1',
+      type: 'Accept',
+      actor: 'https://remote.example/bob'
+    });
+    const req = Readable.from([Buffer.from(body)]);
+    req.method = 'POST';
+    req.originalUrl = '/alice/inbox';
+    req.parsedUrl = '/alice/inbox';
+    req.query = {};
+    req.headers = {
+      'content-type': 'application/ld+json; profile="https://www.w3.org/ns/activitystreams"'
+    };
+    req.$ctx = { meta: {} };
+    req.$params = {};
+    const run = fn => new Promise((resolve, reject) => {
+      Promise.resolve(fn(req, {}, error => error ? reject(error) : resolve())).catch(reject);
+    });
+    for (const fn of middleware.slice(0, 7)) await run(fn);
+
+    expect(req.$ctx.meta.originalHeaders['content-type']).toBe(
+      'application/ld+json; profile="https://www.w3.org/ns/activitystreams"'
+    );
+    expect(req.$ctx.meta.headers['content-type']).toBe('application/ld+json');
+    expect(req.$ctx.meta.rawBody).toBe(body);
+    expect(req.$params.actor).toBe('https://remote.example/bob');
   });
 
   test('binds actor authorization to the authenticated principal before awaited broker calls', async () => {

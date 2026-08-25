@@ -20,9 +20,11 @@ const SINGLETON_UNSUPPORTED_PATCHED_HASH = '8d40d956a047174c4a15b2103a90a18afaad
 const RAW_ACTOR_UNSUPPORTED_PATCHED_HASH = '62742f613905853192ed8bf16268392b159dfa7d4b60aebc27d28921d89d9a17';
 const CHILD_META_UNSUPPORTED_PATCHED_HASH = 'bcb616f782453ebea7ee5955185495b8b863bbdfd7a3316a9ec78d47b5aa66b6';
 const PATCHED_HASH = 'a8bdca4d3534b4f842f828552eef4d2761f60e2684f0a098f77ebb3037a3d4dc';
-const API_MARKER = 'activitypods-activitypub-inbox-raw-actor-meta-v1';
+const API_MARKER = 'activitypods-activitypub-inbox-raw-actor-meta-v2';
+const PREVIOUS_API_MARKER = 'activitypods-activitypub-inbox-raw-actor-meta-v1';
 const PRISTINE_API_HASH = 'cd259b9ace2bf4ad822197d5cfcbc063f287076bc7fcf0ecdaaef6c4853952d6';
-const PATCHED_API_HASH = '190950cf538b69a684c77be7fd5634d93829e460a708ec809098ed659e978ff1';
+const PREVIOUS_PATCHED_API_HASH = '190950cf538b69a684c77be7fd5634d93829e460a708ec809098ed659e978ff1';
+const PATCHED_API_HASH = '73c65a93391b0eb6b0a98de21143957db72ab546a104aa9b23ef455f893690bb';
 
 function sha256(source) {
   return createHash('sha256').update(source).digest('hex');
@@ -306,10 +308,50 @@ function rawActivityActorId(rawBody) {
   return { source: patched, changed: true };
 }
 
+function addActivityPubContentTypeProfileSupport(source) {
+  let upgraded = replaceOnce(source, PREVIOUS_API_MARKER, API_MARKER, 'previous API marker');
+  upgraded = replaceOnce(
+    upgraded,
+    `} // ${API_MARKER}`,
+    `} // ${API_MARKER}
+
+function normalizeActivityPubContentType(req, res, next) {
+  const contentType = req.$ctx.meta.headers?.['content-type'];
+  if (typeof contentType === 'string') {
+    const mediaType = contentType.split(';', 1)[0].trim().toLowerCase();
+    if (mediaType === 'application/activity+json' || mediaType === 'application/ld+json') {
+      // originalHeaders retains the exact signed value captured by parseHeader.
+      req.$ctx.meta.headers['content-type'] = mediaType;
+    }
+  }
+  next();
+}`,
+    'ActivityPub Content-Type profile normalizer'
+  );
+  upgraded = replaceOnce(
+    upgraded,
+    `        parseUrl,
+        parseHeader,
+        negotiateContentType,`,
+    `        parseUrl,
+        parseHeader,
+        normalizeActivityPubContentType,
+        negotiateContentType,`,
+    'ActivityPub Content-Type profile middleware registration'
+  );
+  return upgraded;
+}
+
 function patchApi(source) {
   if (source.includes(API_MARKER)) {
     requireHash(source, PATCHED_API_HASH, 'patched ActivityPub API source');
     return { source, changed: false };
+  }
+  if (source.includes(PREVIOUS_API_MARKER)) {
+    requireHash(source, PREVIOUS_PATCHED_API_HASH, 'previous patched ActivityPub API source');
+    const upgraded = addActivityPubContentTypeProfileSupport(source);
+    requireHash(upgraded, PATCHED_API_HASH, 'patched ActivityPub API source');
+    return { source: upgraded, changed: true };
   }
   requireHash(source, PRISTINE_API_HASH, 'pristine ActivityPub API source');
   let patched = replaceOnce(
@@ -331,7 +373,7 @@ function signedRawActivityActorId(rawBody) {
   } catch {
     return null;
   }
-} // ${API_MARKER}`,
+} // ${PREVIOUS_API_MARKER}`,
     'API signed raw actor helper'
   );
   patched = replaceOnce(
@@ -349,8 +391,9 @@ function signedRawActivityActorId(rawBody) {
       });`,
     'API inbox raw actor metadata propagation'
   );
-  requireHash(patched, PATCHED_API_HASH, 'patched ActivityPub API source');
-  return { source: patched, changed: true };
+  const upgraded = addActivityPubContentTypeProfileSupport(patched);
+  requireHash(upgraded, PATCHED_API_HASH, 'patched ActivityPub API source');
+  return { source: upgraded, changed: true };
 }
 
 function applyPatch(root = path.dirname(require.resolve('@semapps/activitypub/package.json'))) {
@@ -371,6 +414,7 @@ module.exports = {
   MARKER,
   CHILD_META_UNSUPPORTED_MARKER,
   API_MARKER,
+  PREVIOUS_API_MARKER,
   RAW_ACTOR_UNSUPPORTED_MARKER,
   SINGLETON_UNSUPPORTED_MARKER,
   PREVIOUS_MARKER,
@@ -379,6 +423,7 @@ module.exports = {
   PRISTINE_HASH,
   PRISTINE_API_HASH,
   PATCHED_API_HASH,
+  PREVIOUS_PATCHED_API_HASH,
   CHILD_META_UNSUPPORTED_PATCHED_HASH,
   RAW_ACTOR_UNSUPPORTED_PATCHED_HASH,
   SINGLETON_UNSUPPORTED_PATCHED_HASH,
