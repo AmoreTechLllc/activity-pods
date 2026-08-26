@@ -283,7 +283,8 @@ async function run({ remoteActorUri, mode, runId }) {
 
     if (process.env.AP_FEDERATION_REQUIRE_PUBLIC_ACTOR_READY === 'true') {
       await assertPublicActorReady(sender.webId, {
-        transport: process.env.AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT || 'node'
+        transport: process.env.AP_FEDERATION_PUBLIC_ACTOR_FETCH_TRANSPORT || 'node',
+        attempts: process.env.AP_FEDERATION_PUBLIC_ACTOR_READY_ATTEMPTS
       });
     }
 
