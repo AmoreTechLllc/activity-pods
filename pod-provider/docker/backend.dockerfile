@@ -29,6 +29,7 @@ ADD backend/scripts/patch-semapps-ontologies-distributed-cache.js /app/backend/s
 ADD backend/scripts/patch-semapps-jsonld-distributed-locality.js /app/backend/scripts/patch-semapps-jsonld-distributed-locality.js
 ADD backend/scripts/patch-semapps-ldp-distributed-semantic-locality.js /app/backend/scripts/patch-semapps-ldp-distributed-semantic-locality.js
 ADD backend/scripts/patch-semapps-ldp-same-document-fragments.js /app/backend/scripts/patch-semapps-ldp-same-document-fragments.js
+ADD backend/scripts/patch-semapps-middlewares-activitypub-accept.js /app/backend/scripts/patch-semapps-middlewares-activitypub-accept.js
 RUN yarn install && yarn cache clean
 
 ADD backend /app/backend
